@@ -3,12 +3,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 import concurrent.futures
+import contextvars
 import functools
 from typing import Any
 
 
 class ConversationLimitException(Exception):
     pass
+
+
+def cancel_pending[T](task: asyncio.Task[T] | None) -> asyncio.Task[T] | None:
+    if task is None or task.done():
+        return None
+    task.cancel()
+    return task
 
 
 def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -21,8 +29,10 @@ def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
     """
     try:
         asyncio.get_running_loop()
+        # The coroutine keeps the caller's context, as it would on its loop.
+        context = contextvars.copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, coro)
+            future = executor.submit(context.run, asyncio.run, coro)
             return future.result()
     except RuntimeError:
         return asyncio.run(coro)

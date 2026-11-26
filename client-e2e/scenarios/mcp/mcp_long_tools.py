@@ -1,0 +1,27 @@
+"""Long tool descriptions stay on the tool's row, cut with an ellipsis instead of wrapping."""
+
+from __future__ import annotations
+
+from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
+from e2e.app_server.scenario import Timeline, take_snapshot
+
+_TOOLS = [
+    tool(
+        f"tool_{index:02d}",
+        "Add review comment to the requester's latest pending pull request review, "
+        "with a very long description that must not wrap at the box edge",
+        enabled=index % 3 != 0,
+    )
+    for index in range(30)
+]
+
+handshake = mcp_handshake([
+    server("filesystem", tools=[tool("read_file", "Read a file")]),
+    connector("github_app", tools=_TOOLS),
+])
+
+_DOWN = "\x1b[B"
+
+timeline: Timeline = ["/mcp github_app\r", _DOWN * 13, "d", take_snapshot()]
+
+screen_excludes = ("must not wrap",)

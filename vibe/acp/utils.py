@@ -16,8 +16,15 @@ from acp.schema import (
     ToolCallStart,
 )
 
-from vibe.app_server.config import THINKING_LEVELS, ConfigView, ProxySettingsView
-from vibe.app_server.models import AgentSummary, AgentType, RequiredPermission
+from vibe.app_server.config import ConfigView, ProxySettingsView
+from vibe.app_server.models import (
+    AgentSummary,
+    AgentType,
+    ApprovalPolicySummary,
+    PathGrantScope,
+    RequiredPermission,
+)
+from vibe.utils.tool_presentation import path_scope_label
 
 
 class ToolOption(StrEnum):
@@ -25,6 +32,10 @@ class ToolOption(StrEnum):
     ALLOW_ALWAYS = "allow_always"
     ALLOW_ALWAYS_PERMANENT = "allow_always_permanent"
     REJECT_ONCE = "reject_once"
+    ALLOW_SESSION_EXACT = "allow_session_exact"
+    ALLOW_SESSION_DIRECTORY_RECURSIVE = "allow_session_directory_recursive"
+    ALLOW_PERMANENT_EXACT = "allow_permanent_exact"
+    ALLOW_PERMANENT_DIRECTORY_RECURSIVE = "allow_permanent_directory_recursive"
 
 
 _KIND_ALLOW_ONCE: PermissionOptionKind = "allow_once"
@@ -34,16 +45,60 @@ _KIND_REJECT_ONCE: PermissionOptionKind = "reject_once"
 
 def build_permission_options(
     required_permissions: list[RequiredPermission],
+    path_scope_choices: list[PathGrantScope] | None = None,
 ) -> list[PermissionOption]:
     # The webview parses these snake_case keys (invocation_pattern,
     # session_pattern); RequiredPermission has a camel alias generator, so
     # dumping by_alias would emit camelCase and blank the displayed patterns.
     permissions_meta = [
-        permission.model_dump(mode="json") for permission in required_permissions
+        permission.model_dump(mode="json", exclude_none=True)
+        for permission in required_permissions
     ]
     session_meta = (
         {"required_permissions": permissions_meta} if permissions_meta else None
     )
+    if path_scope_choices:
+        session_ids = {
+            PathGrantScope.EXACT: ToolOption.ALLOW_SESSION_EXACT,
+            PathGrantScope.DIRECTORY_RECURSIVE: ToolOption.ALLOW_SESSION_DIRECTORY_RECURSIVE,
+        }
+        permanent_ids = {
+            PathGrantScope.EXACT: ToolOption.ALLOW_PERMANENT_EXACT,
+            PathGrantScope.DIRECTORY_RECURSIVE: ToolOption.ALLOW_PERMANENT_DIRECTORY_RECURSIVE,
+        }
+        return [
+            PermissionOption(
+                option_id=ToolOption.ALLOW_ONCE,
+                name="Allow once",
+                kind=_KIND_ALLOW_ONCE,
+            ),
+            *[
+                PermissionOption(
+                    option_id=session_ids[scope],
+                    name=(
+                        f"Allow {path_scope_label(required_permissions, scope, for_session=True)} "
+                        "for this session"
+                    ),
+                    kind=_KIND_ALLOW_ALWAYS,
+                    field_meta=session_meta,
+                )
+                for scope in path_scope_choices
+            ],
+            *[
+                PermissionOption(
+                    option_id=permanent_ids[scope],
+                    name=(
+                        f"Always allow {path_scope_label(required_permissions, scope, for_session=False)}"
+                    ),
+                    kind=_KIND_ALLOW_ALWAYS,
+                    field_meta=session_meta,
+                )
+                for scope in path_scope_choices
+            ],
+            PermissionOption(
+                option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
+            ),
+        ]
     return [
         PermissionOption(
             option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
@@ -71,24 +126,24 @@ def is_jetbrains_client(client_info: Implementation | None) -> bool:
 
 
 def build_mode_state(
-    agents: list[AgentSummary], active: AgentSummary
+    policies: list[ApprovalPolicySummary], active: ApprovalPolicySummary
 ) -> tuple[SessionModeState, SessionConfigOptionSelect]:
-    primary = [agent for agent in agents if agent.agent_type is AgentType.AGENT]
-    # The current mode must stay in the advertised list even when the rollout
+    """The approval policies as ACP session modes."""
+    # The current policy must stay in the advertised list even when the rollout
     # gate hides it, so the client can label it and switch away.
-    if all(agent.name != active.name for agent in primary):
-        primary = [*primary, active]
+    if all(policy.name != active.name for policy in policies):
+        policies = [*policies, active]
     modes = [
         SessionMode(
-            id=agent.name, name=agent.display_name, description=agent.description
+            id=policy.name, name=policy.display_name, description=policy.description
         )
-        for agent in primary
+        for policy in policies
     ]
     options = [
         SessionConfigSelectOption(
-            value=agent.name, name=agent.display_name, description=agent.description
+            value=policy.name, name=policy.display_name, description=policy.description
         )
-        for agent in primary
+        for policy in policies
     ]
     return (
         SessionModeState(current_mode_id=active.name, available_modes=modes),
@@ -100,6 +155,29 @@ def build_mode_state(
             type="select",
             options=options,
         ),
+    )
+
+
+def build_agent_config(
+    agents: list[AgentSummary], active: AgentSummary
+) -> SessionConfigOptionSelect | None:
+    """The agent picker, left out while the default agent is the only one."""
+    primary = [agent for agent in agents if agent.agent_type is AgentType.AGENT]
+    if all(agent.name != active.name for agent in primary):
+        primary = [*primary, active]
+    if len(primary) <= 1:
+        return None
+    return SessionConfigOptionSelect(
+        id="agent",
+        name="Agent",
+        current_value=active.name,
+        type="select",
+        options=[
+            SessionConfigSelectOption(
+                value=agent.name, name=agent.display_name, description=agent.description
+            )
+            for agent in primary
+        ],
     )
 
 
@@ -115,6 +193,8 @@ def build_model_config(config: ConfigView) -> SessionConfigOptionSelect:
                 value=model.alias, name=model.display_name, description=model.name
             )
             for model in config.models
+            # ACP has no upsell, and a turn on a locked model is refused.
+            if model.requires is None
         ],
     )
 
@@ -128,7 +208,7 @@ def make_thinking_response(config: ConfigView) -> SessionConfigOptionSelect:
         type="select",
         options=[
             SessionConfigSelectOption(value=level, name=level.capitalize())
-            for level in THINKING_LEVELS
+            for level in config.active_model.thinking_levels
         ],
     )
 

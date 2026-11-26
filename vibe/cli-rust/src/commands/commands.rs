@@ -1,0 +1,288 @@
+//! Built-in slash commands, hardcoded in the client.
+
+use crate::app::App;
+use crate::completion_manager::CompletionEntry;
+use crate::skill::Skill;
+
+/// A config feature a command needs before help and completion offer it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    PrMonitoring,
+    StorageUsage,
+}
+
+impl Feature {
+    pub fn is_on(self, app: &App) -> bool {
+        match self {
+            Self::PrMonitoring => app.artifacts_modal.enabled,
+            Self::StorageUsage => app.storage.enabled,
+        }
+    }
+}
+
+/// One `/`-prefixed alias group; `side_channel` marks the
+/// commands that still run while the session is busy. The first alias is canonical.
+pub struct Command {
+    pub aliases: &'static [&'static str],
+    pub description: &'static str,
+    pub side_channel: bool,
+    /// A side-channel command that still waits for a compaction or agent install.
+    pub waits_for_jobs: bool,
+    /// Replaces the session or its history, dropping the server's queue with it.
+    pub drops_queue: bool,
+    /// Inline hint shown after `/command ` until an argument is typed; empty when none.
+    pub arguments: &'static str,
+    /// Hidden from help and completion while this feature is off; typing it still runs it.
+    pub requires: Option<Feature>,
+    /// While `requires` is off, typing it sends a plain prompt instead.
+    pub prompt_when_off: bool,
+}
+
+const fn cmd(
+    aliases: &'static [&'static str],
+    description: &'static str,
+    side_channel: bool,
+) -> Command {
+    Command {
+        aliases,
+        description,
+        side_channel,
+        waits_for_jobs: false,
+        drops_queue: false,
+        arguments: "",
+        requires: None,
+        prompt_when_off: false,
+    }
+}
+
+impl Command {
+    const fn args(self, arguments: &'static str) -> Self {
+        Self { arguments, ..self }
+    }
+
+    const fn after_jobs(self) -> Self {
+        Self {
+            waits_for_jobs: true,
+            ..self
+        }
+    }
+
+    const fn drops_queue(self) -> Self {
+        Self {
+            drops_queue: true,
+            ..self
+        }
+    }
+
+    const fn requires(self, feature: Feature) -> Self {
+        Self {
+            requires: Some(feature),
+            ..self
+        }
+    }
+
+    /// `requires`, and typed while off it is a plain prompt.
+    const fn flagged(self, feature: Feature) -> Self {
+        Self {
+            requires: Some(feature),
+            prompt_when_off: true,
+            ..self
+        }
+    }
+}
+
+const COMMANDS: &[Command] = &[
+    cmd(&["/help"], "Show help message", true),
+    cmd(&["/config"], "Edit config settings", false),
+    cmd(&["/model"], "Select active model", false),
+    cmd(&["/thinking"], "Select thinking level", false).args("[level]"),
+    cmd(&["/reload"], "Reload configuration, agent instructions, and skills from disk", false),
+    cmd(&["/clear", "/new"], "Start a new conversation. Optionally pass a prompt to seed it.", false).args("[prompt]").drops_queue(),
+    cmd(&["/copy"], "Copy the last agent message to the clipboard", true),
+    cmd(&["/raw"], "Show agent messages as raw Markdown for easier copying", true).args("[on|off]"),
+    cmd(&["/log"], "Show path to current interaction log file", true),
+    cmd(&["/log-level"], "Change the log level for this session or persist it to config.toml.", true).after_jobs(),
+    cmd(&["/debug"], "Toggle debug console", true),
+    cmd(
+        &["/stress"],
+        "Repeat renderable history entries to load-test rendering. Optional arg: entries (default 100).",
+        true,
+    )
+    .args("[entries]"),
+    cmd(&["/compact"], "Compact conversation history by summarizing. Optionally pass instructions to guide the summary", false).args("[instructions]").drops_queue(),
+    cmd(&["/exit", ":q", ":quit", "exit", "quit"], "Exit the application", true),
+    cmd(&["/status"], "Display agent statistics and model and provider details", true),
+    cmd(&["/context"], "Show what fills the context window (system prompt, skills, conversation)", true),
+    cmd(&["/whoami"], "Display the Mistral signed-in user, workspace, and plan", true),
+    cmd(&["/proxy-setup"], "Configure proxy and SSL certificate settings", true).after_jobs(),
+    cmd(&["/cd"], "Move this session to another folder, keeping the conversation", false).args("[path]"),
+    cmd(&["/resume", "/continue"], "Open the Sessions page to resume a saved session", false).drops_queue(),
+    cmd(&["/sessions"], "Open the Sessions page: every session, grouped by project (or press ← on an empty prompt)", true),
+    cmd(&["/storage"], "See how much disk Vibe uses and archive or delete old sessions", true)
+        .flagged(Feature::StorageUsage),
+    cmd(&["/rename"], "Rename the current session", true).args("<title>"),
+    cmd(&["/goal"], "Set or view a goal Vibe keeps working on", true).args("[<objective>|edit|pause|resume|clear]"),
+    cmd(&["/pr"], "Show this session's pull requests and merge requests", true)
+        .requires(Feature::PrMonitoring),
+    cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false)
+        .args("[name] | add <url> | status | login <alias> | logout <alias>"),
+    cmd(&["/plugins"], "Display the plugins this session is running", false),
+    cmd(&["/reload-plugins"], "Re-pin this session's plugins and report what changed", false),
+    cmd(&["/skills"], "Browse and manage skills", true).after_jobs(),
+    cmd(&["/trusted-folders"], "Browse trusted and untrusted folders, toggle or forget one", true),
+    cmd(&["/voice"], "Configure voice settings", true).after_jobs(),
+    cmd(&["/agent"], "List agents, or switch the session to one", false).args("[name]"),
+    cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
+    cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
+    cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false).drops_queue(),
+    cmd(&["/branch", "/fork"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", true).after_jobs(),
+    cmd(&["/retry"], "Retry a failed or interrupted response; optionally pass additional instructions", false).args("[instructions]"),
+    cmd(&["/loop"], "Manage scheduled loops, or schedule one: /loop [schedule] [prompt]", true).args("[schedule] [prompt]"),
+    cmd(&["/data-retention"], "Show data retention information", true),
+    cmd(&["/release-notes", "/whatsnew"], "Browse the release notes of every Vibe version", true),
+    cmd(&["/theme"], "Select theme", true).after_jobs(),
+];
+
+const PASTE_IMAGE: Command = cmd(
+    &["/paste-image"],
+    "Paste an image from the OS clipboard into the prompt",
+    true,
+);
+
+/// `/paste-image` is macOS-only; the e2e replay hides it so goldens match on every OS.
+fn available() -> impl Iterator<Item = &'static Command> {
+    let paste_image = crate::paste_image::is_supported() && !crate::utils::is_replaying();
+    COMMANDS.iter().chain(paste_image.then_some(&PASTE_IMAGE))
+}
+
+/// The commands help and completion offer: those whose feature is on.
+fn offered(on: impl Fn(Feature) -> bool) -> impl Iterator<Item = &'static Command> {
+    available().filter(move |command| command.requires.is_none_or(&on))
+}
+
+/// Removed slash commands and the version that removed them.
+const REMOVED: &[(&str, &str)] = &[("/teleport", "3.1.1"), ("/remote-project", "3.1.1")];
+
+/// The removed slash command `input` starts with, and the version that removed it.
+pub fn removed(input: &str) -> Option<(&'static str, &'static str)> {
+    let word = input.split_whitespace().next()?;
+    REMOVED
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(word))
+        .copied()
+}
+
+/// Whether typing this canonical alias runs it: false for a `flagged` command whose feature is off.
+pub fn runs(label: &str, on: impl Fn(Feature) -> bool) -> bool {
+    available()
+        .find(|command| command.aliases[0] == label)
+        .and_then(|command| command.requires.filter(|_| command.prompt_when_off))
+        .is_none_or(on)
+}
+
+/// Whether a built-in command with this canonical alias is registered.
+pub fn has_command(label: &str) -> bool {
+    available().any(|command| command.aliases[0] == label)
+}
+
+/// Arguments hint shown in slash mode after `command ` until the first argument character is typed; `prefix` is the input-mode prefix.
+pub fn argument_hint(prefix: Option<char>, body: &str) -> Option<&'static str> {
+    let word = body.strip_suffix(' ').filter(|_| prefix == Some('/'))?;
+    available()
+        .find(|command| {
+            command.aliases.iter().any(|alias| {
+                alias
+                    .strip_prefix('/')
+                    .is_some_and(|alias| alias.eq_ignore_ascii_case(word))
+            })
+        })
+        .map(|command| command.arguments)
+        .filter(|arguments| !arguments.is_empty())
+}
+
+/// Whether the command runs while a turn is generating.
+pub fn is_side_channel(label: &str) -> bool {
+    available().any(|command| command.aliases.contains(&label) && command.side_channel)
+}
+
+/// Whether a side-channel command still waits for a compaction or agent install.
+pub fn waits_for_jobs(label: &str) -> bool {
+    available().any(|command| command.aliases.contains(&label) && command.waits_for_jobs)
+}
+
+/// Whether the command replaces the session or its history, and the queue with it.
+pub fn drops_queue(label: &str) -> bool {
+    available().any(|command| command.aliases.contains(&label) && command.drops_queue)
+}
+
+/// Resolve the slash-command word, returning the canonical alias.
+pub fn parse(input: &str) -> Option<&'static str> {
+    let mut words = input.split_whitespace();
+    let word = words.next()?;
+    // Bare aliases (e.g. `exit`) match only as the whole input, else a message
+    // starting with one would be swallowed.
+    if !word.starts_with('/') && words.next().is_some() {
+        return None;
+    }
+    if word.eq_ignore_ascii_case("/clean") {
+        return Some("/clear");
+    }
+    available().find_map(|command| {
+        command
+            .aliases
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(word))
+            .then(|| command.aliases[0])
+    })
+}
+
+/// Built-in commands only (no skills), one entry per command group, for `/help`.
+/// Each label joins all aliases in backticks, canonical first.
+pub fn builtin(on: impl Fn(Feature) -> bool) -> Vec<(String, String)> {
+    offered(on)
+        .map(|command| {
+            let labels = command
+                .aliases
+                .iter()
+                .map(|a| format!("`{a}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (labels, command.description.to_owned())
+        })
+        .collect()
+}
+
+/// The full popup entry list, expanding aliases into individual entries,
+/// merging with skills as `/name`, sorted by name then description. A skill
+/// named like a built-in is left out while typing its name runs the built-in.
+pub fn entries(skills: &[Skill], on: impl Fn(Feature) -> bool) -> Vec<CompletionEntry> {
+    let mut out: Vec<CompletionEntry> = offered(&on)
+        .flat_map(|command| {
+            command
+                .aliases
+                .iter()
+                .filter(|a| a.starts_with('/'))
+                .map(|a| CompletionEntry {
+                    label: (*a).to_owned(),
+                    description: command.description.to_owned(),
+                    origin: None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    out.extend(skills.iter().filter_map(|skill| {
+        let label = format!("/{}", skill.name);
+        let shadowed = parse(&label).is_some_and(|command| runs(command, &on));
+        (!shadowed).then(|| CompletionEntry {
+            label,
+            description: skill.description.clone(),
+            origin: Some(skill.origin),
+        })
+    }));
+    out.sort_by(|a, b| {
+        a.label
+            .cmp(&b.label)
+            .then_with(|| a.description.cmp(&b.description))
+    });
+    out
+}

@@ -2,17 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Literal
-from uuid import uuid4
 
 from vibe.app_server._model import ProtocolModel, validate_wire
-from vibe.app_server._streaming import (
-    BoundedEventQueue,
-    finish_event_queue,
-    stream_request,
-)
+from vibe.app_server._streaming import BoundedEventQueue, stream_request
 from vibe.app_server.client_state import ClientSessionState
 from vibe.app_server.connection import AppServerResourceConnection
 from vibe.app_server.models import (
@@ -22,20 +16,15 @@ from vibe.app_server.models import (
     MCPState,
     MCPToolSummary,
     PluginCatalogState,
-    PublicError,
     SkillSummary,
     SkillUpdateView,
     SkillVersionView,
-    TeleportComplete,
-    TeleportEvent,
-    TeleportFailed,
-    VibeCodePickerView,
-    VibeCodeProject,
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ConnectorAuthReadParams,
     ConnectorAuthReadResponse,
+    ConnectorCatalogConnectParams,
     ConnectorCatalogMutationResponse,
     ConnectorCatalogReadParams,
     ConnectorCatalogReadResponse,
@@ -43,7 +32,6 @@ from vibe.app_server.protocol import (
     ConnectorCatalogToggleParams,
     ConnectorRefreshParams,
     ConnectorRefreshResponse,
-    EmptyResponse,
     MCPAddParams,
     MCPAddResponse,
     MCPAuthUrlParams,
@@ -64,40 +52,16 @@ from vibe.app_server.protocol import (
     RuntimeSnapshot,
     SkillsCatalogParams,
     SkillsCatalogResponse,
-    SkillsConvertLocalParams,
-    SkillsConvertResponse,
     SkillsDetailParams,
     SkillsDetailResponse,
     SkillsImportParams,
     SkillsInstalledParams,
     SkillsInstalledResponse,
     SkillsRemoveParams,
-    SkillsSetAliasParams,
-    SkillsSetLatestParams,
-    SkillsSetVersionParams,
     SkillsUpdatesParams,
     SkillsUpdatesResponse,
     SkillsVersionsParams,
     SkillsVersionsResponse,
-    TeleportCancelParams,
-    TeleportCancelResponse,
-    TeleportEventParams,
-    TeleportPushRespondParams,
-    TeleportStartParams,
-    TeleportStartResponse,
-    VibeCodeProjectCancelParams,
-    VibeCodeProjectCreateParams,
-    VibeCodeProjectCreateResponse,
-    VibeCodeProjectRecoverParams,
-    VibeCodeProjectRecoverResponse,
-    VibeCodeProjectSelectParams,
-    VibeCodeProjectSelectResponse,
-    VibeCodeProjectsLoadMoreParams,
-    VibeCodeProjectsLoadMoreResponse,
-    VibeCodeProjectsOpenParams,
-    VibeCodeProjectsOpenResponse,
-    VibeCodeProjectUnlinkParams,
-    VibeCodeProjectUnlinkResponse,
 )
 from vibe.utils.mcp import MCPAddTransport
 
@@ -123,6 +87,7 @@ def _connector_sources(
     return [
         MCPSourceSummary(
             name=source.alias,
+            display_name=source.display_name,
             kind=MCPSourceKind.CONNECTOR,
             transport="connector",
             status=MCPSourceStatus(source.status),
@@ -244,37 +209,6 @@ class SkillsResource:
             ),
         )
 
-    async def set_version(
-        self, name: str, version: int, scope: str = "global"
-    ) -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setVersion",
-            SkillsSetVersionParams(
-                session_id=self._state.session_id,
-                name=name,
-                version=version,
-                scope=scope,
-            ),
-        )
-
-    async def set_latest(self, name: str, scope: str = "global") -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setLatest",
-            SkillsSetLatestParams(
-                session_id=self._state.session_id, name=name, scope=scope
-            ),
-        )
-
-    async def set_alias(
-        self, name: str, alias: str, scope: str = "global"
-    ) -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setAlias",
-            SkillsSetAliasParams(
-                session_id=self._state.session_id, name=name, alias=alias, scope=scope
-            ),
-        )
-
     async def remove(self, name: str, scope: str = "global") -> list[SkillSummary]:
         return await self._mutate(
             "skills/remove",
@@ -282,20 +216,6 @@ class SkillsResource:
                 session_id=self._state.session_id, name=name, scope=scope
             ),
         )
-
-    async def convert_local(self, name: str, scope: str = "global") -> bool:
-        client = await self._connection.connect()
-        response = validate_wire(
-            SkillsConvertResponse,
-            await client.request(
-                "skills/convertLocal",
-                SkillsConvertLocalParams(
-                    session_id=self._state.session_id, name=name, scope=scope
-                ),
-            ),
-        )
-        self._state.apply_runtime(response.runtime)
-        return response.converted
 
 
 class MCPResource:
@@ -333,6 +253,8 @@ class MCPResource:
                 if source.kind is MCPSourceKind.CONNECTOR
             ]
             connector_error = exc.error.message
+            manage_connectors_url = self._state.mcp.manage_connectors_url
+            private_connectors_hidden = self._state.mcp.private_connectors_hidden
         else:
             connectors = _connector_sources(connector_response)
             connector_error = (
@@ -340,6 +262,8 @@ class MCPResource:
                 if connector_response.catalog.disposition in {"memory", "fresh_cache"}
                 else self._state.mcp.connector_error
             )
+            manage_connectors_url = connector_response.manage_url
+            private_connectors_hidden = connector_response.private_connectors_hidden
 
         connector_names = {source.name for source in connectors}
         connector_discovery_errors = {
@@ -361,6 +285,8 @@ class MCPResource:
                 **connector_discovery_errors,
             },
             connector_error=connector_error,
+            manage_connectors_url=manage_connectors_url,
+            private_connectors_hidden=private_connectors_hidden,
         )
         self._state.mcp = state
         return state
@@ -379,13 +305,28 @@ class MCPResource:
         return runtime.mcp
 
     async def refresh_connectors(self) -> MCPState:
+        return await self._mutate_connectors(
+            "connector_catalog/refresh",
+            ConnectorCatalogRefreshParams(session_id=self._state.session_id),
+        )
+
+    async def connect_connector(self, name: str) -> MCPState:
+        return await self._mutate_connectors(
+            "connector_catalog/connect",
+            ConnectorCatalogConnectParams(
+                session_id=self._state.session_id, alias=name
+            ),
+        )
+
+    # An unchanged catalog answers with no runtime, so the state stands.
+    async def _mutate_connectors(
+        self,
+        method: Literal["connector_catalog/refresh", "connector_catalog/connect"],
+        params: ProtocolModel,
+    ) -> MCPState:
         client = await self._connection.connect()
         response = validate_wire(
-            ConnectorCatalogMutationResponse,
-            await client.request(
-                "connector_catalog/refresh",
-                ConnectorCatalogRefreshParams(session_id=self._state.session_id),
-            ),
+            ConnectorCatalogMutationResponse, await client.request(method, params)
         )
         if response.runtime is not None:
             self._state.apply_runtime(response.runtime)
@@ -440,6 +381,7 @@ class MCPResource:
         name: str | None,
         scopes: list[str],
         transport: MCPAddTransport,
+        allow_insecure_http: bool = False,
     ) -> MCPAddResponse:
         client = await self._connection.connect()
         response = validate_wire(
@@ -452,6 +394,7 @@ class MCPResource:
                     name=name,
                     scopes=scopes,
                     transport=transport,
+                    allow_insecure_http=allow_insecure_http,
                 ),
             ),
         )
@@ -471,7 +414,7 @@ class MCPResource:
         self._state.apply_runtime(runtime)
         return runtime.mcp
 
-    async def login(self, name: str) -> AsyncGenerator[MCPAuthUrlParams, None]:
+    async def login(self, name: str) -> AsyncGenerator[MCPAuthUrlParams]:
         if name in self._login_events:
             raise RuntimeError(f"MCP login already in progress: {name}")
         client = await self._connection.connect()
@@ -542,6 +485,9 @@ class PluginCatalogDiff:
     changes: tuple[PluginCatalogChange, ...]
     state: PluginCatalogState
     """The catalogue after the reload, so a re-render costs no third read."""
+    deferred: bool = False
+    """A turn is running: the reload lands when it ends, so nothing moved yet
+    and ``state`` is the catalogue before it."""
 
 
 def _plugin_changes(
@@ -594,226 +540,15 @@ class PluginCatalogResource:
         if before is None:
             return None
         client = await self._connection.connect()
-        validate_wire(
+        reloaded = validate_wire(
             PluginReloadResponse,
             await client.request(
                 "plugin/reload", PluginReloadParams(session_id=self._state.session_id)
             ),
         )
+        if reloaded.deferred:
+            return PluginCatalogDiff(changes=(), state=before, deferred=True)
         after = await self.read()
         if after is None:
             return None
         return PluginCatalogDiff(changes=_plugin_changes(before, after), state=after)
-
-
-class VibeCodeResource:
-    def __init__(
-        self, connection: AppServerResourceConnection, state: ClientSessionState
-    ) -> None:
-        self._connection = connection
-        self._state = state
-        self._picker_id: str | None = None
-        self._events: dict[str, asyncio.Queue[TeleportEvent]] = {}
-
-    async def open_projects(
-        self, *, for_teleport: bool = False, prompt: str | None = None
-    ) -> tuple[VibeCodePickerView, str | None]:
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectsOpenResponse,
-            await client.request(
-                "vibeCode/projects/open",
-                VibeCodeProjectsOpenParams(
-                    session_id=self._state.session_id,
-                    purpose="teleport" if for_teleport else "configure",
-                    prompt=prompt,
-                ),
-            ),
-        )
-        self._picker_id = response.picker_id
-        return response.view, response.resolved_project_id
-
-    async def load_more(self) -> tuple[VibeCodePickerView, str | None]:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectsLoadMoreResponse,
-            await client.request(
-                "vibeCode/projects/loadMore",
-                VibeCodeProjectsLoadMoreParams(
-                    session_id=self._state.session_id, picker_id=picker_id
-                ),
-            ),
-        )
-        return response.view, response.focus_option_id
-
-    async def create(
-        self, *, name: str, default_branch: str
-    ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectCreateResponse,
-            await client.request(
-                "vibeCode/projects/create",
-                VibeCodeProjectCreateParams(
-                    session_id=self._state.session_id,
-                    picker_id=picker_id,
-                    name=name,
-                    default_branch=default_branch,
-                ),
-            ),
-        )
-        return response.view, response.project
-
-    async def select_project(
-        self, project_id: str
-    ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectSelectResponse,
-            await client.request(
-                "vibeCode/projects/select",
-                VibeCodeProjectSelectParams(
-                    session_id=self._state.session_id,
-                    picker_id=picker_id,
-                    project_id=project_id,
-                ),
-            ),
-        )
-        return response.view, response.project
-
-    async def unlink(self) -> VibeCodePickerView:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectUnlinkResponse,
-            await client.request(
-                "vibeCode/projects/unlink",
-                VibeCodeProjectUnlinkParams(
-                    session_id=self._state.session_id, picker_id=picker_id
-                ),
-            ),
-        )
-        return response.view
-
-    async def cancel_picker(self) -> None:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        validate_wire(
-            EmptyResponse,
-            await client.request(
-                "vibeCode/projects/cancel",
-                VibeCodeProjectCancelParams(
-                    session_id=self._state.session_id, picker_id=picker_id
-                ),
-            ),
-        )
-        self._picker_id = None
-
-    async def recover_stale_link(self) -> tuple[VibeCodePickerView, bool]:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectRecoverResponse,
-            await client.request(
-                "vibeCode/projects/recover",
-                VibeCodeProjectRecoverParams(
-                    session_id=self._state.session_id, picker_id=picker_id
-                ),
-            ),
-        )
-        return response.view, response.recovered
-
-    async def teleport(
-        self, prompt: str | None, *, project_id: str
-    ) -> AsyncGenerator[TeleportEvent, None]:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        operation_id = str(uuid4())
-        events = BoundedEventQueue[TeleportEvent]()
-        self._events[operation_id] = events
-        request_sent = False
-        finished = False
-        try:
-            request_sent = True
-            validate_wire(
-                TeleportStartResponse,
-                await client.request(
-                    "vibeCode/teleport/start",
-                    TeleportStartParams(
-                        session_id=self._state.session_id,
-                        picker_id=picker_id,
-                        operation_id=operation_id,
-                        prompt=prompt,
-                        project_id=project_id,
-                    ),
-                ),
-            )
-            while True:
-                event = await events.get()
-                terminal = isinstance(event, TeleportComplete | TeleportFailed)
-                if terminal:
-                    finished = True
-                yield event
-                if terminal:
-                    return
-        finally:
-            self._events.pop(operation_id, None)
-            if request_sent and not finished:
-                with suppress(Exception):
-                    await self._cancel_teleport(operation_id)
-
-    def _require_picker_id(self) -> str:
-        if self._picker_id is None:
-            raise RuntimeError("Vibe Code project picker is not open")
-        return self._picker_id
-
-    def reset(self) -> None:
-        self._picker_id = None
-        for operation_id, events in self._events.items():
-            finish_event_queue(
-                events,
-                TeleportFailed(
-                    operation_id=operation_id,
-                    error=PublicError(
-                        message="Teleport was cancelled because the session changed",
-                        code="session_changed",
-                    ),
-                ),
-            )
-
-    async def _cancel_teleport(self, operation_id: str) -> None:
-        client = await self._connection.connect()
-        validate_wire(
-            TeleportCancelResponse,
-            await client.request(
-                "vibeCode/teleport/cancel",
-                TeleportCancelParams(
-                    session_id=self._state.session_id, operation_id=operation_id
-                ),
-            ),
-        )
-
-    async def respond_to_push(self, operation_id: str, *, approved: bool) -> None:
-        client = await self._connection.connect()
-        validate_wire(
-            EmptyResponse,
-            await client.request(
-                "vibeCode/teleport/push/respond",
-                TeleportPushRespondParams(
-                    session_id=self._state.session_id,
-                    operation_id=operation_id,
-                    approved=approved,
-                ),
-            ),
-        )
-
-    async def consume_notification(self, notification: Notification) -> bool:
-        if notification.method != "vibeCode/teleport/event":
-            return False
-        params = validate_wire(TeleportEventParams, notification.params)
-        if events := self._events.get(params.event.operation_id):
-            await events.put(params.event)
-        return True

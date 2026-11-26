@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,20 +17,33 @@ from vibe.app_server.models import (
     SessionLogSummary,
 )
 from vibe.app_server.protocol import (
+    AgentInstallParams,
+    AgentsListResponse,
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
+    ArtifactsListParams,
+    ArtifactsListResponse,
+    ArtifactsMarkViewedParams,
+    ArtifactsSyncParams,
+    ArtifactUpdatedParams,
     CallbackResultError,
     CallbackResultParams,
     CallbackResultResponse,
     ConfigMutationResponse,
+    ConfigReadParams,
+    ConfigReadResponse,
     ConfigReloadParams,
     ConfigWriteParams,
     ConfigWriteResponse,
     ContextInjectParams,
     ContextInjectResponse,
     EmptyResponse,
+    ModelConfigWriteParams,
     ProtocolErrorCode,
     RuntimeMutationResponse,
     RuntimeUpdatedParams,
+    SessionArchiveParams,
+    SessionArchiveResponse,
     SessionCompactParams,
     SessionCompactResponse,
     SessionContinueParams,
@@ -38,10 +51,21 @@ from vibe.app_server.protocol import (
     SessionForkParams,
     SessionForkResponse,
     SessionHistoryClearParams,
+    SessionHistoryListParams,
+    SessionHistoryListResponse,
+    SessionLeaseHolder,
     SessionListParams,
     SessionListResponse,
+    SessionMarkAsSeenParams,
+    SessionMarkAsUnseenParams,
+    SessionMoveParams,
+    SessionMoveResponse,
+    SessionPinParams,
+    SessionPinResponse,
     SessionReadParams,
     SessionReadResponse,
+    SessionRelocateParams,
+    SessionRelocateResponse,
     SessionResumeParams,
     SessionRewindParams,
     SessionRewindResponse,
@@ -53,6 +77,14 @@ from vibe.app_server.protocol import (
     TurnEnqueueResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnQueueEditAbandonParams,
+    TurnQueueEditAbandonResponse,
+    TurnQueueEditCancelParams,
+    TurnQueueEditCancelResponse,
+    TurnQueueEditSaveParams,
+    TurnQueueEditSaveResponse,
+    TurnQueueEditStartParams,
+    TurnQueueEditStartResponse,
     TurnQueueReadParams,
     TurnQueueReadResponse,
     TurnQueueRemoveParams,
@@ -63,15 +95,20 @@ from vibe.app_server.protocol import (
     TurnQueueResumeResponse,
     TurnQueueSteerParams,
     TurnQueueSteerResponse,
+    TurnRetryParams,
+    TurnRetryResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
     TurnSteerResponse,
 )
+from vibe.core.trusted_folders import TrustedFoldersManager
 
 type SessionBackendKind = Literal["legacy", "unified"]
 type MCPAuthorizationReason = Literal["missing", "expired", "rejected", "invalid"]
-type ConnectorAuthAction = Literal["none", "oauth", "credentials_setup", "unknown"]
+type ConnectorAuthAction = Literal[
+    "none", "oauth", "credentials_setup", "no_auth_connect", "unknown"
+]
 type MCPCatalogOwner = Literal["config", "plugin"]
 
 
@@ -148,6 +185,8 @@ class ResolvedConnectorTool:
     raw_name: str
     description: str | None
     input_schema: Mapping[str, JsonValue]
+    # The MCP App (`ui://` resource) that renders this tool's result.
+    ui_resource_uri: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +237,14 @@ class SessionConnectorSourceState:
     raw_id: str
     alias: str
     display_name: str
-    status: Literal["disabled", "connected", "needs_auth", "needs_setup", "unavailable"]
+    status: Literal[
+        "disabled",
+        "connected",
+        "needs_auth",
+        "needs_setup",
+        "needs_connect",
+        "unavailable",
+    ]
     tools: tuple[SessionConnectorToolDescriptor, ...] = ()
     error: str | None = None
 
@@ -222,9 +268,19 @@ class ConnectorAuthRequest:
     reason: Literal["needs_auth", "needs_setup", "gateway_rejected"]
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectorConnectRequest:
+    session_id: str
+    raw_connector_id: str
+    alias: str
+    display_name: str
+
+
 @runtime_checkable
 class SessionConnectorControl(Protocol):
     async def read_connectors(self) -> SessionConnectorState: ...
+
+    def accepted_connector_catalog(self) -> ResolvedConnectorCatalog | None: ...
 
     async def reconfigure_connectors(
         self,
@@ -243,6 +299,10 @@ class SessionConnectorControl(Protocol):
     ) -> SessionConnectorState: ...
 
     async def request_connector_auth(self, *, alias: str) -> ConnectorAuthRequest: ...
+
+    async def request_connector_connect(
+        self, *, alias: str
+    ) -> ConnectorConnectRequest: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,12 +361,26 @@ class SessionBackendError(Exception):
         *,
         after_response: Callable[[], None] | None = None,
         on_response_abandoned: Callable[[], None] | None = None,
+        expected: bool = False,
     ) -> None:
         self.code = code
         self.data = data
         self.after_response = after_response
         self.on_response_abandoned = on_response_abandoned
+        # A refusal or run outcome the client explains to the user, never a Vibe bug.
+        self.expected = expected
         super().__init__(message)
+
+    @classmethod
+    def configuration(cls, problem: object) -> SessionBackendError:
+        """A config the user can fix, which clients show as a configuration
+        error rather than as a failed request. ``problem`` says what to fix.
+        """
+        return cls(
+            ProtocolErrorCode.INVALID_PARAMS,
+            f"Cannot load the Vibe config. {problem}",
+            {"kind": "configuration"},
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +390,9 @@ class SessionBackendEvent:
     params: ProtocolModel | None = None
     session_id: str | None = None
     event_id: int | None = None
+    # An event of one of the root's child sessions, numbered on that child's own
+    # sequence. Only clients that declared `childSessionEvents` receive it.
+    child_session: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,6 +428,8 @@ class SessionHistoryClearResult:
     state: PublicSessionState
     session_log: SessionLogSummary
     after_response: Callable[[], None] | None = None
+    # Run if the server fails to adopt ``backend``: the source session goes on.
+    on_failure: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,12 +465,28 @@ class SessionBackend(Protocol):
         self, params: AgentSwitchParams
     ) -> SessionBackendResult[RuntimeMutationResponse]: ...
 
+    async def switch_approval_policy(
+        self, params: ApprovalPolicySwitchParams
+    ) -> SessionBackendResult[RuntimeMutationResponse]: ...
+
+    async def install_agent(
+        self, params: AgentInstallParams
+    ) -> SessionBackendResult[AgentsListResponse]: ...
+
+    async def uninstall_agent(
+        self, params: AgentInstallParams
+    ) -> SessionBackendResult[AgentsListResponse]: ...
+
     async def update_settings(
         self, params: SessionSettingsUpdateParams
     ) -> SessionBackendResult[EmptyResponse]: ...
 
     async def write_config(
         self, params: ConfigWriteParams
+    ) -> SessionBackendResult[ConfigWriteResponse]: ...
+
+    async def write_model_config(
+        self, params: ModelConfigWriteParams
     ) -> SessionBackendResult[ConfigWriteResponse]: ...
 
     async def reload_config(
@@ -426,6 +521,10 @@ class SessionBackend(Protocol):
         self, params: TurnSteerParams
     ) -> SessionBackendResult[TurnSteerResponse]: ...
 
+    async def retry_turn(
+        self, params: TurnRetryParams
+    ) -> SessionBackendResult[TurnRetryResponse]: ...
+
     async def interrupt_turn(
         self, params: TurnInterruptParams
     ) -> SessionBackendResult[TurnInterruptResponse]: ...
@@ -446,12 +545,43 @@ class SessionBackend(Protocol):
 
 
 @runtime_checkable
+class SessionBackendQueuedTurnEditing(Protocol):
+    """Optional hold-and-replace lifecycle for editing an accepted queued Turn."""
+
+    async def start_queued_turn_edit(
+        self, params: TurnQueueEditStartParams
+    ) -> SessionBackendResult[TurnQueueEditStartResponse]: ...
+
+    async def save_queued_turn_edit(
+        self, params: TurnQueueEditSaveParams
+    ) -> SessionBackendResult[TurnQueueEditSaveResponse]: ...
+
+    async def cancel_queued_turn_edit(
+        self, params: TurnQueueEditCancelParams
+    ) -> SessionBackendResult[TurnQueueEditCancelResponse]: ...
+
+    async def abandon_queued_turn_edit(
+        self, params: TurnQueueEditAbandonParams
+    ) -> SessionBackendResult[TurnQueueEditAbandonResponse]: ...
+
+    async def abandon_active_queued_turn_edit(self) -> None: ...
+
+
+@runtime_checkable
 class SessionBackendQueuedTurnSteering(Protocol):
     """Optional atomic transfer of an accepted queued Turn into the active Turn."""
 
     async def steer_queued_turn(
         self, params: TurnQueueSteerParams
     ) -> SessionBackendResult[TurnQueueSteerResponse]: ...
+
+
+@runtime_checkable
+class SessionBackendWorktreeTrust(Protocol):
+    """The selected live session policy for Git-only worktree cleanup."""
+
+    @property
+    def worktree_trust_store(self) -> TrustedFoldersManager: ...
 
 
 @runtime_checkable
@@ -497,11 +627,33 @@ class SessionBackendRuntimeView(Protocol):
 class SessionBackendOpenCallbacks(Protocol):
     """Optional access to open callbacks owned by a backend."""
 
-    def open_callbacks(self) -> list[PublicCallbackEntry]: ...
+    async def read_open_callbacks(self) -> list[PublicCallbackEntry]: ...
 
     async def reject_callback_delivery(
         self, session_id: str, callback_id: str, error: CallbackResultError
     ) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendTurnWork(Protocol):
+    """Optional report that a turn runs, waits, is queued or still settles."""
+
+    @property
+    def has_turn_work(self) -> bool: ...
+
+
+@runtime_checkable
+class SessionBackendRunningTurnAnnouncement(Protocol):
+    """Optional re-announcement of a running turn to a newly attached client."""
+
+    async def announce_running_turn(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendHeldEvents(Protocol):
+    """Optional barrier on the events a backend held for its next subscriber."""
+
+    async def wait_for_held_events(self) -> None: ...
 
 
 @runtime_checkable
@@ -537,10 +689,105 @@ class SessionBackendHost(Protocol):
 
 
 @runtime_checkable
+class SessionBackendHostPin(Protocol):
+    """Optional selected-backend ownership of durable session pinning."""
+
+    async def pin(self, params: SessionPinParams) -> SessionPinResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostStorageRoot(Protocol):
+    async def storage_root(self) -> Path:
+        """The store sessions are saved in, as a session read finds it."""
+        ...
+
+
+@runtime_checkable
+class SessionBackendHostLeaseWatch(Protocol):
+    def watch_leases(self) -> AsyncGenerator[dict[str, SessionLeaseHolder | None]]: ...
+
+
+@runtime_checkable
+class SessionBackendHostSeenState(Protocol):
+    """Optional selected-backend ownership of durable session seen state."""
+
+    async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse: ...
+
+    async def mark_as_unseen(
+        self, params: SessionMarkAsUnseenParams
+    ) -> EmptyResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostConfigRead(Protocol):
+    """Optional selected-backend ownership of a stored session's configuration."""
+
+    async def read_config(self, params: ConfigReadParams) -> ConfigReadResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostHistoryList(Protocol):
+    """Optional selected-backend paging of a stored session's history."""
+
+    async def list_history(
+        self, params: SessionHistoryListParams
+    ) -> SessionHistoryListResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostArtifacts(Protocol):
+    """Optional selected-backend ownership of a session's artifacts.
+
+    Lets a connection with no session attached (Desktop's catalogue channel)
+    answer ``artifacts/`` from the session's persisted state, the way stored
+    session reads do.
+    """
+
+    async def list_artifacts(
+        self, params: ArtifactsListParams
+    ) -> ArtifactsListResponse: ...
+
+    async def mark_artifacts_viewed(
+        self, params: ArtifactsMarkViewedParams
+    ) -> EmptyResponse: ...
+
+    async def sync_artifacts(self, params: ArtifactsSyncParams) -> EmptyResponse: ...
+
+    def subscribe_artifacts(
+        self, notify: Callable[[str, ArtifactUpdatedParams], None]
+    ) -> Callable[[], None]: ...
+
+
+@runtime_checkable
+class SessionBackendHostArchive(Protocol):
+    """Optional selected-backend ownership of durable session archiving."""
+
+    async def archive(self, params: SessionArchiveParams) -> SessionArchiveResponse: ...
+
+
+@runtime_checkable
 class SessionBackendHostDelete(Protocol):
     """Optional selected-backend ownership of durable session deletion."""
 
     async def delete(self, params: SessionDeleteParams) -> EmptyResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostRelocate(Protocol):
+    """Optional selected-backend ownership of attached or stored relocation."""
+
+    async def relocate(
+        self, params: SessionRelocateParams, attached: SessionBackend | None
+    ) -> SessionRelocateResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostMove(Protocol):
+    """Optional selected-backend ownership of moving a session to another project."""
+
+    async def move(
+        self, params: SessionMoveParams, attached: SessionBackend | None
+    ) -> SessionMoveResponse: ...
 
 
 @runtime_checkable
@@ -563,6 +810,15 @@ class SessionBackendRewindForkHost(Protocol):
     async def rewind_fork(
         self, source: SessionBackend, params: SessionRewindParams
     ) -> SessionRewindForkResult: ...
+
+
+@runtime_checkable
+class SessionBackendHostClientLoss(Protocol):
+    """Optional report that the client went away without a ``session/stop``."""
+
+    def mark_client_disconnected(self) -> None: ...
+
+    def mark_client_reconnected(self) -> None: ...
 
 
 @runtime_checkable

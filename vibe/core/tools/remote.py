@@ -6,7 +6,6 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from vibe.core.tools.ui import ToolUIData
 
 
 class AuthStatus(StrEnum):
@@ -28,10 +27,7 @@ class MCPToolResult(BaseModel):
     structured: dict[str, Any] | None = None
 
 
-class MCPTool(
-    BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState],
-    ToolUIData[_OpenArgs, MCPToolResult],
-):
+class MCPTool(BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]):
     _server_name: ClassVar[str] = ""
     _remote_name: ClassVar[str] = ""
     _is_connector: ClassVar[bool] = False

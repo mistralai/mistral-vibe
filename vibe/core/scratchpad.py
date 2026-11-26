@@ -47,14 +47,6 @@ def is_scratchpad_path(path_str: str, *, scratchpad_dir: Path | None) -> bool:
         return False
 
 
-def is_scratchpad_display_path(path_str: str) -> bool:
-    try:
-        path = Path(path_str).expanduser().resolve()
-    except (ValueError, OSError):
-        return False
-    return any(part.startswith(SCRATCHPAD_PREFIX) for part in path.parts)
-
-
 def _is_subpath(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)

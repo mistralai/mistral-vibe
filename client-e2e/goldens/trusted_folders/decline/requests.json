@@ -1,0 +1,10 @@
+[
+ {
+  "method": "workspace/trust/decision",
+  "params": {
+   "cwd": "/home/user/untrusted",
+   "decision": "decline",
+   "sessionId": null
+  }
+ }
+]

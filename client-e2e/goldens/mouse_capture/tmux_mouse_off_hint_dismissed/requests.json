@@ -1,0 +1,22 @@
+[
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.tmux_mouse_hint.rendered",
+   "properties": {},
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.tmux_mouse_hint.disabled",
+   "properties": {
+    "entry_point": "rail_h"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

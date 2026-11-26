@@ -1,0 +1,21 @@
+[
+ {
+  "method": "mcp_catalog/toggle",
+  "params": {
+   "disabled": true,
+   "name": "filesystem",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "source": "server",
+   "toolName": null
+  }
+ },
+ {
+  "method": "connector_catalog/toggle",
+  "params": {
+   "alias": "gmail",
+   "disabled": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "toolName": null
+  }
+ }
+]

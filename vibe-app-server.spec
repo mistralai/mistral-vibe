@@ -4,36 +4,44 @@
 # Output: dist/vibe-app-server-dir/vibe-app-server  (+  dist/vibe-app-server-dir/_internal/)
 # UPX stays off: it rewrites the Mach-O header and invalidates the macOS code signature.
 
-from importlib.util import find_spec
+import os
+import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files
+
+# The Unified Runtime and its native extension are required contents of this
+# executable; the build fails when they cannot be collected.
+sys.path.insert(0, os.path.join(SPECPATH, "pyinstaller"))
+from unified_runtime import collect_unified_runtime
 
 _core_builtins_datas, core_builtins_binaries, core_builtins_hidden_imports = (
     collect_all("vibe.core.tools.builtins")
 )
-has_harness = find_spec("mistralai_vibe_local_harness") is not None
-if not has_harness:
-    _harness_datas, harness_binaries, harness_hidden_imports = [], [], []
-else:
-    _harness_datas, harness_binaries, harness_hidden_imports = collect_all(
-        "mistralai_vibe_local_harness"
-    )
+_harness_datas, harness_binaries, harness_hidden_imports = collect_unified_runtime()
 
-# rich lazily loads Unicode width tables via importlib.import_module() at runtime,
-# which PyInstaller's static analysis cannot discover.
+# httpx2 imports socksio lazily inside its SOCKS transport: a bundle without
+# it fails session/start behind a SOCKS proxy (VIBE-5416), so the build fails
+# when it cannot be collected, and the smoke test exercises the proxy path.
 hidden_imports = [
     "truststore",
-] + collect_submodules("rich._unicode_data")
-if has_harness:
-    hidden_imports.append("vibe.app_server._unified_harness_backend_adapter")
-for item in core_builtins_hidden_imports:
-    if isinstance(item, str):
-        hidden_imports.append(item)
-for item in harness_hidden_imports:
+    "socksio",
+    "vibe.app_server._unified_harness_backend_adapter",
+]
+for item in core_builtins_hidden_imports + harness_hidden_imports:
     if isinstance(item, str):
         hidden_imports.append(item)
 
 binaries = core_builtins_binaries + harness_binaries
+
+# gh and glab release binaries staged by scripts/ci/download-cli-binaries.sh.
+# They land in _internal/vibe/bin/, where the session artifact detector looks
+# them up (approach C). Absent in dev builds: detection falls back to PATH.
+_cli_bin_dir = os.path.join(SPECPATH, ".native-build", "cli-binaries")
+for _cli_name in ("gh", "glab"):
+    _cli_exe = f"{_cli_name}.exe" if sys.platform == "win32" else _cli_name
+    _cli_src = os.path.join(_cli_bin_dir, _cli_exe)
+    if os.path.isfile(_cli_src):
+        binaries.append((_cli_src, "vibe/bin"))
 
 datas = collect_data_files(
     "vibe",
@@ -43,11 +51,8 @@ datas = collect_data_files(
     ],
 )
 datas += [("vibe/core/tools/builtins/*.py", "vibe/core/tools/builtins")]
-# Built-in skills are read from source files at runtime, so collect_data_files
-# must be allowed to include .py files here. By default it filters .py/.pyc out.
-datas += collect_data_files(
-    "vibe.core.skills.builtins", includes=["*.py"], include_py_files=True
-)
+# Built-in plugins are discovered on disk next to vibe.plugins.builtins.
+datas += collect_data_files("vibe.plugins.builtins")
 datas += _harness_datas
 
 a = Analysis(

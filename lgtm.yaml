@@ -1,0 +1,9 @@
+version: 2
+# Vibe Code owns the vibe/ tree for notification only: no review gates it. Its
+# CODEOWNERS file stays owned and gated by the CLI team so it can be edited
+# (and ownership restored) later.
+defaults:
+  owners: '@mistralai/engineering-vibe-code'
+  blocking: false
+rules:
+  - '.github/CODEOWNERS': {owners: '@mistralai/eng-vibe-code-cli', blocking: true}

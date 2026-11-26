@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, runtime_checkable
 
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
+from vibe.app_server._mcp_add import persist_mcp_add
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._session_backend_port import (
@@ -50,13 +51,10 @@ from vibe.app_server.protocol import (
 from vibe.core.auth.mcp_oauth import MCPOAuthError
 from vibe.core.config import MCPHttp, MCPOAuth, MCPServer, MCPStdio, MCPStreamableHttp
 from vibe.core.config.mcp_servers import (
+    MCP_DISABLED_MESSAGE,
     MCPServerAddError,
     MCPServerRemoveError,
-    PersistedMCPServerResult,
     RemovedMCPServerResult,
-    persist_oauth_mcp_server,
-    persist_remote_mcp_server,
-    persist_stdio_mcp_server,
     remove_mcp_server,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -190,68 +188,46 @@ class MCPCatalogService:
         )
         return root.runtime_updated_params()
 
-    async def prepare_config_reload(
-        self, root: SessionBackend
-    ) -> _CatalogReloadPlan | None:
+    async def converge(
+        self, root: SessionBackend, previous: ResolvedMCPCatalog
+    ) -> RuntimeSnapshot | None:
+        """Bring the session's MCP servers to what its config resolves now.
+
+        ``previous`` is what this session last ran: ``/clear`` and rewind share
+        one config between sessions, so only the session knows what it moves
+        from. Servers the config now removes or disables are suspended first.
+        On failure the session goes back to ``previous`` and the error is
+        raised for the caller to retry at the next boundary.
+        """
         if not isinstance(root, SessionMCPCatalogBinding) or not isinstance(
             root, SessionMCPControl
         ):
             return None
         context = _CatalogContext.for_session(root)
-        previous = await self._resolved(
-            context.orchestrator, owner=context.catalog_owner
-        )
-        await context.orchestrator.reload()
         candidate = await self._resolved(
             context.orchestrator, owner=context.catalog_owner
-        )
-        restrictive = await self._suspend_restrictive_changes(
-            context, previous, candidate
-        )
-        return _CatalogReloadPlan(previous=previous, restrictive_names=restrictive)
-
-    async def finish_config_reload(
-        self, root: SessionBackend, plan: _CatalogReloadPlan | None
-    ) -> RuntimeSnapshot | None:
-        if (
-            plan is None
-            or not isinstance(root, SessionMCPCatalogBinding)
-            or not isinstance(root, SessionMCPControl)
-        ):
-            return None
-        context = _CatalogContext.for_session(root)
-        candidate = await self._resolved(
-            context.orchestrator, owner=context.catalog_owner
-        )
-        restrictive = await self._suspend_restrictive_changes(
-            context, plan.previous, candidate
         )
         affected = frozenset(server.name for server in candidate.servers) | frozenset(
-            server.name for server in plan.previous.servers
+            server.name for server in previous.servers
         )
+        suspended: set[str] = set()
         try:
+            await self._suspend_restrictive_changes(
+                context, previous, candidate, suspended=suspended
+            )
             state = await context.require_control().reconfigure_mcp(
                 candidate, force_remote_discovery=False
             )
         except Exception:
+            restrictive = frozenset(suspended)
             self._record_convergence_error(context, affected | restrictive)
+            if restrictive:
+                await self._restore_after_restrictive_failure(
+                    context, previous, affected_names=restrictive
+                )
             raise
         self._clear_convergence_errors(context, affected)
         return self._runtime(context, self._project(context, state))
-
-    async def fail_config_reload(
-        self, root: SessionBackend, plan: _CatalogReloadPlan | None
-    ) -> None:
-        if plan is None or not plan.restrictive_names:
-            return
-        if not isinstance(root, SessionMCPCatalogBinding) or not isinstance(
-            root, SessionMCPControl
-        ):
-            return
-        context = _CatalogContext.for_session(root)
-        await self._restore_after_restrictive_failure(
-            context, plan.previous, affected_names=plan.restrictive_names
-        )
 
     async def dispatch(
         self,
@@ -285,7 +261,10 @@ class MCPCatalogService:
                 )
                 if state is None:
                     raise RuntimeError("A targeted MCP refresh did not converge")
-                if context.plugin_mcp is not None:
+                if (
+                    context.plugin_mcp is not None
+                    and context.orchestrator.config.enable_mcp
+                ):
                     await context.plugin_mcp.refresh_all()
                 response = MCPCatalogMutationResponse(
                     runtime=self._runtime(context, self._project(context, state))
@@ -315,13 +294,7 @@ class MCPCatalogService:
     ) -> tuple[MCPAddResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
         try:
-            result = await persist_oauth_mcp_server(
-                context.orchestrator,
-                url=params.url,
-                name=params.name,
-                scopes=params.scopes,
-                transport=params.transport,
-            )
+            result = await persist_mcp_add(context.orchestrator, params)
         except ConcurrencyConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
         except MCPServerAddError as exc:
@@ -339,7 +312,7 @@ class MCPCatalogService:
         return (
             MCPAddResponse(
                 name=result.server.name,
-                url=result.server.url,
+                url=None if isinstance(result.server, MCPStdio) else result.server.url,
                 created=result.created,
                 runtime=runtime,
             ),
@@ -411,6 +384,10 @@ class MCPCatalogService:
                 name=params.name, tool_name=None, reason="remove"
             )
         try:
+            if context.control is None:
+                await self._authentication.bind_catalog(
+                    context.orchestrator.config.mcp_servers, owner=context.catalog_owner
+                )
             result = await _remove_server_with_credentials(
                 self._authentication,
                 context.orchestrator,
@@ -454,6 +431,8 @@ class MCPCatalogService:
         self, params: MCPLoginParams, root: SessionBackend | None, notify: Notify
     ) -> tuple[MCPCatalogMutationResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
+        if not context.orchestrator.config.enable_mcp:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, MCP_DISABLED_MESSAGE)
         plugin_owned = context.plugin_entry(params.name) is not None
         # The catalog this session means by the name, handed to the service so
         # it does not decide ownership again over every session's bindings.
@@ -497,6 +476,8 @@ class MCPCatalogService:
         self, params: MCPLogoutParams, root: SessionBackend | None
     ) -> tuple[MCPCatalogMutationResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
+        if not context.orchestrator.config.enable_mcp:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, MCP_DISABLED_MESSAGE)
         plugin_owned = context.plugin_entry(params.name) is not None
         owner = context.plugin_mcp if plugin_owned else context.catalog_owner
         if not plugin_owned:
@@ -614,11 +595,17 @@ class MCPCatalogService:
         context: _CatalogContext,
         previous: ResolvedMCPCatalog,
         candidate: ResolvedMCPCatalog,
+        *,
+        suspended: set[str] | None = None,
     ) -> frozenset[str]:
+        """Suspend what ``candidate`` removes or narrows; ``suspended`` collects
+        the names as they go, so a caller can restore them if one fails.
+        """
+        if suspended is None:
+            suspended = set()
         if context.control is None:
             return frozenset()
         next_by_name = {server.name: server for server in candidate.servers}
-        suspended: set[str] = set()
         for old in previous.servers:
             new = next_by_name.get(old.name)
             if (
@@ -668,6 +655,8 @@ class MCPCatalogService:
         servers = orchestrator.config.mcp_servers
         await self._authentication.bind_catalog(servers, owner=owner)
         resolved = tuple(self._resolve_server(server) for server in servers)
+        if not orchestrator.config.enable_mcp:
+            resolved = tuple(replace(server, disabled=True) for server in resolved)
         payload = [
             {
                 "name": server.name,
@@ -778,7 +767,9 @@ class MCPCatalogService:
             state,
             convergence_errors=convergence_errors,
             plugin_sources=(
-                () if context.plugin_mcp is None else context.plugin_mcp.sources()
+                ()
+                if context.plugin_mcp is None or not orchestrator.config.enable_mcp
+                else context.plugin_mcp.sources()
             ),
         )
         return MCPState(
@@ -835,46 +826,6 @@ class SessionlessMCPCatalog:
             notify=self._notify,
         )
         return result.response
-
-    async def add_server(
-        self,
-        server: MCPHttp | MCPStreamableHttp | MCPStdio,
-        *,
-        login: bool,
-        on_oauth_url: Callable[[str], Awaitable[None]],
-        on_persisted: Callable[[PersistedMCPServerResult[Any]], None] | None = None,
-    ) -> PersistedMCPServerResult[Any]:
-        orchestrator = await self._service.sessionless_orchestrator()
-        result = (
-            await persist_stdio_mcp_server(orchestrator, server)
-            if isinstance(server, MCPStdio)
-            else await persist_remote_mcp_server(orchestrator, server)
-        )
-        await self._service.authentication.bind_catalog(orchestrator.config.mcp_servers)
-        if on_persisted is not None:
-            on_persisted(result)
-        if login and _is_oauth(result.server):
-            await self._service.authentication.login(
-                result.server.name, on_url=on_oauth_url
-            )
-        return result
-
-    async def remove_server(self, name: str) -> RemovedMCPServerResult:
-        orchestrator = await self._service.sessionless_orchestrator()
-        server = _server_named(orchestrator, name)
-        await self._service.authentication.bind_catalog(orchestrator.config.mcp_servers)
-        try:
-            return await _remove_server_with_credentials(
-                self._service.authentication,
-                orchestrator,
-                configured=server,
-                name=name,
-                owner=None,
-            )
-        except (MCPOAuthError, ValueError) as exc:
-            raise MCPServerRemoveError(
-                f"Failed to remove OAuth credentials for `{name}`: {exc}"
-            ) from exc
 
 
 def create_sessionless_mcp_catalog(
@@ -948,12 +899,6 @@ class _CatalogContext:
         return self.plugin_mcp.entry(name)
 
 
-@dataclass(frozen=True, slots=True)
-class _CatalogReloadPlan:
-    previous: ResolvedMCPCatalog
-    restrictive_names: frozenset[str]
-
-
 def _project_source(
     server: MCPServer, state: SessionMCPSourceState | None, *, convergence_failed: bool
 ) -> MCPSourceSummary:
@@ -1009,8 +954,9 @@ def project_mcp_sources(
     for plugin_source in plugin_sources:
         if plugin_source.name in configured:
             continue
-        sources.append(_project_plugin_source(plugin_source))
-        if plugin_source.error is not None:
+        state_for_plugin = states.get(plugin_source.name)
+        sources.append(_project_plugin_source(plugin_source, state_for_plugin))
+        if state_for_plugin is None and plugin_source.error is not None:
             errors.setdefault(plugin_source.name, plugin_source.error)
     return sources, errors
 
@@ -1022,9 +968,21 @@ _PLUGIN_SOURCE_STATUS: dict[PluginMCPStatus, MCPSourceStatus] = {
 }
 
 
-def _project_plugin_source(source: PluginMCPSource) -> MCPSourceSummary:
+def _project_plugin_source(
+    source: PluginMCPSource, state: SessionMCPSourceState | None
+) -> MCPSourceSummary:
     # Deliberately the same kind as a configured server: only ``plugin_name``
     # says where it came from. Nothing here is toggleable.
+    if state is not None:
+        # The session's own connection, the one its tool calls go through.
+        return MCPSourceSummary(
+            name=source.name,
+            kind=MCPSourceKind.SERVER,
+            transport=source.transport,
+            status=MCPSourceStatus(state.status),
+            tools=_project_tools(state),
+            plugin_name=source.plugin_name,
+        )
     return MCPSourceSummary(
         name=source.name,
         kind=MCPSourceKind.SERVER,
@@ -1093,6 +1051,8 @@ async def _remove_server_with_credentials(
     name: str,
     owner: object | None,
 ) -> RemovedMCPServerResult:
+    if not orchestrator.config.enable_mcp:
+        raise MCPServerRemoveError(MCP_DISABLED_MESSAGE)
     if not _is_oauth(configured):
         return await remove_mcp_server(orchestrator, name)
     async with authentication.credential_removal(configured.name, owner=owner):

@@ -1,0 +1,22 @@
+"""The Sessions page marks a session held by another process and refuses to open it."""
+
+from __future__ import annotations
+
+from e2e.app_server.scenario import Timeline
+
+_SAVED = "00000000-0000-4000-8000-000000000003"
+
+handshake = {
+    "session/lease/subscribe": {
+        "held": [{"sessionId": _SAVED, "leaseHolder": {"processId": 4242}}]
+    }
+}
+request_methods = {"session/lease/subscribe"}
+
+# Enter submits /resume (the page highlights the current session), Up
+# selects the locked row, and its Enter is refused locally with the busy
+# inline notice, without a session/resume request.
+timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]
+
+screen_contains = ("open in another Vibe process",)
+screen_excludes = ("⚠",)

@@ -1,0 +1,71 @@
+//! The headless `agentConfig` sent with `session/start`.
+
+use anyhow::{Context, Result};
+use serde_json::Value;
+
+use crate::cli::HeadlessOptions;
+use crate::server::{AgentConfig, SessionStartParams};
+use crate::utils::paths::resolve_add_dirs;
+
+/// Headless `agentConfig`: Runtime is the sole token and price budget authority.
+pub fn agent_config(
+    options: &HeadlessOptions,
+    cwd: Option<String>,
+    terminal_key: Option<String>,
+) -> Result<AgentConfig> {
+    Ok(AgentConfig {
+        cwd,
+        agent: options.agent.clone(),
+        approval_policy: options.approval_policy.clone(),
+        auto_approve: options.auto_approve,
+        enabled_tools: options.enabled_tools.clone(),
+        disabled_tools: build_disabled_tools(&options.disabled_tools),
+        max_turns: options.max_turns,
+        max_price: options.max_price,
+        max_session_tokens: options.max_tokens,
+        system_prompt: options.system_prompt.clone(),
+        headless: true,
+        trust_workspace: options.trust,
+        workspace_roots: resolve_add_dirs(&options.add_dir)?,
+        worktree: options.worktree.clone(),
+        // An agent-socket run works in a sandbox, not in this terminal's folder.
+        terminal_key: terminal_key.filter(|_| options.agent_socket.is_none()),
+    })
+}
+
+/// `session/start` params; `--model` and `--thinking` apply to this session only.
+pub fn start_params(
+    options: &HeadlessOptions,
+    agent_config: AgentConfig,
+    history_limit: u32,
+) -> SessionStartParams {
+    SessionStartParams {
+        agent_config,
+        history_limit,
+        model: options.model.clone(),
+        reasoning_effort: options.thinking.clone(),
+        session_only: options.model.is_some() || options.thinking.is_some(),
+        kind: None,
+    }
+}
+
+pub fn build_disabled_tools(explicit: &[String]) -> Vec<String> {
+    let mut tools = explicit.to_vec();
+    // A headless run has no one to answer a question, and no scheduler for
+    // `cron` to hand its jobs to.
+    for &t in &["ask_user_question", "cron"] {
+        if !tools.iter().any(|x| x == t) {
+            tools.push(t.to_owned());
+        }
+    }
+    tools
+}
+
+/// A missing or non-string id must fail the run, not default to "" and hang.
+pub fn turn_id_from(response: &Value) -> Result<String> {
+    response
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .context("turn/start response missing turn id")
+        .map(str::to_owned)
+}

@@ -8,58 +8,30 @@ import pytest
 
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 import vibe.app_server._project_links as project_links
 from vibe.app_server._project_links import (
-    ProjectLinksAuthError,
     ProjectLinksController,
-    ProjectLinksInternalError,
+    ProjectLinksError,
     ProjectLinksInvalidRequest,
     _read_inspected_directory,
 )
 from vibe.app_server.protocol import SERVER_METHODS, ProtocolErrorCode
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.git.errors import GitError
-from vibe.core.teleport.errors import ServiceTeleportError
-from vibe.core.vibe_code_project import VibeCodeProjectApiError
-from vibe.core.vibe_code_project.picker_service import (
-    VibeCodeProjectCreateResult,
-    VibeCodeProjectLoadMoreResult,
-    VibeCodeProjectPickerInitialData,
-    VibeCodeProjectPickerState,
-    VibeCodeProjectResolverError,
-)
-from vibe.core.vibe_code_project.selection import (
-    LocalProjectLink,
-    ProjectPickerContext,
-    ProjectRepository,
-    RemoteProjectLink,
-    VibeCodeProject,
-)
+from vibe.core.git.errors import GitError, GitRepositoryError
+from vibe.core.vibe_code_project.selection import LocalProjectLink, RemoteProjectLink
 
 REPO_URL = "https://github.com/acme/widgets.git"
 REPO_ROOT = Path("/tmp/widgets")
 
 
-class FutureServiceTeleportError(ServiceTeleportError):
+class FutureGitRepositoryError(GitRepositoryError):
     pass
 
 
 @pytest.fixture
 def controller() -> ProjectLinksController:
     return ProjectLinksController()
-
-
-def _git_info(**overrides: Any) -> SimpleNamespace:
-    base = {
-        "repo_root": REPO_ROOT,
-        "remote_url": REPO_URL,
-        "repo": "widgets",
-        "branch": "main",
-        "default_branch": "main",
-        "has_commits": True,
-    }
-    base.update(overrides)
-    return SimpleNamespace(**base)
 
 
 def _inspected_directory(
@@ -79,24 +51,6 @@ def _inspected_directory(
     )
 
 
-def _project() -> VibeCodeProject:
-    return VibeCodeProject(
-        project_id="proj-1",
-        name="Widgets",
-        repositories=(ProjectRepository(repo_url=REPO_URL, default_branch="main"),),
-        is_read_only=False,
-    )
-
-
-def _context(saved_link: RemoteProjectLink | None = None) -> ProjectPickerContext:
-    return ProjectPickerContext(
-        repo_root=REPO_ROOT,
-        repo_url=REPO_URL,
-        repo_name="widgets",
-        saved_link=saved_link,
-    )
-
-
 def test_git_inspection_failure_is_not_a_plain_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -104,81 +58,8 @@ def test_git_inspection_failure_is_not_a_plain_directory(
         raise GitError("git unavailable")
 
     monkeypatch.setattr(project_links, "GitRepo", SimpleNamespace(open=_raise))
-    with pytest.raises(ServiceTeleportError, match="git unavailable"):
+    with pytest.raises(GitRepositoryError, match="git unavailable"):
         _read_inspected_directory(tmp_path)
-
-
-class _FakeService:
-    """Minimal stand-in for VibeCodeProjectPickerService."""
-
-    def __init__(
-        self,
-        *,
-        initial: VibeCodeProjectPickerInitialData | None = None,
-        load_initial_error: Exception | None = None,
-        link_error: Exception | None = None,
-    ) -> None:
-        self._initial = initial
-        self._load_initial_error = load_initial_error
-        self._link_error = link_error
-        self.cleared = False
-
-    async def find_linkable_project(
-        self, *, project_id: str, repo_url: str
-    ) -> VibeCodeProject:
-        if self._link_error is not None:
-            raise self._link_error
-        return _project()
-
-    async def load_initial(self, git_info: Any) -> VibeCodeProjectPickerInitialData:
-        if self._load_initial_error is not None:
-            raise self._load_initial_error
-        assert self._initial is not None
-        return self._initial
-
-    async def load_more(self, state: Any) -> VibeCodeProjectLoadMoreResult:
-        return VibeCodeProjectLoadMoreResult(
-            state=VibeCodeProjectPickerState(
-                projects=[_project()], next_cursor=None, repo_url=REPO_URL
-            ),
-            focus_project_id="proj-1",
-        )
-
-    async def create_project(self, **kwargs: Any) -> VibeCodeProjectCreateResult:
-        return VibeCodeProjectCreateResult(
-            state=VibeCodeProjectPickerState(
-                projects=[], next_cursor=None, repo_url=REPO_URL
-            ),
-            project=_project(),
-        )
-
-    def save_project_link(
-        self, *, context: Any, project_id: str, project_name: str
-    ) -> RemoteProjectLink:
-        return RemoteProjectLink(
-            repo_root=REPO_ROOT,
-            repo_url=REPO_URL,
-            project_id=project_id,
-            project_name=project_name,
-        )
-
-    def clear_project_link(self, context: Any) -> None:
-        self.cleared = True
-
-
-def _wire_service(
-    controller: ProjectLinksController,
-    monkeypatch: pytest.MonkeyPatch,
-    service: _FakeService,
-) -> None:
-    async def _resolve(root_path: str) -> tuple[Path, SimpleNamespace]:
-        return REPO_ROOT, _git_info()
-
-    async def _build(repo_root: Path) -> _FakeService:
-        return service
-
-    monkeypatch.setattr(controller, "_resolve_root", _resolve)
-    monkeypatch.setattr(controller, "_build_service", _build)
 
 
 class TestList:
@@ -287,11 +168,86 @@ class TestResolveRoot:
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def _raise(root_path: Path) -> SimpleNamespace:
-            raise ServiceTeleportError("some other failure")
+            raise GitRepositoryError("some other failure")
 
         monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.resolve_root(str(REPO_ROOT))
         assert result["rejectReason"] == "nested_unresolvable"
+
+    @pytest.mark.asyncio
+    async def test_disk_root_is_not_eligible(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        result = await controller.resolve_root(tmp_path.anchor)
+
+        assert result == {"eligible": False, "rejectReason": "disk_root", "root": None}
+
+
+class TestInspectRootWithoutGit:
+    @pytest.fixture(autouse=True)
+    def _no_git(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(tmp_path / "no-git"))
+
+    @pytest.mark.asyncio
+    async def test_plain_directory_is_eligible(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        directory = tmp_path / "notes"
+        directory.mkdir()
+
+        result = await controller.inspect_root(str(directory))
+
+        assert result["eligible"] is True
+        assert result["rejectReason"] is None
+        assert result["root"] == {
+            "directoryPath": str(directory.resolve()),
+            "directoryName": "notes",
+            "git": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_disk_root_is_not_eligible(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        # Windows users pick `C:\`; projects/create refuses a disk root.
+        result = await controller.inspect_root(tmp_path.anchor)
+
+        assert result["eligible"] is False
+        assert result["rejectReason"] == "disk_root"
+        assert result["root"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("marker_is_file", [False, True])
+    async def test_directory_inside_a_checkout_asks_for_git(
+        self, controller: ProjectLinksController, tmp_path: Path, marker_is_file: bool
+    ) -> None:
+        checkout = tmp_path / "widgets"
+        chosen = checkout / "src"
+        chosen.mkdir(parents=True)
+        if marker_is_file:
+            (checkout / ".git").write_text("gitdir: /elsewhere/.git/worktrees/w\n")
+        else:
+            (checkout / ".git").mkdir()
+
+        result = await controller.inspect_root(str(chosen))
+
+        assert result["eligible"] is False
+        assert result["rejectReason"] == "git_unavailable"
+        assert result["root"] is None
+
+    @pytest.mark.asyncio
+    async def test_saving_a_checkout_is_an_invalid_request(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".git").mkdir()
+
+        with pytest.raises(ProjectLinksInvalidRequest):
+            await controller.save(
+                str(tmp_path),
+                project_id="p1",
+                project_name="widgets",
+                expected_github_repo_url=None,
+            )
 
 
 class TestInspectRoot:
@@ -398,11 +354,11 @@ class TestInspectRoot:
         assert captured == ["store is read-only"]
 
     @pytest.mark.asyncio
-    async def test_service_teleport_subclass_is_nested_unresolvable(
+    async def test_git_repository_error_subclass_is_nested_unresolvable(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def _raise(root_path: Path) -> SimpleNamespace:
-            raise FutureServiceTeleportError("future git metadata failure")
+            raise FutureGitRepositoryError("future git metadata failure")
 
         monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.inspect_root(str(REPO_ROOT))
@@ -415,188 +371,7 @@ class TestInspectRoot:
         }
 
 
-class TestPicker:
-    @pytest.mark.asyncio
-    async def test_load_returns_candidates(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        initial = VibeCodeProjectPickerInitialData(
-            context=_context(),
-            state=VibeCodeProjectPickerState(
-                projects=[_project()], next_cursor=None, repo_url=REPO_URL
-            ),
-        )
-        _wire_service(controller, monkeypatch, _FakeService(initial=initial))
-        result = await controller.picker_load(str(REPO_ROOT))
-        assert result["candidates"]["items"][0]["projectId"] == "proj-1"
-        assert result["staleLinkCleared"] is False
-
-    @pytest.mark.asyncio
-    async def test_load_ranks_current_link_first(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        alpha = VibeCodeProject(
-            project_id="proj-alpha",
-            name="Alpha",
-            repositories=(ProjectRepository(repo_url=REPO_URL),),
-        )
-        zeta = VibeCodeProject(
-            project_id="proj-zeta",
-            name="Zeta",
-            repositories=(ProjectRepository(repo_url=REPO_URL),),
-        )
-        saved_link = RemoteProjectLink(
-            repo_root=REPO_ROOT,
-            repo_url=REPO_URL,
-            project_id="proj-zeta",
-            project_name="Zeta",
-        )
-        initial = VibeCodeProjectPickerInitialData(
-            context=_context(saved_link=saved_link),
-            state=VibeCodeProjectPickerState(
-                projects=[alpha, zeta], next_cursor=None, repo_url=REPO_URL
-            ),
-        )
-        _wire_service(controller, monkeypatch, _FakeService(initial=initial))
-        result = await controller.picker_load(str(REPO_ROOT))
-        items = result["candidates"]["items"]
-        assert items[0]["projectId"] == "proj-zeta"
-        assert items[0]["recommended"] is True
-        assert result["savedLink"]["projectId"] == "proj-zeta"
-
-    @pytest.mark.asyncio
-    async def test_load_does_not_recommend_when_saved_link_is_off_page(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        other = VibeCodeProject(
-            project_id="proj-other",
-            name="Other",
-            repositories=(ProjectRepository(repo_url=REPO_URL),),
-        )
-        saved_link = RemoteProjectLink(
-            repo_root=REPO_ROOT,
-            repo_url=REPO_URL,
-            project_id="proj-missing",
-            project_name="Missing",
-        )
-        initial = VibeCodeProjectPickerInitialData(
-            context=_context(saved_link=saved_link),
-            state=VibeCodeProjectPickerState(
-                projects=[other], next_cursor=None, repo_url=REPO_URL
-            ),
-        )
-        _wire_service(controller, monkeypatch, _FakeService(initial=initial))
-        result = await controller.picker_load(str(REPO_ROOT))
-        items = result["candidates"]["items"]
-        assert items[0]["projectId"] == "proj-other"
-        assert all(item["recommended"] is False for item in items)
-        assert result["savedLink"]["projectId"] == "proj-missing"
-
-    @pytest.mark.asyncio
-    async def test_load_clears_stale_saved_link(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stale_link = RemoteProjectLink(
-            repo_root=REPO_ROOT,
-            repo_url="https://github.com/acme/old-widgets.git",
-            project_id="proj-old",
-            project_name="Old",
-        )
-        service = _FakeService(
-            initial=VibeCodeProjectPickerInitialData(
-                context=_context(saved_link=stale_link),
-                state=VibeCodeProjectPickerState(
-                    projects=[], next_cursor=None, repo_url=REPO_URL
-                ),
-            )
-        )
-        _wire_service(controller, monkeypatch, service)
-        result = await controller.picker_load(str(REPO_ROOT))
-        assert result["staleLinkCleared"] is True
-        assert result["savedLink"] is None
-        assert service.cleared is True
-
-    @pytest.mark.asyncio
-    async def test_load_maps_auth_error(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        service = _FakeService(
-            load_initial_error=VibeCodeProjectApiError(
-                "Vibe Code Web projects request failed (status 401): {}"
-            )
-        )
-        _wire_service(controller, monkeypatch, service)
-        with pytest.raises(ProjectLinksAuthError):
-            await controller.picker_load(str(REPO_ROOT))
-
-    @pytest.mark.asyncio
-    async def test_non_auth_api_error_is_sanitized(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Non-auth VCW errors carry raw response text; neither Sentry nor the
-        # returned error should include it.
-        captured: list[str] = []
-        monkeypatch.setattr(
-            project_links,
-            "capture_sentry_exception",
-            lambda exc, **kw: captured.append(str(exc)),
-        )
-        secret = (
-            "https://github.com/acme/secret (status 500): sensitive-diagnostic-body"
-        )
-        service = _FakeService(load_initial_error=VibeCodeProjectApiError(secret))
-        _wire_service(controller, monkeypatch, service)
-        with pytest.raises(ProjectLinksInternalError) as excinfo:
-            await controller.picker_load(str(REPO_ROOT))
-        assert "sensitive-diagnostic-body" not in str(excinfo.value)
-        assert captured
-        assert all("sensitive-diagnostic-body" not in entry for entry in captured)
-
-    @pytest.mark.asyncio
-    async def test_load_more_never_recommends(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _wire_service(controller, monkeypatch, _FakeService())
-        result = await controller.picker_load_more(str(REPO_ROOT), "next")
-        items = result["candidates"]["items"]
-        assert items
-        assert all(item["recommended"] is False for item in items)
-
-
 class TestMutations:
-    @pytest.mark.asyncio
-    async def test_link_existing_project(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _wire_service(controller, monkeypatch, _FakeService())
-        result = await controller.link(str(REPO_ROOT), "proj-1", "Widgets")
-        assert result["link"] == {
-            "projectId": "proj-1",
-            "projectName": "Widgets",
-            "directoryPath": str(REPO_ROOT),
-        }
-
-    @pytest.mark.asyncio
-    async def test_link_rejects_unavailable_project(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        service = _FakeService(
-            link_error=VibeCodeProjectResolverError(
-                "The selected Vibe Code project is not available for this repository"
-            )
-        )
-        _wire_service(controller, monkeypatch, service)
-        with pytest.raises(ProjectLinksInvalidRequest):
-            await controller.link(str(REPO_ROOT), "proj-x", "X")
-
-    @pytest.mark.asyncio
-    async def test_link_uses_server_project_name(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _wire_service(controller, monkeypatch, _FakeService())
-        result = await controller.link(str(REPO_ROOT), "proj-1", "Spoofed")
-        assert result["link"]["projectName"] == "Widgets"
-
     @pytest.mark.asyncio
     async def test_save_rejects_remote_change_before_persisting(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
@@ -663,11 +438,7 @@ class TestMutations:
         async def _resolve(root_path: str) -> SimpleNamespace:
             return _inspected_directory()
 
-        async def _build(repo_root: Path) -> _FakeService:
-            raise AssertionError("unlink must not require the project picker service")
-
         monkeypatch.setattr(controller, "_resolve_inspection_root", _resolve)
-        monkeypatch.setattr(controller, "_build_service", _build)
         result = await controller.unlink(str(REPO_ROOT))
         assert result == {"unlinked": True}
         assert deleted == [REPO_ROOT]
@@ -816,48 +587,6 @@ class _FakeProjectLinksController:
             "staleLinkCleared": False,
         }
 
-    async def picker_load(self, root_path: str) -> dict[str, Any]:
-        self.calls.append(("picker_load", (root_path,)))
-        return {
-            "root": {
-                "directoryPath": "/repo",
-                "directoryName": "widgets",
-                "git": {
-                    "currentBranch": "main",
-                    "defaultBranch": "main",
-                    "githubRepoUrl": "https://github.com/acme/widgets.git",
-                    "hasCommits": True,
-                },
-            },
-            "savedLink": None,
-            "staleLinkCleared": False,
-            "candidates": {"items": [], "nextCursor": None},
-        }
-
-    async def picker_load_more(self, root_path: str, cursor: str) -> dict[str, Any]:
-        self.calls.append(("picker_load_more", (root_path, cursor)))
-        return {"candidates": {"items": [], "nextCursor": None}, "focusProjectId": None}
-
-    async def create(
-        self, root_path: str, name: str, default_branch: str
-    ) -> dict[str, Any]:
-        self.calls.append(("create", (root_path, name, default_branch)))
-        return {
-            "link": {"projectId": "p1", "projectName": name, "directoryPath": root_path}
-        }
-
-    async def link(
-        self, root_path: str, project_id: str, project_name: str
-    ) -> dict[str, Any]:
-        self.calls.append(("link", (root_path, project_id, project_name)))
-        return {
-            "link": {
-                "projectId": project_id,
-                "projectName": project_name,
-                "directoryPath": root_path,
-            }
-        }
-
     async def save(
         self,
         root_path: str,
@@ -885,23 +614,37 @@ class _FakeProjectLinksController:
 class TestProjectLinksJsonRpc:
     def test_methods_are_advertised(self) -> None:
         assert {
-            "projectLinks/create",
             "projectLinks/inspectRoot",
-            "projectLinks/link",
             "projectLinks/list",
-            "projectLinks/picker/load",
-            "projectLinks/picker/loadMore",
             "projectLinks/resolveRoot",
             "projectLinks/save",
             "projectLinks/unlink",
         }.issubset(SERVER_METHODS)
 
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "projectLinks/create",
+            "projectLinks/link",
+            "projectLinks/picker/load",
+            "projectLinks/picker/loadMore",
+        ],
+    )
+    def test_cloud_project_methods_are_gone(self, method: str) -> None:
+        assert method not in SERVER_METHODS
+
     @pytest.mark.asyncio
     async def test_dispatches_without_attached_session(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
     ) -> None:
         controller = _FakeProjectLinksController()
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        )
         monkeypatch.setattr(handler, "_project_links", controller)
 
         result = await handler.dispatch(
@@ -926,10 +669,16 @@ class TestProjectLinksJsonRpc:
 
     @pytest.mark.asyncio
     async def test_dispatches_inspect_root_without_attached_session(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
     ) -> None:
         controller = _FakeProjectLinksController()
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        )
         monkeypatch.setattr(handler, "_project_links", controller)
 
         result = await handler.dispatch(
@@ -946,10 +695,16 @@ class TestProjectLinksJsonRpc:
 
     @pytest.mark.asyncio
     async def test_dispatches_save_without_attached_session(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
     ) -> None:
         controller = _FakeProjectLinksController()
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        )
         monkeypatch.setattr(handler, "_project_links", controller)
 
         result = await handler.dispatch(
@@ -976,16 +731,25 @@ class TestProjectLinksJsonRpc:
     @pytest.mark.parametrize(
         ("error", "code"),
         [
-            (ProjectLinksAuthError("no key"), ProtocolErrorCode.UNAUTHORIZED),
             (ProjectLinksInvalidRequest("bad root"), ProtocolErrorCode.INVALID_PARAMS),
-            (ProjectLinksInternalError("boom"), ProtocolErrorCode.INTERNAL_ERROR),
+            (ProjectLinksError("boom"), ProtocolErrorCode.INTERNAL_ERROR),
         ],
     )
     @pytest.mark.asyncio
     async def test_maps_controller_errors(
-        self, monkeypatch: pytest.MonkeyPatch, error: Exception, code: ProtocolErrorCode
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+        code: ProtocolErrorCode,
+        process_services: ProcessServices,
     ) -> None:
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        )
         monkeypatch.setattr(
             handler, "_project_links", _FakeProjectLinksController(error)
         )

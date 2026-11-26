@@ -7,7 +7,6 @@ from vibe.cli.audio_recorder.audio_recorder_port import (
     AudioBackendUnavailableError,
     AudioRecorderPort,
     AudioRecording,
-    IncompatibleSampleRateError,
     NoAudioInputDeviceError,
     RecordingMode,
 )
@@ -21,7 +20,6 @@ __all__ = [
     "AudioRecorder",
     "AudioRecorderPort",
     "AudioRecording",
-    "IncompatibleSampleRateError",
     "NoAudioInputDeviceError",
     "RecordingMode",
 ]

@@ -1,24 +1,54 @@
 from __future__ import annotations
 
+from contextlib import closing
+from dataclasses import dataclass
 import os
-import shlex
 import subprocess
 import sys
 from threading import Lock
+import time
 
 import keyring
-from keyring.errors import KeyringError, PasswordDeleteError
+from keyring.errors import (
+    KeyringError,
+    KeyringLocked,
+    NoKeyringError,
+    PasswordDeleteError,
+)
+
+from vibe.observability.logging import logger
 
 _KEYRING_SERVICE = "ai.mistral.vibe"
 _LEGACY_KEYRING_SERVICES = ("vibe",)
 _DISABLE_KEYRING_ENV_VAR = "VIBE_TEST_DISABLE_KEYRING"
-_cache_lock = Lock()
-_api_key_cache: dict[str, str | None] = {}
-_SECURITY_NOT_FOUND = "could not be found"
+# Long enough to type a password into the unlock dialog, short enough that an
+# unattended run fails instead of waiting on a dialog nobody sees.
+SECURITY_TIMEOUT_SECONDS = 60
+# Shared by the back-to-back reads of one startup, retried on the user's next turn.
+READ_FAILURE_TTL_SECONDS = 10
 
 
-class _PasswordNotFoundError(KeyringError):
+@dataclass(frozen=True, slots=True)
+class _ReadFailure:
+    reason: str
+    failed_at: float
+
+
+class _KeychainTimeoutError(KeyringError):
     pass
+
+
+class _SecretServiceLockedError(KeyringLocked):
+    pass
+
+
+_cache_lock = Lock()
+_api_key_cache: dict[str, str | None | _ReadFailure] = {}
+_read_locks: dict[str, Lock] = {}
+# A Keychain that timed out on one key would make every other key wait it out again.
+_keychain_timeout: _ReadFailure | None = None
+# Substring in security's output when an item doesn't exist.
+_SECURITY_NOT_FOUND = "could not be found"
 
 
 def _is_keyring_disabled() -> bool:
@@ -29,19 +59,22 @@ def _should_use_macos_security() -> bool:
     return sys.platform == "darwin"
 
 
-def _run_security(
-    args: list[str], *, input_text: str | None = None
-) -> subprocess.CompletedProcess[str]:
+def _run_security(args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["/usr/bin/security", *args],
-            input=input_text,
             text=True,
             capture_output=True,
             check=True,
+            timeout=SECURITY_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
         raise KeyringError("Can't run macOS Keychain security command") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _KeychainTimeoutError(
+            f"macOS Keychain did not answer within {SECURITY_TIMEOUT_SECONDS}s; "
+            "it may be locked or waiting for approval"
+        ) from exc
 
 
 def _is_security_not_found(exc: subprocess.CalledProcessError) -> bool:
@@ -63,27 +96,66 @@ def _set_password(service: str, username: str, password: str) -> None:
         try:
             keyring.set_password(service, username, password)
         except ImportError as exc:
-            raise KeyringError("Can't load keyring backend") from exc
+            raise NoKeyringError("Can't load keyring backend") from exc
         return
 
     try:
         _delete_macos_password(service, username)
     except PasswordDeleteError:
         pass
-    command = shlex.join([
-        "add-generic-password",
-        "-s",
-        service,
-        "-a",
-        username,
-        "-w",
-        password,
-        "-A",
-    ])
     try:
-        _run_security(["-i"], input_text=f"{command}\n")
+        _run_security([
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            username,
+            "-w",
+            password,
+            "-A",
+        ])
     except subprocess.CalledProcessError as exc:
         raise KeyringError("Can't store password in macOS Keychain") from exc
+
+
+def _may_hold_secret_service_item(service: str, username: str) -> bool:
+    # keyring's Secret Service read unlocks its collection before searching,
+    # so a missing key still raises an unlock prompt that can wait forever.
+    if sys.platform != "linux":
+        return True
+    from keyring.backends.SecretService import Keyring as SecretServiceKeyring
+
+    backend = keyring.get_keyring()
+    if not isinstance(backend, SecretServiceKeyring):
+        return True
+    from jeepney.wrappers import DBusErrorResponse
+    import secretstorage
+
+    preferred = getattr(backend, "preferred_collection", None)
+    scheme = backend.schemes[backend.scheme]
+    attributes = {scheme["username"]: username, scheme["service"]: service}
+    try:
+        with closing(secretstorage.dbus_init()) as connection:
+            try:
+                collection = (
+                    secretstorage.Collection(connection)
+                    if preferred is None
+                    else secretstorage.Collection(connection, preferred)
+                )
+            except secretstorage.ItemNotFoundException:
+                # keyring prompts to create a missing default collection, but
+                # raises its own error for a missing preferred one.
+                return preferred is not None
+            if not collection.is_locked():
+                return True
+            # The service-wide search never prompts, but some providers
+            # (KeePassXC) skip locked collections, so a miss stays unknown.
+            items = secretstorage.search_items(connection, attributes)
+            if next(items, None) is not None:
+                return True
+            raise _SecretServiceLockedError("The system keyring is locked")
+    except (secretstorage.SecretStorageException, DBusErrorResponse, OSError):
+        return True
 
 
 def _get_password(service: str, username: str) -> str | None:
@@ -99,14 +171,18 @@ def _get_password(service: str, username: str) -> str | None:
             ])
         except subprocess.CalledProcessError as exc:
             if _is_security_not_found(exc):
-                raise _PasswordNotFoundError() from exc
-            raise KeyringError("Can't get password from macOS Keychain") from exc
+                return None
+            detail = (exc.stderr or "").strip()
+            message = "Can't get password from macOS Keychain"
+            raise KeyringError(f"{message}: {detail}" if detail else message) from exc
         return result.stdout.removesuffix("\n")
 
     try:
+        if not _may_hold_secret_service_item(service, username):
+            return None
         return keyring.get_password(service, username)
     except ImportError as exc:
-        raise KeyringError("Can't load keyring backend") from exc
+        raise NoKeyringError("Can't load keyring backend") from exc
 
 
 def _delete_password(service: str, username: str) -> None:
@@ -117,7 +193,7 @@ def _delete_password(service: str, username: str) -> None:
     try:
         keyring.delete_password(service, username)
     except ImportError as exc:
-        raise KeyringError("Can't load keyring backend") from exc
+        raise NoKeyringError("Can't load keyring backend") from exc
 
 
 def _migrate_legacy_password(username: str, password: str, legacy_service: str) -> None:
@@ -139,37 +215,160 @@ def _delete_legacy_passwords(username: str) -> None:
             pass
 
 
-def _get_uncached_password(username: str) -> str | None:
-    for service in (_KEYRING_SERVICE, *_LEGACY_KEYRING_SERVICES):
+def _get_uncached_password(
+    username: str, *, search_legacy_services: bool, migrate_legacy: bool = True
+) -> str | None:
+    services = (_KEYRING_SERVICE, *_LEGACY_KEYRING_SERVICES)
+    if not search_legacy_services:
+        services = (_KEYRING_SERVICE,)
+    locked: _SecretServiceLockedError | None = None
+    for service in services:
         try:
             api_key = _get_password(service, username)
-        except _PasswordNotFoundError:
+        except _SecretServiceLockedError as exc:
+            # Another service name may still match outside the locked collection.
+            locked = exc
             continue
         if api_key is None:
             continue
-        if service != _KEYRING_SERVICE:
+        if migrate_legacy and service != _KEYRING_SERVICE:
             _migrate_legacy_password(username, api_key, service)
         return api_key
+    if locked is not None:
+        raise locked
     return None
 
 
-def get_api_key_from_keyring(env_key: str) -> str | None:
+def get_api_key_from_keyring(
+    env_key: str, *, search_legacy_services: bool = True
+) -> str | None:
+    """Read a secret, optionally without the pre-rename service-name fallback.
+
+    Callers whose secrets were never written under the legacy service names pass
+    ``search_legacy_services=False``: on macOS every service tried is a separate
+    ``security`` subprocess, and a miss otherwise pays for all of them.
+    """
     if not env_key:
         return None
     if _is_keyring_disabled():
         return None
 
     with _cache_lock:
+        _drop_expired_failure(env_key)
         if env_key in _api_key_cache:
-            return _api_key_cache[env_key]
+            return _value(_api_key_cache[env_key])
+        read_lock = _read_locks.setdefault(env_key, Lock())
 
-    try:
-        api_key = _get_uncached_password(env_key)
-    except KeyringError:
-        return None
+    # One read per key at a time: on a locked Keychain every concurrent read
+    # would raise its own dialog and wait out its own timeout.
+    with read_lock:
+        with _cache_lock:
+            _drop_expired_failure(env_key)
+            if env_key in _api_key_cache:
+                return _value(_api_key_cache[env_key])
+            recent_timeout = _recent_keychain_timeout()
+        result: str | None | _ReadFailure
+        try:
+            result = recent_timeout or _get_uncached_password(
+                env_key, search_legacy_services=search_legacy_services
+            )
+        except NoKeyringError:
+            return None
+        except KeyringError as exc:
+            logger.warning("Keyring read failed for %s: %s", env_key, exc)
+            result = _ReadFailure(str(exc) or type(exc).__name__, time.monotonic())
+            if isinstance(exc, _KeychainTimeoutError):
+                _remember_keychain_timeout(result)
 
+        # Keyed on the name alone, not on the flag: a miss cached by a caller that
+        # skipped the legacy services would otherwise be served to one that wanted
+        # them. Safe only because the two sets of names are disjoint -- env var keys
+        # on one side, MCP OAuth aliases on the other.
+        with _cache_lock:
+            return _value(_api_key_cache.setdefault(env_key, result))
+
+
+def keyring_read_failure(env_key: str) -> str | None:
     with _cache_lock:
-        return _api_key_cache.setdefault(env_key, api_key)
+        _drop_expired_failure(env_key)
+        cached = _api_key_cache.get(env_key)
+    return cached.reason if isinstance(cached, _ReadFailure) else None
+
+
+def _value(cached: str | None | _ReadFailure) -> str | None:
+    return None if isinstance(cached, _ReadFailure) else cached
+
+
+def _is_expired(failure: _ReadFailure) -> bool:
+    return time.monotonic() - failure.failed_at >= READ_FAILURE_TTL_SECONDS
+
+
+def _drop_expired_failure(env_key: str) -> None:
+    cached = _api_key_cache.get(env_key)
+    if isinstance(cached, _ReadFailure) and _is_expired(cached):
+        del _api_key_cache[env_key]
+
+
+def _recent_keychain_timeout() -> _ReadFailure | None:
+    if _keychain_timeout is None or _is_expired(_keychain_timeout):
+        return None
+    return _keychain_timeout
+
+
+def _remember_keychain_timeout(failure: _ReadFailure) -> None:
+    global _keychain_timeout
+    with _cache_lock:
+        _keychain_timeout = failure
+
+
+def probe_api_key_from_keyring(env_key: str) -> str | None:
+    """The keyring value for ``env_key``, raising when the keyring is unreadable.
+
+    An unreadable keyring is an inspection failure rather than a silent "no
+    credential": a caller that must distinguish "no source available" from
+    "cannot be inspected" (``/status``) needs the error, while a caller that
+    only needs a usable key does not.
+
+    Read-only twice over: no legacy migration write, and no cache write.
+    The probe serves from the cache when resolution already put a value
+    there — the view the session authenticates with — but a miss leaves it
+    untouched, so inspecting a source cannot change what a later model call
+    sends: a key added after the probe is still found, and the first
+    resolving read still migrates the legacy entry.
+
+    A host with no keyring backend answers ``None`` like ``get_api_key_from_keyring``
+    does: the store cannot hold a key, so the source is checked-and-empty, not
+    unavailable. Only a keyring that exists but cannot be read raises.
+    """
+    if not env_key or _is_keyring_disabled():
+        return None
+    with _cache_lock:
+        read_lock = _read_locks.setdefault(env_key, Lock())
+
+    # Same guards as get: one Keychain dialog per key, no second wait after a timeout.
+    with read_lock:
+        with _cache_lock:
+            _drop_expired_failure(env_key)
+            is_cached = env_key in _api_key_cache
+            cached = _api_key_cache.get(env_key)
+            recent_timeout = _recent_keychain_timeout()
+        if isinstance(cached, _ReadFailure):
+            raise KeyringError(cached.reason)
+        if is_cached:
+            return cached
+        if recent_timeout is not None:
+            raise KeyringError(recent_timeout.reason)
+        try:
+            return _get_uncached_password(
+                env_key, search_legacy_services=True, migrate_legacy=False
+            )
+        except NoKeyringError:
+            return None
+        except _KeychainTimeoutError as exc:
+            _remember_keychain_timeout(
+                _ReadFailure(str(exc) or type(exc).__name__, time.monotonic())
+            )
+            raise
 
 
 def set_api_key_in_keyring(env_key: str, api_key: str) -> None:
@@ -227,5 +426,7 @@ def forget_api_key_in_keyring_cache(env_key: str) -> None:
 
 
 def clear_api_key_keyring_cache() -> None:
+    global _keychain_timeout
     with _cache_lock:
         _api_key_cache.clear()
+        _keychain_timeout = None

@@ -1,0 +1,30 @@
+[
+ {
+  "method": "setup/status",
+  "params": {}
+ },
+ {
+  "method": "setup/store-credential",
+  "params": {
+   "apiKey": "test-key-123",
+   "customDomain": false,
+   "provider": "litellm-anthropic"
+  }
+ },
+ {
+  "method": "setup/submit-choices",
+  "params": {
+   "consoleBaseUrl": "https://console.mistral.ai",
+   "provider": {
+    "apiBase": "http://localhost:4000/v1",
+    "apiKeyEnvVar": "LITELLM_API_KEY",
+    "browserAuthAllowOriginRewrite": false,
+    "browserAuthApiBaseUrl": null,
+    "browserAuthBaseUrl": null,
+    "name": "litellm-anthropic"
+   },
+   "theme": "ansi-dark",
+   "vibeBaseUrl": "https://chat.mistral.ai"
+  }
+ }
+]

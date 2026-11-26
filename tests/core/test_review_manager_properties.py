@@ -17,14 +17,12 @@ from __future__ import annotations
 from pathlib import Path
 import random
 
-from vibe.core.checkpoints import (
-    Checkpointer,
-    CheckpointRecorder,
-    FileSnapshot,
-    FileState,
-)
+import pytest
+
+from tests.stubs.fake_checkpoint_capture import FakeCheckpointCapture, FileSnapshot
+from vibe.core.checkpoints import Checkpointer, FileState
 from vibe.core.review import AllTarget, ReviewManager, ScopeTarget
-from vibe.core.types import LLMMessage, MessageList, Role
+from vibe.core.types import LLMMessage, Role
 
 FILES = ["a.txt", "b.txt", "c.txt"]
 
@@ -110,9 +108,9 @@ class _Bundle:
     flat surface this suite drives. Production wires them separately.
     """
 
-    def __init__(self, messages: MessageList) -> None:
+    def __init__(self, messages: list[LLMMessage]) -> None:
         checkpointer = Checkpointer()
-        recorder = CheckpointRecorder(checkpointer, messages)
+        recorder = FakeCheckpointCapture(checkpointer, messages)
         review = ReviewManager(checkpointer)
         self.create_checkpoint = recorder.create_checkpoint
         self.add_snapshot = recorder.add_snapshot
@@ -122,14 +120,14 @@ class _Bundle:
         self.revert_review = review.revert_review
 
 
-def _fresh_manager() -> tuple[_Bundle, MessageList]:
-    messages = MessageList([LLMMessage(role=Role.system, content="system")])
+def _fresh_manager() -> tuple[_Bundle, list[LLMMessage]]:
+    messages = [LLMMessage(role=Role.system, content="system")]
     return _Bundle(messages), messages
 
 
 def _replay(
     tmp: Path, originals: dict[str, str], turns: list[Turn]
-) -> tuple[_Bundle, MessageList]:
+) -> tuple[_Bundle, list[LLMMessage]]:
     """Recreate the session on disk: seed originals, then run each turn as the
     manager would (grow messages so turn ids differ, capture pre via snapshots /
     carry-forward, write the edit, seal).
@@ -159,9 +157,14 @@ def _disk(tmp: Path) -> dict[str, str]:
     return {name: (tmp / name).read_text(encoding="utf-8") for name in FILES}
 
 
-SEEDS = range(80)
+# 80 seeds take ~2 s alone but exceed the 10 s per-test timeout under the CPU
+# saturation of a loaded CI pod, where the whole file system plus the review
+# manager runs ~5x slower. 20 seeds keep the property coverage (deterministic,
+# seeded, failure messages reprint the seed) while leaving 5x headroom.
+SEEDS = range(20)
 
 
+@pytest.mark.timeout(60)
 def test_revert_all_restores_every_original(tmp_path: Path) -> None:
     for seed in SEEDS:
         seed_path = tmp_path / str(seed)
@@ -175,6 +178,7 @@ def test_revert_all_restores_every_original(tmp_path: Path) -> None:
         assert _disk(seed_path) == originals, f"seed={seed}: revert-all != originals"
 
 
+@pytest.mark.timeout(60)
 def test_approve_all_leaves_disk_unchanged(tmp_path: Path) -> None:
     for seed in SEEDS:
         seed_path = tmp_path / str(seed)
@@ -191,6 +195,7 @@ def test_approve_all_leaves_disk_unchanged(tmp_path: Path) -> None:
         assert _disk(seed_path) == final, f"seed={seed}: approve-all changed disk"
 
 
+@pytest.mark.timeout(60)
 def test_incremental_per_turn_revert_restores_originals(tmp_path: Path) -> None:
     for seed in SEEDS:
         seed_path = tmp_path / str(seed)

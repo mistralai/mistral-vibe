@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -39,6 +39,7 @@ from vibe.app_server.models import (
     ImageContentBlock,
     MentionStats,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicError,
     PublicHistoryEntry,
     PublicQueuedTurn,
@@ -92,6 +93,14 @@ from vibe.app_server.protocol import (
     TurnInputEntry,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnQueueEditAbandonParams,
+    TurnQueueEditAbandonResponse,
+    TurnQueueEditCancelParams,
+    TurnQueueEditCancelResponse,
+    TurnQueueEditSaveParams,
+    TurnQueueEditSaveResponse,
+    TurnQueueEditStartParams,
+    TurnQueueEditStartResponse,
     TurnQueueReadParams,
     TurnQueueReadResponse,
     TurnQueueRemoveParams,
@@ -102,6 +111,8 @@ from vibe.app_server.protocol import (
     TurnQueueResumeResponse,
     TurnQueueSteerParams,
     TurnQueueSteerResponse,
+    TurnRetryParams,
+    TurnRetryResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -126,6 +137,17 @@ class _PublishedEvent:
 type _QueuedEvent = _PublishedEvent | _StreamClosed
 
 _EVENT_QUEUE_MAX_SIZE = 256
+
+# Only the cancellation path is bounded, and not to make a wedged interrupt succeed --
+# it cannot. `act()` awaits `interrupt()` from inside `except CancelledError`, so a
+# teardown that never returns also never re-raises, and the canceller waiting on the
+# task wedges too. The deadline keeps one stuck turn from spreading up the call chain.
+# Callers that are not unwinding await `interrupt()` unbounded, on purpose.
+_INTERRUPT_ON_CANCEL_TIMEOUT_SECONDS = 5.0
+
+# A starting turn (attach + turn/start in flight) has no id to interrupt yet;
+# `interrupt()` waits this long for it to surface instead of dropping the cancel.
+_INTERRUPT_WAIT_FOR_TURN_START_SECONDS = 30.0
 
 
 class AppServerTurnError(RuntimeError):
@@ -169,6 +191,8 @@ class AppServerSession:  # noqa: PLR0904
         self._event_generation = 0
         self._consumed_turn_id: str | None = None
         self._starting_turn = False
+        self._turn_started = asyncio.Event()
+        self._turn_started.set()
         self._callback_sessions: dict[str, str] = {}
         self._events: asyncio.Queue[_QueuedEvent] = asyncio.Queue(
             maxsize=_EVENT_QUEUE_MAX_SIZE
@@ -292,6 +316,10 @@ class AppServerSession:  # noqa: PLR0904
         return self.state.turn_queue
 
     @property
+    def child_sessions(self) -> tuple[PublicChildSession, ...]:
+        return tuple(self.state.child_sessions)
+
+    @property
     def turn_active(self) -> bool:
         return self._starting_turn or any(
             turn.status is PublicTurnStatus.IN_PROGRESS
@@ -316,7 +344,7 @@ class AppServerSession:  # noqa: PLR0904
     async def connect(self) -> None:
         await self._ensure_attached()
 
-    async def act(
+    def act(
         self,
         message: str,
         client_message_id: str | None = None,
@@ -327,32 +355,57 @@ class AppServerSession:  # noqa: PLR0904
         user_display_content: UserDisplayContent | None = None,
         mention_stats: MentionStats | None = None,
         injected: bool = False,
-    ) -> AsyncGenerator[AppServerEvent, None]:
-        client = await self._ensure_attached()
+    ) -> AsyncGenerator[AppServerEvent]:
+        return self._run_turn(
+            "turn/start",
+            TurnStartParams(
+                session_id=self.session_id,
+                message=_content_blocks(message, images, resources),
+                injected=injected,
+                client_user_message_id=client_message_id,
+                auto_title=auto_title,
+                user_display_content=user_display_content,
+                mention_stats=mention_stats,
+            ),
+            TurnStartResponse,
+        )
+
+    def retry(
+        self, expected_turn_id: str, instructions: str = ""
+    ) -> AsyncGenerator[AppServerEvent]:
+        return self._run_turn(
+            "turn/retry",
+            TurnRetryParams(
+                session_id=self.session_id,
+                expected_turn_id=expected_turn_id,
+                instructions=instructions,
+            ),
+            TurnRetryResponse,
+        )
+
+    async def _run_turn(
+        self,
+        method: str,
+        params: TurnStartParams | TurnRetryParams,
+        response_model: type[TurnStartResponse] | type[TurnRetryResponse],
+    ) -> AsyncGenerator[AppServerEvent]:
         if self.turn_active:
             raise RuntimeError("A turn is already running")
+        # Mark the turn as starting before the prologue, so a cancel arriving
+        # during attach waits for the turn to surface (see interrupt()).
         self._starting_turn = True
+        self._turn_started.clear()
         try:
+            client = await self._ensure_attached()
             response = validate_wire(
-                TurnStartResponse,
-                await client.request(
-                    "turn/start",
-                    TurnStartParams(
-                        session_id=self.session_id,
-                        message=_content_blocks(message, images, resources),
-                        injected=injected,
-                        client_user_message_id=client_message_id,
-                        auto_title=auto_title,
-                        user_display_content=user_display_content,
-                        mention_stats=mention_stats,
-                    ),
-                ),
+                response_model, await client.request(method, params)
             )
             turn = response.turn
             self._state.projection.begin_turn(turn)
             self._consumed_turn_id = turn.id
         finally:
             self._starting_turn = False
+            self._turn_started.set()
         try:
             while True:
                 item = await self._events.get()
@@ -372,13 +425,15 @@ class AppServerSession:  # noqa: PLR0904
                 yield event
         except asyncio.CancelledError:
             with suppress(Exception):
-                await self.interrupt()
+                await asyncio.wait_for(
+                    self.interrupt(), timeout=_INTERRUPT_ON_CANCEL_TIMEOUT_SECONDS
+                )
             raise
         finally:
             if self._consumed_turn_id == turn.id:
                 self._consumed_turn_id = None
 
-    async def events(self) -> AsyncGenerator[AppServerEvent, None]:
+    async def events(self) -> AsyncGenerator[AppServerEvent]:
         await self._ensure_attached()
         while True:
             item = await self._unsolicited_events.get()
@@ -442,6 +497,74 @@ class AppServerSession:  # noqa: PLR0904
                 return None
             raise
 
+    async def start_queued_turn_edit(
+        self, queue_item_id: str, edit_id: UUID
+    ) -> TurnQueueEditStartResponse:
+        client = await self._ensure_attached()
+        response = validate_wire(
+            TurnQueueEditStartResponse,
+            await client.request(
+                "session/turn/queue/edit/start",
+                TurnQueueEditStartParams(
+                    session_id=self.session_id,
+                    queue_item_id=queue_item_id,
+                    edit_id=edit_id,
+                ),
+            ),
+        )
+        if response.queue_item_id != queue_item_id:
+            raise RuntimeError("Queued turn edit changed the queue item identity")
+        return response
+
+    async def save_queued_turn_edit(
+        self,
+        queue_item_id: str,
+        edit_id: UUID,
+        message: str,
+        message_entry_id: str | None = None,
+        *,
+        idempotency_key: str,
+        images: list[ImageAttachment] | None = None,
+        resources: list[UserResource] | None = None,
+    ) -> PublicQueuedTurn:
+        return await self._queue_turn(
+            message,
+            message_entry_id,
+            idempotency_key=idempotency_key,
+            images=images,
+            resources=resources,
+            queue_item_id=queue_item_id,
+            edit_id=edit_id,
+        )
+
+    async def cancel_queued_turn_edit(self, queue_item_id: str, edit_id: UUID) -> None:
+        client = await self._ensure_attached()
+        validate_wire(
+            TurnQueueEditCancelResponse,
+            await client.request(
+                "session/turn/queue/edit/cancel",
+                TurnQueueEditCancelParams(
+                    session_id=self.session_id,
+                    queue_item_id=queue_item_id,
+                    edit_id=edit_id,
+                ),
+            ),
+        )
+
+    async def abandon_queued_turn_edit(self, queue_item_id: str, edit_id: UUID) -> None:
+        client = await self._ensure_attached()
+        validate_wire(
+            TurnQueueEditAbandonResponse,
+            await client.request(
+                "session/turn/queue/edit/abandon",
+                TurnQueueEditAbandonParams(
+                    session_id=self.session_id,
+                    queue_item_id=queue_item_id,
+                    edit_id=edit_id,
+                ),
+            ),
+        )
+
     async def _queue_turn(
         self,
         message: str,
@@ -451,6 +574,7 @@ class AppServerSession:  # noqa: PLR0904
         images: list[ImageAttachment] | None,
         resources: list[UserResource] | None,
         queue_item_id: str | None = None,
+        edit_id: UUID | None = None,
     ) -> PublicQueuedTurn:
         client = await self._ensure_attached()
         entry_content = session_content_blocks(message, images, resources)
@@ -477,7 +601,7 @@ class AppServerSession:  # noqa: PLR0904
                     ),
                 ),
             )
-        else:
+        elif edit_id is None:
             response = validate_wire(
                 TurnQueueReplaceResponse,
                 await client.request(
@@ -486,6 +610,20 @@ class AppServerSession:  # noqa: PLR0904
                         idempotency_key=request_idempotency_key,
                         session_id=request_session_id,
                         queue_item_id=queue_item_id,
+                        entries=entries,
+                    ),
+                ),
+            )
+        else:
+            response = validate_wire(
+                TurnQueueEditSaveResponse,
+                await client.request(
+                    "session/turn/queue/edit/save",
+                    TurnQueueEditSaveParams(
+                        idempotency_key=request_idempotency_key,
+                        session_id=request_session_id,
+                        queue_item_id=queue_item_id,
+                        edit_id=edit_id,
                         entries=entries,
                     ),
                 ),
@@ -531,11 +669,6 @@ class AppServerSession:  # noqa: PLR0904
         return self._state.projection.adopt_turn_queue(
             response.queue, after_event_id=after_event_id
         )
-
-    async def refresh_state(self) -> PublicSessionState:
-        """Read authoritative session state and publish reconciliation events."""
-        await self._resync(await self._ensure_attached())
-        return self.state
 
     async def steer_queued_turn(
         self, queue_item_id: str, expected_turn_id: str
@@ -658,6 +791,15 @@ class AppServerSession:  # noqa: PLR0904
 
     async def interrupt(self) -> None:
         active_turn_id = self._active_public_turn_id()
+        if active_turn_id is None and self._starting_turn:
+            # The turn is still in its prologue, so there is no turn id yet;
+            # wait for it to surface instead of dropping the cancel.
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._turn_started.wait(),
+                    timeout=_INTERRUPT_WAIT_FOR_TURN_START_SECONDS,
+                )
+            active_turn_id = self._active_public_turn_id()
         if active_turn_id is None:
             return
         client = await self._ensure_attached()
@@ -742,7 +884,6 @@ class AppServerSession:  # noqa: PLR0904
         await self.resources.sessions.resume(
             session_id, on_adopt=self._advance_event_generation
         )
-        self.resources.vibe_code.reset()
         await self.resources.refresh()
 
     def _advance_event_generation(self) -> None:
@@ -759,16 +900,6 @@ class AppServerSession:  # noqa: PLR0904
     async def clear_history(self) -> None:
         await self.resources.sessions.clear_history()
         await self.resources.refresh()
-
-    def begin_close(self) -> None:
-        """Signal an intentional shutdown before ``close()``.
-
-        Once set, a dropped connection is treated as expected teardown rather
-        than a recoverable disconnect, so ``_pump_messages`` stops instead of
-        reconnecting and re-running ``session/resume`` (whose failure would
-        otherwise surface as a fatal error on the event stream). Idempotent.
-        """
-        self._closing = True
 
     async def close(self) -> None:
         await self.resources.telemetry.flush()

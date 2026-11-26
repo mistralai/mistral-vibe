@@ -1,0 +1,97 @@
+[
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/queue/replace",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi\n\nhi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<replacement-idempotency-key-1>",
+   "queueItemId": "00000000-0000-4000-8000-000000000003-2",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

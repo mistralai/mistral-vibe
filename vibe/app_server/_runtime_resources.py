@@ -10,9 +10,9 @@ from vibe.app_server.models import (
     AccountView,
     AgentStatsSnapshot,
     AgentSummary,
+    ApprovalPolicySummary,
     ConfigIssue,
     ConnectorCounts,
-    DebugLogPage,
     IdentityView,
     MCPState,
     SessionLogSummary,
@@ -26,28 +26,27 @@ from vibe.app_server.protocol import (
     AgentsListParams,
     AgentsListResponse,
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     AppServerResponseError,
-    ConfigFieldsReadParams,
-    ConfigFieldsReadResponse,
     ConfigMutationResponse,
     ConfigProxyReadParams,
     ConfigProxyReadResponse,
     ConfigProxyWriteParams,
     ConfigReloadParams,
-    ConfigSchemaReadParams,
-    ConfigSchemaReadResponse,
     ConfigWriteOpWire,
     ConfigWriteParams,
     ConfigWriteResponse,
-    DiagnosticsLogsReadParams,
-    DiagnosticsLogsReadResponse,
     EmptyResponse,
     IdentityReadParams,
     IdentityReadResponse,
+    ModelConfigWriteParams,
     Notification,
     ProtocolError,
     ProtocolErrorCode,
+    ProviderAuthReadParams,
+    ProviderAuthReadResponse,
     RuntimeMutationResponse,
+    RuntimeMutationStatus,
     RuntimeReadParams,
     RuntimeReadResponse,
     RuntimeSnapshot,
@@ -55,10 +54,26 @@ from vibe.app_server.protocol import (
     SessionReadyWaitParams,
     SessionReadyWaitResponse,
 )
+from vibe.app_server.provider_auth import ProviderAuthView
 
 
-def _escape_json_pointer_token(value: str) -> str:
-    return value.replace("~", "~0").replace("/", "~1")
+def _raise_for_write(response: ConfigWriteResponse) -> None:
+    """Turn a write the app-server declined into an error the caller sees."""
+    if response.rejected:
+        reason = f": {response.reason}" if response.reason else ""
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS,
+                message=f"Invalid configuration edit{reason}",
+            )
+        )
+    if response.failures:
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INTERNAL_ERROR,
+                message="; ".join(response.failures),
+            )
+        )
 
 
 class ConfigResource:
@@ -93,23 +108,6 @@ class ConfigResource:
         self._state.apply_runtime(snapshot)
         self.publish_change(previous)
 
-    async def read_schema(self) -> ConfigSchemaReadResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            ConfigSchemaReadResponse,
-            await client.request("config/schema", ConfigSchemaReadParams()),
-        )
-
-    async def read_fields(self) -> ConfigFieldsReadResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            ConfigFieldsReadResponse,
-            await client.request(
-                "config/fields/read",
-                ConfigFieldsReadParams(session_id=self._state.session_id),
-            ),
-        )
-
     async def write(
         self, ops: list[ConfigWriteOpWire], *, reason: str, reload_runtime: bool = False
     ) -> ConfigWriteResponse:
@@ -126,9 +124,42 @@ class ConfigResource:
                 ),
             ),
         )
-        if not response.rejected and not response.failures:
+        if response.applied:
             self._apply_runtime(response.runtime)
         return response
+
+    async def write_model(
+        self,
+        *,
+        model_alias: str | None = None,
+        reasoning_effort: ThinkingLevel | None = None,
+    ) -> RuntimeMutationStatus:
+        """Pick the model, and how hard it thinks, without waiting for idle.
+
+        The typed operation: the app-server owns where these land and whether a
+        running turn can take them, so this sends the pick rather than a path.
+        `config/write` would be refused outright during a turn.
+
+        Answers whether the session is running the pick yet. A running turn
+        keeps the settings it started on, so a pick made during one is parked
+        until it ends and arrives as `runtime/updated`.
+        """
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConfigWriteResponse,
+            await client.request(
+                "config/model/write",
+                ModelConfigWriteParams(
+                    session_id=self._state.session_id,
+                    model_alias=model_alias,
+                    reasoning_effort=reasoning_effort,
+                ),
+            ),
+        )
+        if response.applied:
+            self._apply_runtime(response.runtime)
+        _raise_for_write(response)
+        return response.status
 
     async def update(
         self,
@@ -149,49 +180,10 @@ class ConfigResource:
         response = await self.write(
             ops, reason="app-server config update", reload_runtime=reload_runtime
         )
-        if response.rejected:
-            raise AppServerResponseError(
-                ProtocolError(
-                    code=ProtocolErrorCode.INVALID_PARAMS,
-                    message="Invalid configuration edit",
-                )
-            )
-        if response.failures:
-            raise AppServerResponseError(
-                ProtocolError(
-                    code=ProtocolErrorCode.INTERNAL_ERROR,
-                    message="; ".join(response.failures),
-                )
-            )
+        _raise_for_write(response)
 
-    async def set_thinking(self, level: ThinkingLevel) -> None:
-        response = await self.write(
-            [
-                ConfigWriteOpWire(
-                    op="set",
-                    path=(
-                        f"/models/{_escape_json_pointer_token(self.current.active_model.alias)}"
-                        "/thinking"
-                    ),
-                    value=level,
-                )
-            ],
-            reason="app-server thinking update",
-        )
-        if response.rejected:
-            raise AppServerResponseError(
-                ProtocolError(
-                    code=ProtocolErrorCode.INVALID_PARAMS,
-                    message="Invalid configuration edit",
-                )
-            )
-        if response.failures:
-            raise AppServerResponseError(
-                ProtocolError(
-                    code=ProtocolErrorCode.INTERNAL_ERROR,
-                    message="; ".join(response.failures),
-                )
-            )
+    async def set_thinking(self, level: ThinkingLevel) -> RuntimeMutationStatus:
+        return await self.write_model(reasoning_effort=level)
 
     async def reload(self, *, reload_runtime: bool = True) -> int:
         client = await self._connection.connect()
@@ -281,6 +273,31 @@ class IdentityResource:
         return response.identity
 
 
+class ProviderAuthResource:
+    """Reads the redacted active-provider auth snapshot.
+
+    Holds no cached state: the view is a snapshot taken per read, so later
+    credential changes are reflected by the next read rather than a stale one.
+    """
+
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    async def read(self) -> ProviderAuthView:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ProviderAuthReadResponse,
+            await client.request(
+                "providerAuth/read",
+                ProviderAuthReadParams(session_id=self._state.session_id),
+            ),
+        )
+        return response.auth
+
+
 class AgentResource:
     def __init__(
         self, connection: AppServerResourceConnection, state: ClientSessionState
@@ -296,8 +313,16 @@ class AgentResource:
     def all(self) -> list[AgentSummary]:
         return self._state.agents
 
-    def next(self, current_name: str | None = None) -> AgentSummary:
-        return self._state.next_agent(current_name)
+    @property
+    def active_policy(self) -> ApprovalPolicySummary:
+        return self._state.active_approval_policy
+
+    @property
+    def policies(self) -> list[ApprovalPolicySummary]:
+        return self._state.approval_policies
+
+    def next_policy(self, current_name: str | None = None) -> ApprovalPolicySummary:
+        return self._state.next_policy(current_name)
 
     async def read(self) -> None:
         client = await self._connection.connect()
@@ -322,6 +347,20 @@ class AgentResource:
         )
         self._state.apply_runtime(response.runtime)
         return response.runtime.active_agent
+
+    async def switch_policy(self, name: str) -> ApprovalPolicySummary:
+        client = await self._connection.connect()
+        response = validate_wire(
+            RuntimeMutationResponse,
+            await client.request(
+                "session/approvalPolicy/update",
+                ApprovalPolicySwitchParams(
+                    session_id=self._state.session_id, approval_policy=name
+                ),
+            ),
+        )
+        self._state.apply_runtime(response.runtime)
+        return response.runtime.active_approval_policy
 
     async def set_installed(self, agent_name: str, *, installed: bool) -> None:
         client = await self._connection.connect()
@@ -379,10 +418,6 @@ class RuntimeResource:
         return self._state.bypass_tool_permissions
 
     @property
-    def experimental_harness(self) -> bool:
-        return self._state.experimental_harness
-
-    @property
     def connectors(self) -> ConnectorCounts:
         return self._state.connectors
 
@@ -407,19 +442,6 @@ class RuntimeResource:
 
     def has_tool(self, name: str) -> bool:
         return self._state.has_tool(name)
-
-    async def read_logs(self, *, limit: int = 100, offset: int = 0) -> DebugLogPage:
-        client = await self._connection.connect()
-        response = validate_wire(
-            DiagnosticsLogsReadResponse,
-            await client.request(
-                "diagnostics/logs/read",
-                DiagnosticsLogsReadParams(
-                    session_id=self._state.session_id, limit=limit, offset=offset
-                ),
-            ),
-        )
-        return response.logs
 
     async def wait_until_ready(self) -> None:
         client = await self._connection.connect()
@@ -448,7 +470,9 @@ class RuntimeResource:
         if notification.method != "runtime/updated":
             return False
         params = validate_wire(RuntimeUpdatedParams, notification.params)
-        if params.session_id != self._state.session_id:
-            return False
-        self._state.apply_runtime(params.runtime)
+        # Consumed either way: one for another session is a stale announcement
+        # (a background load ending as /clear or a fork replaced the session),
+        # not an event the session stream can place.
+        if params.session_id == self._state.session_id:
+            self._state.apply_runtime(params.runtime)
         return True

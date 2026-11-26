@@ -1,0 +1,807 @@
+[
+  {
+    "id": "user-with-image",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 0,
+    "updatedAt": 0,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Show every chat history entry."
+      },
+      {
+        "type": "image",
+        "attachment": {
+          "source": {
+            "kind": "inline",
+            "data": "iVBORw0KGgo="
+          },
+          "alias": "demo.png",
+          "mimeType": "image/png"
+        }
+      }
+    ],
+    "source": "turn_start",
+    "userDisplayContent": null
+  },
+  {
+    "id": "assistant-markdown",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 1,
+    "updatedAt": 1,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "# Markdown demo\n\nSome **bold** text, some *italic* text, and `inline code`.\n\n```rust\nfn greet(name: &str) {\n    println!(\"Hello, {name}\");\n}\n```\n\n```python\ndef greet(name: str) -> str:\n    \"\"\"Say hello.\"\"\"\n    return f\"Hello, {name}\"  # 1 + 1\n```\n\n- first bullet\n- second bullet\n\n1. first step\n2. second step\n\n> a short blockquote\n\nA [link](https://mistral.ai) to finish, and an editor link to [README](vscode://file/tmp/README.md:1).\n\nA link-heavy paragraph, so `/stress` exercises hit testing: [agent loop](vscode://file/tmp/loop.py:1), [tool registry](vscode://file/tmp/tools.py:2), [config layers](vscode://file/tmp/config.py:3), [session store](vscode://file/tmp/store.py:4), [rewind](vscode://file/tmp/rewind.py:5), [skills loader](vscode://file/tmp/skills.py:6), [hooks runner](vscode://file/tmp/hooks.py:7), [MCP client](vscode://file/tmp/mcp.py:8), [connectors](vscode://file/tmp/connectors.py:9), [retry helper](vscode://file/tmp/retry.py:10), [ratatui docs](https://ratatui.rs), [pulldown-cmark](https://crates.io/crates/pulldown-cmark), [tokio](https://tokio.rs), [serde](https://serde.rs), [Mistral](https://mistral.ai), [Le Chat](https://chat.mistral.ai), [the API docs](https://docs.mistral.ai), [Textual](https://textual.textualize.io), [the Rust book](https://doc.rust-lang.org/book), and [crates.io](https://crates.io).\n\n| left | right |\n| --- | --- |\n| one | two |\n\n| Source | State | Detail |\n| --- | --- | --- |\n| [render 0](vscode://file/tmp/panels.tsx:0) | **bold** `row0` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 1](vscode://file/tmp/panels.tsx:1) | **bold** `row1` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 2](vscode://file/tmp/panels.tsx:2) | **bold** `row2` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 3](vscode://file/tmp/panels.tsx:3) | **bold** `row3` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 4](vscode://file/tmp/panels.tsx:4) | **bold** `row4` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 5](vscode://file/tmp/panels.tsx:5) | **bold** `row5` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 6](vscode://file/tmp/panels.tsx:6) | **bold** `row6` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n| [render 7](vscode://file/tmp/panels.tsx:7) | **bold** `row7` | wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai) wrapping cell with *styles*, `code`, 代码审查 🧪🔥 é́ مرحبا and a [link](https://mistral.ai)  |\n\n> Nested **styles** with a [link](https://ratatui.rs) and `inline code`.\n> - wrapped bullet inside a quote, long enough to reflow at any width\n>   - deeper bullet with `code`, 代码审查 🧪🔥 é́ مرحبا and *emphasis*\n\n```tsx\nconst Row5000 = <Panelmd key={5000} title={items?.[5000]?.name ?? 'row-5000-md'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-5000</b>)}</Panel>;\nconst Row5001 = <Panelmd key={5001} title={items?.[5001]?.name ?? 'row-5001-md'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-5001</b>)}</Panel>;\nconst Row5002 = <Panelmd key={5002} title={items?.[5002]?.name ?? 'row-5002-md'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-5002</b>)}</Panel>;\nconst Row5003 = <Panelmd key={5003} title={items?.[5003]?.name ?? 'row-5003-md'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-5003</b>)}</Panel>;\n```\n"
+      }
+    ],
+    "source": null,
+    "userDisplayContent": null
+  },
+  {
+    "id": "reasoning-completed",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 2,
+    "updatedAt": 2,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "reasoning",
+    "text": "A completed thought can be expanded to inspect its reasoning.",
+    "summary": [
+      "Completed reasoning summary."
+    ]
+  },
+  {
+    "id": "reasoning-live",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 3,
+    "updatedAt": 3,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "reasoning",
+    "text": "This thought is still streaming.",
+    "summary": []
+  },
+  {
+    "id": "effect-pending",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 4,
+    "updatedAt": 4,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo pending effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_pending",
+      "input": null,
+      "display": {
+        "summary": "Preparing a tool call",
+        "content": null,
+        "suffix": "",
+        "verb": "Preparing",
+        "message": "a tool call",
+        "settledVerb": "Prepared",
+        "settledMessage": "a tool call",
+        "statusText": "Preparing tool"
+      }
+    },
+    "state": {
+      "status": "pending"
+    }
+  },
+  {
+    "id": "effect-running",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 5,
+    "updatedAt": 5,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "edit live.tsx",
+    "detail": {
+      "kind": "file_edit",
+      "toolName": "edit",
+      "input": null,
+      "display": {
+        "summary": "Editing live.tsx",
+        "content": null,
+        "suffix": "",
+        "verb": "Editing",
+        "message": "live.tsx 代码审查 🧪🔥 é́ مرحبا",
+        "settledVerb": "Edited",
+        "settledMessage": "live.tsx",
+        "statusText": "Editing files"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "outputText": "\u001b[32m代码审查 🧪🔥 é́ مرحبا streamed \u001b[0mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "display": {
+        "success": true,
+        "verb": "Edited",
+        "message": "live.tsx",
+        "warnings": [
+          "代码审查 🧪🔥 é́ مرحبا warning row that wraps"
+        ],
+        "suffix": ""
+      },
+      "output": {
+        "file": "live.tsx",
+        "occurrences": [
+          {
+            "startLine": 3000,
+            "oldText": "const Row2000 = <Panellive-old0 key={2000} title={items?.[2000]?.name ?? 'row-2000-live-old0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2000</b>)}</Panel>;\nconst Row2001 = <Panellive-old0 key={2001} title={items?.[2001]?.name ?? 'row-2001-live-old0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2001</b>)}</Panel>;\nconst Row2002 = <Panellive-old0 key={2002} title={items?.[2002]?.name ?? 'row-2002-live-old0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2002</b>)}</Panel>;\nconst Row2003 = <Panellive-old0 key={2003} title={items?.[2003]?.name ?? 'row-2003-live-old0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2003</b>)}</Panel>;\n",
+            "newText": "const Row2000 = <Panellive-new0 key={2000} title={items?.[2000]?.name ?? 'row-2000-live-new0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2000</b>)}</Panel>;\nconst Row2001 = <Panellive-new0 key={2001} title={items?.[2001]?.name ?? 'row-2001-live-new0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2001</b>)}</Panel>;\nconst Row2002 = <Panellive-new0 key={2002} title={items?.[2002]?.name ?? 'row-2002-live-new0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2002</b>)}</Panel>;\nconst Row2003 = <Panellive-new0 key={2003} title={items?.[2003]?.name ?? 'row-2003-live-new0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2003</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 3200,
+            "oldText": "const Row2100 = <Panellive-old1 key={2100} title={items?.[2100]?.name ?? 'row-2100-live-old1'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2100</b>)}</Panel>;\nconst Row2101 = <Panellive-old1 key={2101} title={items?.[2101]?.name ?? 'row-2101-live-old1'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2101</b>)}</Panel>;\nconst Row2102 = <Panellive-old1 key={2102} title={items?.[2102]?.name ?? 'row-2102-live-old1'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2102</b>)}</Panel>;\nconst Row2103 = <Panellive-old1 key={2103} title={items?.[2103]?.name ?? 'row-2103-live-old1'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2103</b>)}</Panel>;\n",
+            "newText": "const Row2100 = <Panellive-new1 key={2100} title={items?.[2100]?.name ?? 'row-2100-live-new1'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2100</b>)}</Panel>;\nconst Row2101 = <Panellive-new1 key={2101} title={items?.[2101]?.name ?? 'row-2101-live-new1'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2101</b>)}</Panel>;\nconst Row2102 = <Panellive-new1 key={2102} title={items?.[2102]?.name ?? 'row-2102-live-new1'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2102</b>)}</Panel>;\nconst Row2103 = <Panellive-new1 key={2103} title={items?.[2103]?.name ?? 'row-2103-live-new1'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2103</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 3400,
+            "oldText": "const Row2200 = <Panellive-old2 key={2200} title={items?.[2200]?.name ?? 'row-2200-live-old2'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2200</b>)}</Panel>;\nconst Row2201 = <Panellive-old2 key={2201} title={items?.[2201]?.name ?? 'row-2201-live-old2'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2201</b>)}</Panel>;\nconst Row2202 = <Panellive-old2 key={2202} title={items?.[2202]?.name ?? 'row-2202-live-old2'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2202</b>)}</Panel>;\nconst Row2203 = <Panellive-old2 key={2203} title={items?.[2203]?.name ?? 'row-2203-live-old2'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2203</b>)}</Panel>;\n",
+            "newText": "const Row2200 = <Panellive-new2 key={2200} title={items?.[2200]?.name ?? 'row-2200-live-new2'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2200</b>)}</Panel>;\nconst Row2201 = <Panellive-new2 key={2201} title={items?.[2201]?.name ?? 'row-2201-live-new2'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2201</b>)}</Panel>;\nconst Row2202 = <Panellive-new2 key={2202} title={items?.[2202]?.name ?? 'row-2202-live-new2'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2202</b>)}</Panel>;\nconst Row2203 = <Panellive-new2 key={2203} title={items?.[2203]?.name ?? 'row-2203-live-new2'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2203</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 3600,
+            "oldText": "const Row2300 = <Panellive-old3 key={2300} title={items?.[2300]?.name ?? 'row-2300-live-old3'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2300</b>)}</Panel>;\nconst Row2301 = <Panellive-old3 key={2301} title={items?.[2301]?.name ?? 'row-2301-live-old3'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2301</b>)}</Panel>;\nconst Row2302 = <Panellive-old3 key={2302} title={items?.[2302]?.name ?? 'row-2302-live-old3'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2302</b>)}</Panel>;\nconst Row2303 = <Panellive-old3 key={2303} title={items?.[2303]?.name ?? 'row-2303-live-old3'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2303</b>)}</Panel>;\n",
+            "newText": "const Row2300 = <Panellive-new3 key={2300} title={items?.[2300]?.name ?? 'row-2300-live-new3'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2300</b>)}</Panel>;\nconst Row2301 = <Panellive-new3 key={2301} title={items?.[2301]?.name ?? 'row-2301-live-new3'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2301</b>)}</Panel>;\nconst Row2302 = <Panellive-new3 key={2302} title={items?.[2302]?.name ?? 'row-2302-live-new3'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2302</b>)}</Panel>;\nconst Row2303 = <Panellive-new3 key={2303} title={items?.[2303]?.name ?? 'row-2303-live-new3'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2303</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 3800,
+            "oldText": "const Row2400 = <Panellive-old4 key={2400} title={items?.[2400]?.name ?? 'row-2400-live-old4'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2400</b>)}</Panel>;\nconst Row2401 = <Panellive-old4 key={2401} title={items?.[2401]?.name ?? 'row-2401-live-old4'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2401</b>)}</Panel>;\nconst Row2402 = <Panellive-old4 key={2402} title={items?.[2402]?.name ?? 'row-2402-live-old4'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2402</b>)}</Panel>;\nconst Row2403 = <Panellive-old4 key={2403} title={items?.[2403]?.name ?? 'row-2403-live-old4'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2403</b>)}</Panel>;\n",
+            "newText": "const Row2400 = <Panellive-new4 key={2400} title={items?.[2400]?.name ?? 'row-2400-live-new4'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-2400</b>)}</Panel>;\nconst Row2401 = <Panellive-new4 key={2401} title={items?.[2401]?.name ?? 'row-2401-live-new4'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-2401</b>)}</Panel>;\nconst Row2402 = <Panellive-new4 key={2402} title={items?.[2402]?.name ?? 'row-2402-live-new4'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2402</b>)}</Panel>;\nconst Row2403 = <Panellive-new4 key={2403} title={items?.[2403]?.name ?? 'row-2403-live-new4'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-2403</b>)}</Panel>;\n"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "effect-blocked",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 6,
+    "updatedAt": 6,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo blocked effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_blocked",
+      "input": null,
+      "display": {
+        "summary": "Waiting for approval",
+        "content": null,
+        "suffix": "",
+        "verb": "Waiting",
+        "message": "for approval",
+        "settledVerb": "Approved",
+        "settledMessage": "the request",
+        "statusText": "Waiting for approval"
+      }
+    },
+    "state": {
+      "status": "blocked",
+      "callbackId": "demo-approval",
+      "outputText": ""
+    }
+  },
+  {
+    "id": "effect-completed",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 7,
+    "updatedAt": 7,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "read_file widgets.tsx",
+    "detail": {
+      "kind": "file_read",
+      "toolName": "read_file",
+      "input": {
+        "filePath": "widgets.tsx",
+        "offset": null,
+        "limit": 2000
+      },
+      "display": {
+        "summary": "Reading widgets.tsx",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "widgets.tsx",
+        "settledVerb": "Read",
+        "settledMessage": "widgets.tsx",
+        "statusText": "Reading file"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "filePath": "widgets.tsx",
+        "content": "const Row900 = <Panelread key={900} title={items?.[900]?.name ?? 'row-900-read'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-900</b>)}</Panel>;\nconst Row901 = <Panelread key={901} title={items?.[901]?.name ?? 'row-901-read'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-901</b>)}</Panel>;\nconst Row902 = <Panelread key={902} title={items?.[902]?.name ?? 'row-902-read'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-902</b>)}</Panel>;\nconst Row903 = <Panelread key={903} title={items?.[903]?.name ?? 'row-903-read'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-903</b>)}</Panel>;\n",
+        "numLines": 60,
+        "startLine": 1,
+        "requestedOffset": null,
+        "requestedLimit": 2000,
+        "totalLines": 60,
+        "wasTruncated": false
+      },
+      "outputText": "",
+      "durationMs": 12.5,
+      "display": {
+        "success": true,
+        "verb": "Read",
+        "message": "60 lines from widgets.tsx",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-edit",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 8,
+    "updatedAt": 8,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "edit panels.tsx",
+    "detail": {
+      "kind": "file_edit",
+      "toolName": "edit",
+      "input": {
+        "filePath": "panels.tsx",
+        "oldString": "const Row0 = <Panelold0 key={0} title={items?.[0]?.name ?? 'row-0-old0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-0</b>)}</Panel>;\nconst Row1 = <Panelold0 key={1} title={items?.[1]?.name ?? 'row-1-old0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-1</b>)}</Panel>;\nconst Row2 = <Panelold0 key={2} title={items?.[2]?.name ?? 'row-2-old0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2</b>)}</Panel>;\nconst Row3 = <Panelold0 key={3} title={items?.[3]?.name ?? 'row-3-old0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-3</b>)}</Panel>;\n",
+        "newString": "const Row0 = <Panelnew0 key={0} title={items?.[0]?.name ?? 'row-0-new0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-0</b>)}</Panel>;\nconst Row1 = <Panelnew0 key={1} title={items?.[1]?.name ?? 'row-1-new0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-1</b>)}</Panel>;\nconst Row2 = <Panelnew0 key={2} title={items?.[2]?.name ?? 'row-2-new0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2</b>)}</Panel>;\nconst Row3 = <Panelnew0 key={3} title={items?.[3]?.name ?? 'row-3-new0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-3</b>)}</Panel>;\n",
+        "replaceAll": true
+      },
+      "display": {
+        "summary": "Editing panels.tsx",
+        "content": null,
+        "suffix": "",
+        "verb": "Editing",
+        "message": "panels.tsx",
+        "settledVerb": "Edited",
+        "settledMessage": "panels.tsx",
+        "statusText": "Editing files"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "file": "panels.tsx",
+        "oldString": "const Row0 = <Panelold0 key={0} title={items?.[0]?.name ?? 'row-0-old0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-0</b>)}</Panel>;\nconst Row1 = <Panelold0 key={1} title={items?.[1]?.name ?? 'row-1-old0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-1</b>)}</Panel>;\nconst Row2 = <Panelold0 key={2} title={items?.[2]?.name ?? 'row-2-old0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2</b>)}</Panel>;\nconst Row3 = <Panelold0 key={3} title={items?.[3]?.name ?? 'row-3-old0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-3</b>)}</Panel>;\n",
+        "newString": "const Row0 = <Panelnew0 key={0} title={items?.[0]?.name ?? 'row-0-new0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-0</b>)}</Panel>;\nconst Row1 = <Panelnew0 key={1} title={items?.[1]?.name ?? 'row-1-new0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-1</b>)}</Panel>;\nconst Row2 = <Panelnew0 key={2} title={items?.[2]?.name ?? 'row-2-new0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2</b>)}</Panel>;\nconst Row3 = <Panelnew0 key={3} title={items?.[3]?.name ?? 'row-3-new0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-3</b>)}</Panel>;\n",
+        "occurrences": [
+          {
+            "startLine": 40,
+            "oldText": "const Row0 = <Panelold0 key={0} title={items?.[0]?.name ?? 'row-0-old0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-0</b>)}</Panel>;\nconst Row1 = <Panelold0 key={1} title={items?.[1]?.name ?? 'row-1-old0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-1</b>)}</Panel>;\nconst Row2 = <Panelold0 key={2} title={items?.[2]?.name ?? 'row-2-old0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2</b>)}</Panel>;\nconst Row3 = <Panelold0 key={3} title={items?.[3]?.name ?? 'row-3-old0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-3</b>)}</Panel>;\n",
+            "newText": "const Row0 = <Panelnew0 key={0} title={items?.[0]?.name ?? 'row-0-new0'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-0</b>)}</Panel>;\nconst Row1 = <Panelnew0 key={1} title={items?.[1]?.name ?? 'row-1-new0'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-1</b>)}</Panel>;\nconst Row2 = <Panelnew0 key={2} title={items?.[2]?.name ?? 'row-2-new0'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-2</b>)}</Panel>;\nconst Row3 = <Panelnew0 key={3} title={items?.[3]?.name ?? 'row-3-new0'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-3</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 160,
+            "oldText": "const Row100 = <Panelold1 key={100} title={items?.[100]?.name ?? 'row-100-old1'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-100</b>)}</Panel>;\nconst Row101 = <Panelold1 key={101} title={items?.[101]?.name ?? 'row-101-old1'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-101</b>)}</Panel>;\nconst Row102 = <Panelold1 key={102} title={items?.[102]?.name ?? 'row-102-old1'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-102</b>)}</Panel>;\nconst Row103 = <Panelold1 key={103} title={items?.[103]?.name ?? 'row-103-old1'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-103</b>)}</Panel>;\n",
+            "newText": "const Row100 = <Panelnew1 key={100} title={items?.[100]?.name ?? 'row-100-new1'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-100</b>)}</Panel>;\nconst Row101 = <Panelnew1 key={101} title={items?.[101]?.name ?? 'row-101-new1'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-101</b>)}</Panel>;\nconst Row102 = <Panelnew1 key={102} title={items?.[102]?.name ?? 'row-102-new1'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-102</b>)}</Panel>;\nconst Row103 = <Panelnew1 key={103} title={items?.[103]?.name ?? 'row-103-new1'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-103</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 280,
+            "oldText": "const Row200 = <Panelold2 key={200} title={items?.[200]?.name ?? 'row-200-old2'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-200</b>)}</Panel>;\nconst Row201 = <Panelold2 key={201} title={items?.[201]?.name ?? 'row-201-old2'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-201</b>)}</Panel>;\nconst Row202 = <Panelold2 key={202} title={items?.[202]?.name ?? 'row-202-old2'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-202</b>)}</Panel>;\nconst Row203 = <Panelold2 key={203} title={items?.[203]?.name ?? 'row-203-old2'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-203</b>)}</Panel>;\n",
+            "newText": "const Row200 = <Panelnew2 key={200} title={items?.[200]?.name ?? 'row-200-new2'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-200</b>)}</Panel>;\nconst Row201 = <Panelnew2 key={201} title={items?.[201]?.name ?? 'row-201-new2'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-201</b>)}</Panel>;\nconst Row202 = <Panelnew2 key={202} title={items?.[202]?.name ?? 'row-202-new2'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-202</b>)}</Panel>;\nconst Row203 = <Panelnew2 key={203} title={items?.[203]?.name ?? 'row-203-new2'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-203</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 400,
+            "oldText": "const Row300 = <Panelold3 key={300} title={items?.[300]?.name ?? 'row-300-old3'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-300</b>)}</Panel>;\nconst Row301 = <Panelold3 key={301} title={items?.[301]?.name ?? 'row-301-old3'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-301</b>)}</Panel>;\nconst Row302 = <Panelold3 key={302} title={items?.[302]?.name ?? 'row-302-old3'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-302</b>)}</Panel>;\nconst Row303 = <Panelold3 key={303} title={items?.[303]?.name ?? 'row-303-old3'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-303</b>)}</Panel>;\n",
+            "newText": "const Row300 = <Panelnew3 key={300} title={items?.[300]?.name ?? 'row-300-new3'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-300</b>)}</Panel>;\nconst Row301 = <Panelnew3 key={301} title={items?.[301]?.name ?? 'row-301-new3'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-301</b>)}</Panel>;\nconst Row302 = <Panelnew3 key={302} title={items?.[302]?.name ?? 'row-302-new3'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-302</b>)}</Panel>;\nconst Row303 = <Panelnew3 key={303} title={items?.[303]?.name ?? 'row-303-new3'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-303</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 520,
+            "oldText": "const Row400 = <Panelold4 key={400} title={items?.[400]?.name ?? 'row-400-old4'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-400</b>)}</Panel>;\nconst Row401 = <Panelold4 key={401} title={items?.[401]?.name ?? 'row-401-old4'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-401</b>)}</Panel>;\nconst Row402 = <Panelold4 key={402} title={items?.[402]?.name ?? 'row-402-old4'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-402</b>)}</Panel>;\nconst Row403 = <Panelold4 key={403} title={items?.[403]?.name ?? 'row-403-old4'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-403</b>)}</Panel>;\n",
+            "newText": "const Row400 = <Panelnew4 key={400} title={items?.[400]?.name ?? 'row-400-new4'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-400</b>)}</Panel>;\nconst Row401 = <Panelnew4 key={401} title={items?.[401]?.name ?? 'row-401-new4'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-401</b>)}</Panel>;\nconst Row402 = <Panelnew4 key={402} title={items?.[402]?.name ?? 'row-402-new4'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-402</b>)}</Panel>;\nconst Row403 = <Panelnew4 key={403} title={items?.[403]?.name ?? 'row-403-new4'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-403</b>)}</Panel>;\n"
+          },
+          {
+            "startLine": 640,
+            "oldText": "const Row500 = <Panelold5 key={500} title={items?.[500]?.name ?? 'row-500-old5'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-500</b>)}</Panel>;\nconst Row501 = <Panelold5 key={501} title={items?.[501]?.name ?? 'row-501-old5'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-501</b>)}</Panel>;\nconst Row502 = <Panelold5 key={502} title={items?.[502]?.name ?? 'row-502-old5'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-502</b>)}</Panel>;\nconst Row503 = <Panelold5 key={503} title={items?.[503]?.name ?? 'row-503-old5'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-503</b>)}</Panel>;\n",
+            "newText": "const Row500 = <Panelnew5 key={500} title={items?.[500]?.name ?? 'row-500-new5'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-500</b>)}</Panel>;\nconst Row501 = <Panelnew5 key={501} title={items?.[501]?.name ?? 'row-501-new5'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-501</b>)}</Panel>;\nconst Row502 = <Panelnew5 key={502} title={items?.[502]?.name ?? 'row-502-new5'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-502</b>)}</Panel>;\nconst Row503 = <Panelnew5 key={503} title={items?.[503]?.name ?? 'row-503-new5'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-503</b>)}</Panel>;\n"
+          }
+        ]
+      },
+      "outputText": "",
+      "durationMs": 8.25,
+      "display": {
+        "success": true,
+        "verb": "Edited",
+        "message": "panels.tsx",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-completed-error",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 8,
+    "updatedAt": 8,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo unsuccessful result",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_unsuccessful",
+      "input": null,
+      "display": {
+        "summary": "Running a command",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a command",
+        "settledVerb": "Ran",
+        "settledMessage": "a command",
+        "statusText": "Running command"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "content": "command returned a non-zero result"
+      },
+      "outputText": "",
+      "durationMs": 8.0,
+      "display": {
+        "success": false,
+        "verb": "Ran",
+        "message": "command returned a non-zero result",
+        "warnings": [
+          "This is a visual demo warning."
+        ],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-failed",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 9,
+    "updatedAt": 9,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo failed effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_failed",
+      "input": null,
+      "display": {
+        "summary": "Running a command that fails",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a command that fails",
+        "settledVerb": "Ran",
+        "settledMessage": "a command that fails",
+        "statusText": "Running command"
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": {
+        "message": "exit code 1",
+        "code": null,
+        "details": null
+      },
+      "outputText": "exit code 1",
+      "durationMs": 4.0,
+      "display": {
+        "success": false,
+        "verb": "Ran",
+        "message": "command failed",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-cancelled",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 10,
+    "updatedAt": 10,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo cancelled effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_cancelled",
+      "input": null,
+      "display": {
+        "summary": "Running a cancellable command",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a cancellable command",
+        "settledVerb": "Ran",
+        "settledMessage": "a cancellable command",
+        "statusText": "Running command"
+      }
+    },
+    "state": {
+      "status": "cancelled",
+      "reason": "Cancelled by the user",
+      "outputText": "",
+      "durationMs": 2.0,
+      "display": null
+    }
+  },
+  {
+    "id": "effect-skipped",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 11,
+    "updatedAt": 11,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo skipped effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_skipped",
+      "input": null,
+      "display": {
+        "summary": "Preparing an optional command",
+        "content": null,
+        "suffix": "",
+        "verb": "Preparing",
+        "message": "an optional command",
+        "settledVerb": "Prepared",
+        "settledMessage": "an optional command",
+        "statusText": "Preparing command"
+      }
+    },
+    "state": {
+      "status": "skipped",
+      "reason": "The prerequisite was not met",
+      "display": {
+        "success": true,
+        "verb": "Skipped",
+        "message": "optional command",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "checkpoint-compaction",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 12,
+    "updatedAt": 12,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "checkpoint",
+    "kind": "compaction",
+    "message": "Compaction completed.",
+    "details": null
+  },
+  {
+    "id": "effect-web-search",
+    "type": "effect",
+    "generationStatus": "completed",
+    "title": "web_search ratatui perf",
+    "detail": {
+      "kind": "web_search",
+      "toolName": "web_search",
+      "display": {
+        "verb": "Searched",
+        "message": "ratatui rendering performance 代码审查 🧪🔥 é́ مرحبا",
+        "suffix": "",
+        "settledVerb": "Searched",
+        "settledMessage": "ratatui rendering performance",
+        "statusText": "Searching"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "query": "ratatui rendering performance",
+        "answer": "A long answer line that must wrap and re-wrap on every resize. A long answer line that must wrap and re-wrap on every resize. A long answer line that must wrap and re-wrap on every resize. A long answer line that must wrap and re-wrap on every resize. A long answer line that must wrap and re-wrap on every resize. A long answer line that must wrap and re-wrap on every resize. ",
+        "sources": [
+          {
+            "url": "https://example.com/source-0",
+            "title": "Source 0 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-1",
+            "title": "Source 1 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-2",
+            "title": "Source 2 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-3",
+            "title": "Source 3 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-4",
+            "title": "Source 4 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-5",
+            "title": "Source 5 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-6",
+            "title": "Source 6 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-7",
+            "title": "Source 7 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-8",
+            "title": "Source 8 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-9",
+            "title": "Source 9 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-10",
+            "title": "Source 10 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-11",
+            "title": "Source 11 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-12",
+            "title": "Source 12 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-13",
+            "title": "Source 13 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-14",
+            "title": "Source 14 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-15",
+            "title": "Source 15 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-16",
+            "title": "Source 16 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-17",
+            "title": "Source 17 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-18",
+            "title": "Source 18 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-19",
+            "title": "Source 19 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-20",
+            "title": "Source 20 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-21",
+            "title": "Source 21 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-22",
+            "title": "Source 22 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          },
+          {
+            "url": "https://example.com/source-23",
+            "title": "Source 23 — 代码审查 🧪🔥 é́ مرحبا wrapping title long enough to reflow"
+          }
+        ]
+      },
+      "display": {
+        "success": true,
+        "verb": "Searched",
+        "message": "24 sources",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-todo",
+    "type": "effect",
+    "generationStatus": "completed",
+    "title": "todo",
+    "detail": {
+      "kind": "todo",
+      "toolName": "todo",
+      "display": {
+        "verb": "Updated",
+        "message": "todos",
+        "suffix": "",
+        "settledVerb": "Updated",
+        "settledMessage": "todos",
+        "statusText": "Updating todos"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "todos": [
+          {
+            "content": "Todo 0 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "in_progress"
+          },
+          {
+            "content": "Todo 1 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "pending"
+          },
+          {
+            "content": "Todo 2 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "completed"
+          },
+          {
+            "content": "Todo 3 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "cancelled"
+          },
+          {
+            "content": "Todo 4 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "in_progress"
+          },
+          {
+            "content": "Todo 5 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "pending"
+          },
+          {
+            "content": "Todo 6 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "completed"
+          },
+          {
+            "content": "Todo 7 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "cancelled"
+          },
+          {
+            "content": "Todo 8 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "in_progress"
+          },
+          {
+            "content": "Todo 9 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "pending"
+          },
+          {
+            "content": "Todo 10 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "completed"
+          },
+          {
+            "content": "Todo 11 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "cancelled"
+          },
+          {
+            "content": "Todo 12 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "in_progress"
+          },
+          {
+            "content": "Todo 13 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "pending"
+          },
+          {
+            "content": "Todo 14 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "completed"
+          },
+          {
+            "content": "Todo 15 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "cancelled"
+          },
+          {
+            "content": "Todo 16 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "in_progress"
+          },
+          {
+            "content": "Todo 17 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "pending"
+          },
+          {
+            "content": "Todo 18 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "completed"
+          },
+          {
+            "content": "Todo 19 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "cancelled"
+          },
+          {
+            "content": "Todo 20 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "in_progress"
+          },
+          {
+            "content": "Todo 21 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "pending"
+          },
+          {
+            "content": "Todo 22 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "completed"
+          },
+          {
+            "content": "Todo 23 — 代码审查 🧪🔥 é́ مرحبا a wrapped item long enough to reflow at any width",
+            "status": "cancelled"
+          }
+        ]
+      },
+      "display": {
+        "success": true,
+        "verb": "Updated",
+        "message": "24 todos",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-write",
+    "type": "effect",
+    "generationStatus": "completed",
+    "title": "write_file generated.tsx",
+    "detail": {
+      "kind": "file_write",
+      "toolName": "write_file",
+      "input": {
+        "filePath": "generated.tsx"
+      },
+      "display": {
+        "verb": "Wrote",
+        "message": "generated.tsx 代码审查 🧪🔥 é́ مرحبا",
+        "suffix": "",
+        "settledVerb": "Wrote",
+        "settledMessage": "generated.tsx",
+        "statusText": "Writing files"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "filePath": "generated.tsx",
+        "content": "const Row6000 = <Panelwrite key={6000} title={items?.[6000]?.name ?? 'row-6000-write'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-6000</b>)}</Panel>;\nconst Row6001 = <Panelwrite key={6001} title={items?.[6001]?.name ?? 'row-6001-write'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-6001</b>)}</Panel>;\nconst Row6002 = <Panelwrite key={6002} title={items?.[6002]?.name ?? 'row-6002-write'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-6002</b>)}</Panel>;\nconst Row6003 = <Panelwrite key={6003} title={items?.[6003]?.name ?? 'row-6003-write'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-6003</b>)}</Panel>;\n"
+      },
+      "display": {
+        "success": true,
+        "verb": "Wrote",
+        "message": "90 lines",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "reasoning-live-long",
+    "type": "reasoning",
+    "generationStatus": "in_progress",
+    "text": "代码审查 🧪🔥 é́ مرحبا reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping.  reasoning line that keeps streaming and wrapping. \n\nconst Row4000 = <Panelthink key={4000} title={items?.[4000]?.name ?? 'row-4000-think'}>{items.filter(x => /[a-z0]+/i.test(x.name)).map(x => <b>{x.name}-4000</b>)}</Panel>;\nconst Row4001 = <Panelthink key={4001} title={items?.[4001]?.name ?? 'row-4001-think'}>{items.filter(x => /[a-z1]+/i.test(x.name)).map(x => <b>{x.name}-4001</b>)}</Panel>;\nconst Row4002 = <Panelthink key={4002} title={items?.[4002]?.name ?? 'row-4002-think'}>{items.filter(x => /[a-z2]+/i.test(x.name)).map(x => <b>{x.name}-4002</b>)}</Panel>;\nconst Row4003 = <Panelthink key={4003} title={items?.[4003]?.name ?? 'row-4003-think'}>{items.filter(x => /[a-z3]+/i.test(x.name)).map(x => <b>{x.name}-4003</b>)}</Panel>;\n",
+    "summary": []
+  }
+]

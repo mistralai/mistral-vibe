@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock
 
 from acp.schema import AgentMessageChunk
 import pytest
@@ -10,14 +9,18 @@ import pytest
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import VibeAcpAgent
 from vibe.acp.session import AcpSession
+from vibe.app_server.events import ServerWarning
 from vibe.app_server.models import (
     MCPSourceKind,
     MCPSourceStatus,
     MCPSourceSummary,
     MCPState,
+    PublicError,
 )
-from vibe.cli.textual_ui.app import VibeApp
-from vibe.cli.textual_ui.widgets.messages import UserCommandMessage
+from vibe.app_server.protocol import (
+    INTEGRATIONS_UNAVAILABLE_WARNING,
+    ServerWarningParams,
+)
 
 
 def _public_mcp(
@@ -42,77 +45,6 @@ def _public_mcp(
         ),
         discovery_errors=errors or {},
     )
-
-
-@pytest.mark.asyncio
-async def test_tui_mcp_auth_notice_uses_status_for_uncached_oauth() -> None:
-    mount = AsyncMock()
-    app = cast(
-        VibeApp,
-        SimpleNamespace(
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(mcp=_public_mcp("sentry"))
-                )
-            ),
-            _mount_and_scroll=mount,
-        ),
-    )
-
-    await VibeApp._show_mcp_auth_required_notice(app)
-
-    mount.assert_awaited_once()
-    args = mount.await_args
-    assert args is not None
-    message = args.args[0]
-    assert isinstance(message, UserCommandMessage)
-    assert "sentry" in message._content
-
-
-@pytest.mark.asyncio
-async def test_tui_mcp_auth_notice_skips_disabled_servers() -> None:
-    mount = AsyncMock()
-    app = cast(
-        VibeApp,
-        SimpleNamespace(
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(mcp=_public_mcp("sentry", disabled=True))
-                )
-            ),
-            _mount_and_scroll=mount,
-        ),
-    )
-
-    await VibeApp._show_mcp_auth_required_notice(app)
-
-    mount.assert_not_awaited()
-
-
-def test_tui_mcp_discovery_failures_surface_errors() -> None:
-    notify = Mock()
-    app = cast(
-        VibeApp,
-        SimpleNamespace(
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(
-                        mcp=_public_mcp(
-                            errors={"fail-http": "down", "broken": "no binary"}
-                        )
-                    )
-                )
-            ),
-            notify=notify,
-        ),
-    )
-
-    VibeApp._show_mcp_discovery_failures(app)
-
-    assert [call.args[0] for call in notify.call_args_list] == [
-        "MCP server 'broken' failed to connect: no binary",
-        "MCP server 'fail-http' failed to connect: down",
-    ]
 
 
 @pytest.mark.asyncio
@@ -170,46 +102,8 @@ async def test_acp_mcp_auth_notice_uses_status_for_uncached_oauth() -> None:
     assert "sentry" in messages[0].content.text
 
 
-@pytest.mark.asyncio
-async def test_acp_mcp_discovery_failures_surfaces_errors() -> None:
-    agent = VibeAcpAgent()
-    client = FakeClient()
-    agent.on_connect(client)
-    session = cast(
-        AcpSession,
-        SimpleNamespace(
-            id="session-id",
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(
-                        mcp=_public_mcp(
-                            errors={"fail-http": "down", "broken": "no binary"}
-                        )
-                    )
-                )
-            ),
-        ),
-    )
-
-    await agent._notify_mcp_discovery_failures(session)
-
-    messages = [
-        notification.update
-        for notification in client._session_updates
-        if isinstance(notification.update, AgentMessageChunk)
-    ]
-    assert len(messages) == 1
-    text = messages[0].content.text
-    assert "fail-http" in text and "down" in text
-    assert "broken" in text and "no binary" in text
-
-
-@pytest.mark.asyncio
-async def test_acp_mcp_discovery_failures_no_message_when_empty() -> None:
-    agent = VibeAcpAgent()
-    client = FakeClient()
-    agent.on_connect(client)
-    session = cast(
+def _session_for_events() -> AcpSession:
+    return cast(
         AcpSession,
         SimpleNamespace(
             id="session-id",
@@ -219,11 +113,47 @@ async def test_acp_mcp_discovery_failures_no_message_when_empty() -> None:
         ),
     )
 
-    await agent._notify_mcp_discovery_failures(session)
+
+@pytest.mark.asyncio
+async def test_acp_shows_the_integrations_that_could_not_load() -> None:
+    agent = VibeAcpAgent()
+    client = FakeClient()
+    agent.on_connect(client)
+    warning = "MCP server 'fail-http' failed to connect: down."
+
+    await agent._forward_event(
+        _session_for_events(),
+        ServerWarning(
+            ServerWarningParams(
+                warning=PublicError(
+                    message=warning, code=INTEGRATIONS_UNAVAILABLE_WARNING
+                )
+            )
+        ),
+    )
 
     messages = [
         notification.update
         for notification in client._session_updates
         if isinstance(notification.update, AgentMessageChunk)
     ]
-    assert messages == []
+    assert [message.content.text for message in messages] == [warning]
+
+
+@pytest.mark.asyncio
+async def test_acp_does_not_show_other_warnings_as_messages() -> None:
+    agent = VibeAcpAgent()
+    client = FakeClient()
+    agent.on_connect(client)
+
+    await agent._forward_event(
+        _session_for_events(),
+        ServerWarning(
+            ServerWarningParams(warning=PublicError(message="hm", code="warning"))
+        ),
+    )
+
+    assert not any(
+        isinstance(notification.update, AgentMessageChunk)
+        for notification in client._session_updates
+    )

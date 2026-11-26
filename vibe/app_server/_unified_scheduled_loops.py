@@ -1,29 +1,135 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from datetime import datetime
 import math
 from pathlib import Path
 import secrets
 import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from croniter import CroniterError, croniter
+from dateutil.tz import gettz
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from vibe.core.loop import MAX_LOOPS_PER_SESSION, LoopError, parse_interval
-from vibe.core.types import ScheduledLoop
+from vibe.core.loop import (
+    MAX_LOOPS_PER_SESSION,
+    MIN_INTERVAL_SECONDS,
+    LoopError,
+    parse_interval,
+)
 from vibe.utils.io import atomic_replace, file_write_lock, read_safe_async
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 
 class ScheduledLoopStoreError(RuntimeError):
     pass
 
 
+_CRON_FIELD_COUNT = 5
+
+
+def _next_cron_fire(cron: str, now: float) -> float:
+    if len(cron.split()) != _CRON_FIELD_COUNT:
+        raise ValueError("Cron must be a standard 5-field expression.")
+    try:
+        timezone = gettz()
+        if timezone is None:
+            raise ValueError("Cannot determine the machine local timezone.")
+        # Keep transition rules so croniter can traverse repeated and missing hours.
+        return (
+            croniter(
+                cron,
+                datetime.fromtimestamp(now, tz=timezone),
+                max_years_between_matches=50,
+            )
+            .get_next(datetime)
+            .timestamp()
+        )
+    except (CroniterError, ValueError, OverflowError, OSError) as exc:
+        raise ValueError(f"Invalid cron expression `{cron}`: {exc}") from exc
+
+
+class ScheduledPrompt(BaseModel):
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+    id: str
+    interval_seconds: int | None = Field(
+        default=None, strict=True, ge=MIN_INTERVAL_SECONDS
+    )
+    prompt: str
+    next_fire_at: float = Field(allow_inf_nan=False)
+    created_at: float = Field(allow_inf_nan=False)
+    cron: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, prompt: str) -> str:
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("Missing prompt.")
+        if prompt.startswith("/"):
+            raise ValueError("Prompt cannot start with '/'.")
+        return prompt
+
+    @model_validator(mode="after")
+    def validate_schedule(self) -> ScheduledPrompt:
+        if (self.interval_seconds is None) == (self.cron is None):
+            raise ValueError("Exactly one of interval_seconds or cron is required.")
+        if self.cron is not None:
+            self.cron = self.cron.strip()
+            _next_cron_fire(self.cron, self.created_at)
+        return self
+
+    def next_fire_after(self, now: float) -> float:
+        if self.interval_seconds is not None:
+            return now + self.interval_seconds
+        assert self.cron is not None
+        return _next_cron_fire(self.cron, now)
+
+
+def _cron_fields(cron: str | None) -> list[str] | None:
+    """A cron's fields, so spacing alone never reads as a new schedule."""
+    return None if cron is None else cron.split()
+
+
+def _readable(error: ValidationError) -> str:
+    """The validators' own messages, without Pydantic's wrapping."""
+    return " ".join(
+        str(detail.get("ctx", {}).get("error", detail["msg"]))
+        for detail in error.errors()
+    )
+
+
 class _StoredLoopsV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     format: Literal["vibe.scheduled-loops/v1"] = "vibe.scheduled-loops/v1"
-    loops: list[ScheduledLoop]
+    loops: list[ScheduledPrompt] = Field(max_length=MAX_LOOPS_PER_SESSION)
+
+
+def read_stored_loops(path: Path) -> list[ScheduledPrompt]:
+    """Best-effort read of a persisted loop store.
+
+    Listings and saved-session reads answer for loops without owning a live
+    store, so a missing or corrupt file yields no loops instead of failing the
+    whole read.
+    """
+    try:
+        if not path.exists():
+            return []
+        stored = _StoredLoopsV1.model_validate_json(path.read_text())
+    except Exception:
+        return []
+    return [loop.model_copy(deep=True) for loop in stored.loops]
 
 
 class UnifiedScheduledLoops:
@@ -32,7 +138,7 @@ class UnifiedScheduledLoops:
     def __init__(self, path: Path, *, persistent: Callable[[], bool]) -> None:
         self._path = path
         self._persistent = persistent
-        self._loops: list[ScheduledLoop] = []
+        self._loops: list[ScheduledPrompt] = []
         self._lock = asyncio.Lock()
         self._loaded = False
 
@@ -68,38 +174,123 @@ class UnifiedScheduledLoops:
             self._loaded = True
             return quarantine_path
 
-    async def replace(self, loops: list[ScheduledLoop]) -> None:
+    async def replace(self, loops: Sequence[ScheduledPrompt]) -> None:
         async with self._lock:
             await self._commit(loops)
 
-    async def list(self) -> list[ScheduledLoop]:
+    async def list(self) -> list[ScheduledPrompt]:
         async with self._lock:
             return [loop.model_copy(deep=True) for loop in self._loops]
 
-    async def create(self, interval: str, prompt: str) -> ScheduledLoop:
-        seconds = parse_interval(interval)
-        prompt = prompt.strip()
-        if not prompt:
-            raise LoopError("Missing prompt.")
-        if prompt.startswith("/"):
-            raise LoopError("Prompt cannot start with '/'.")
+    def snapshot(self) -> list[ScheduledPrompt]:
+        """Lock-free copy of the in-memory schedules.
+
+        Every mutation replaces ``self._loops`` wholesale on the single-threaded
+        event loop, so a synchronous read from a sync projection path cannot
+        observe a half-applied update; the deep copy keeps callers off the
+        stored instances.
+        """
+        return [loop.model_copy(deep=True) for loop in self._loops]
+
+    async def create(self, interval: str, prompt: str) -> ScheduledPrompt:
+        return await self.create_interval(parse_interval(interval), prompt)
+
+    async def create_interval(
+        self, interval_seconds: int, prompt: str
+    ) -> ScheduledPrompt:
+        return await self._create(prompt, interval_seconds=interval_seconds)
+
+    async def create_cron(self, cron: str, prompt: str) -> ScheduledPrompt:
+        return await self._create(prompt, cron=cron)
+
+    async def _create(
+        self,
+        prompt: str,
+        *,
+        interval_seconds: int | None = None,
+        cron: str | None = None,
+    ) -> ScheduledPrompt:
         async with self._lock:
             if len(self._loops) >= MAX_LOOPS_PER_SESSION:
                 raise LoopError(
                     f"Loop limit reached ({MAX_LOOPS_PER_SESSION} per session)."
                 )
             now = time.time()
-            loop = ScheduledLoop(
-                id=secrets.token_hex(4),
-                interval_seconds=seconds,
-                prompt=prompt,
-                next_fire_at=now + seconds,
-                created_at=now,
-            )
+            try:
+                loop = ScheduledPrompt(
+                    id=secrets.token_hex(4),
+                    interval_seconds=interval_seconds,
+                    cron=cron,
+                    prompt=prompt,
+                    next_fire_at=now,
+                    created_at=now,
+                )
+                loop.next_fire_at = loop.next_fire_after(now)
+            except ValidationError as exc:
+                raise LoopError(_readable(exc)) from exc
+            except (ValueError, OverflowError) as exc:
+                raise LoopError(str(exc)) from exc
             await self._commit([*self._loops, loop])
             return loop.model_copy(deep=True)
 
-    async def delete(self, loop_id: str) -> ScheduledLoop:
+    async def update(
+        self,
+        loop_id: str,
+        prompt: str,
+        *,
+        interval: str | None = None,
+        cron: str | None = None,
+    ) -> ScheduledPrompt:
+        """Replace a loop's prompt and schedule, keeping its id.
+
+        An unchanged schedule keeps the next run; a new one counts from now.
+        """
+        interval_seconds = None if interval is None else parse_interval(interval)
+        async with self._lock:
+            loop = next((item for item in self._loops if item.id == loop_id), None)
+            if loop is None:
+                raise LoopError(f"No scheduled loop with id `{loop_id}`.")
+            rescheduled = (loop.interval_seconds, _cron_fields(loop.cron)) != (
+                interval_seconds,
+                _cron_fields(cron),
+            )
+            now = time.time()
+            try:
+                updated = ScheduledPrompt(
+                    id=loop.id,
+                    interval_seconds=interval_seconds,
+                    cron=cron,
+                    prompt=prompt,
+                    next_fire_at=loop.next_fire_at,
+                    created_at=loop.created_at,
+                )
+                if rescheduled:
+                    updated.next_fire_at = updated.next_fire_after(now)
+            except ValidationError as exc:
+                raise LoopError(_readable(exc)) from exc
+            except (ValueError, OverflowError) as exc:
+                raise LoopError(str(exc)) from exc
+            await self._commit([
+                updated if item.id == loop_id else item for item in self._loops
+            ])
+            return updated.model_copy(deep=True)
+
+    async def run_now(self, loop_id: str, now: float | None = None) -> ScheduledPrompt:
+        """Make a loop due now; it fires on the next idle tick, then reschedules."""
+        async with self._lock:
+            loop = next((item for item in self._loops if item.id == loop_id), None)
+            if loop is None:
+                raise LoopError(f"No scheduled loop with id `{loop_id}`.")
+            due = loop.model_copy(
+                update={"next_fire_at": now if now is not None else time.time()},
+                deep=True,
+            )
+            await self._commit([
+                due if item.id == loop_id else item for item in self._loops
+            ])
+            return due.model_copy(deep=True)
+
+    async def delete(self, loop_id: str) -> ScheduledPrompt:
         async with self._lock:
             loop = next((item for item in self._loops if item.id == loop_id), None)
             if loop is None:
@@ -120,7 +311,7 @@ class UnifiedScheduledLoops:
             timestamp = now if now is not None else time.time()
             return max(0.0, min(loop.next_fire_at for loop in self._loops) - timestamp)
 
-    async def due(self, now: float | None = None) -> ScheduledLoop | None:
+    async def due(self, now: float | None = None) -> ScheduledPrompt | None:
         async with self._lock:
             timestamp = now if now is not None else time.time()
             loop = min(
@@ -132,40 +323,64 @@ class UnifiedScheduledLoops:
 
     async def mark_fired(
         self, loop_id: str, now: float | None = None
-    ) -> ScheduledLoop | None:
+    ) -> ScheduledPrompt | None:
         async with self._lock:
-            loop = next((item for item in self._loops if item.id == loop_id), None)
-            if loop is None:
+            rescheduled = self._rescheduled(loop_id, now)
+            if rescheduled is None:
                 return None
-            rescheduled = loop.model_copy(
-                update={
-                    "next_fire_at": (now if now is not None else time.time())
-                    + loop.interval_seconds
-                },
-                deep=True,
-            )
             await self._commit([
                 rescheduled if item.id == loop_id else item for item in self._loops
             ])
             return rescheduled.model_copy(deep=True)
 
+    async def defer(self, loop_id: str, now: float | None = None) -> None:
+        """Advance a loop to its next occurrence in memory only.
+
+        Used when `mark_fired` cannot persist: the loop stays due on disk, but it
+        must not keep firing this session while other schedules wait their turn.
+        """
+        async with self._lock:
+            rescheduled = self._rescheduled(loop_id, now)
+            if rescheduled is not None:
+                self._loops = [
+                    rescheduled if item.id == loop_id else item for item in self._loops
+                ]
+
+    def _rescheduled(self, loop_id: str, now: float | None) -> ScheduledPrompt | None:
+        loop = next((item for item in self._loops if item.id == loop_id), None)
+        if loop is None:
+            return None
+        return loop.model_copy(
+            update={
+                "next_fire_at": loop.next_fire_after(
+                    now if now is not None else time.time()
+                )
+            },
+            deep=True,
+        )
+
     async def persist(self) -> None:
         async with self._lock:
             if self._loaded:
-                await self._persist(self._loops)
+                await self._persist(_StoredLoopsV1(loops=self._loops))
 
-    async def _commit(self, loops: list[ScheduledLoop]) -> None:
-        candidate = [loop.model_copy(deep=True) for loop in loops]
+    async def _commit(self, loops: Sequence[ScheduledPrompt]) -> None:
+        candidate = _StoredLoopsV1(loops=list(loops))
         await self._persist(candidate)
-        self._loops = candidate
+        self._loops = candidate.loops
         self._loaded = True
 
-    async def _persist(self, loops: list[ScheduledLoop]) -> None:
+    async def _persist(self, stored: _StoredLoopsV1) -> None:
         if not self._persistent():
             return
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            payload = _StoredLoopsV1(loops=loops).model_dump_json(indent=2) + "\n"
+            self._path.parent.mkdir(
+                parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True
+            )
+            # Scheduled loops reference session content, so the store file is
+            # created owner-only; an existing file keeps its current mode.
+            self._path.touch(mode=0o600, exist_ok=True)
+            payload = stored.model_dump_json(indent=2, exclude_none=True) + "\n"
             async with file_write_lock(self._path):
                 await atomic_replace(self._path, payload)
         except Exception as exc:

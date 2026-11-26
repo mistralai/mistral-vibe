@@ -11,14 +11,11 @@ import tempfile
 from threading import Lock
 from typing import BinaryIO
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from vibe.core.paths import WORKTREES_DIR
-from vibe.core.session.session_lease import (
-    _acquire_file_lock,
-    _lease_directory_lock,
-    _release_file_lock,
-)
+from vibe.core.session.session_lease import _lease_directory_lock
+from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
 from vibe.core.utils.time import utc_now
 from vibe.observability.logging import logger
 
@@ -29,11 +26,16 @@ from vibe.observability.logging import logger
 # claim just reserved. A bucket is always "<name>-<12 hex>", so this leading-dot
 # name cannot collide with one.
 CLAIMS_DIR_NAME = ".claims"
+# Removed worktrees are renamed here, which is atomic, then deleted at leisure.
+TRASH_DIR_NAME = ".trash"
+# Copy-on-write templates (see copy_on_write.py): checkouts, but nobody's.
+TEMPLATES_DIR_NAME = ".templates"
 RECORD_FILENAME = "record.json"
 RECOVERY_FILENAME = "recovery.json"
 HOLDERS_DIR_NAME = "holders"
 _BUCKET_AND_NAME_PARTS = 2
 _STARTING_HOLDER = ".starting"
+REMOVING_HOLDER = ".removing"
 _PRUNE_LOCK_FILENAME = ".prune"
 _HELD_FILES: dict[Path, tuple[BinaryIO, int]] = {}
 _HELD_FILES_LOCK = Lock()
@@ -54,6 +56,15 @@ class WorktreeRecord(BaseModel):
     base_commit: str | None = None
     branch_created: bool
     claimed_at: datetime
+    # Every session that worked here. The worktree is reaped once all of them
+    # are archived or deleted, read from their own saved state.
+    session_dirs: set[Path] = Field(default_factory=set)
+    # A removal an older Vibe requested and had not finished. Honoured, never
+    # set, and withdrawn when a session joins.
+    reap_requested: bool = False
+    # Git's record of a checkout already moved to the trash, for a retry to
+    # finish removing when the removal stopped right after the move.
+    moved_checkout_admin: Path | None = None
 
     @classmethod
     def new(
@@ -109,11 +120,11 @@ def worktree_prune_lock() -> Iterator[None]:
     root = _claims_root()
     root.mkdir(parents=True, exist_ok=True)
     with (root / _PRUNE_LOCK_FILENAME).open("a+b") as file:
-        _acquire_file_lock(file, blocking=True)
+        acquire_file_lock(file, blocking=True)
         try:
             yield
         finally:
-            _release_file_lock(file)
+            release_file_lock(file)
 
 
 # Identifies one managed worktree. Bucket and name are a pair that is meaningless
@@ -133,9 +144,17 @@ class WorktreeClaim:
         except (OSError, ValueError):
             return None
         parts = relative.parts
-        if len(parts) < _BUCKET_AND_NAME_PARTS or parts[0] == CLAIMS_DIR_NAME:
+        if len(parts) < _BUCKET_AND_NAME_PARTS or parts[0] in {
+            CLAIMS_DIR_NAME,
+            TRASH_DIR_NAME,
+            TEMPLATES_DIR_NAME,
+        }:
             return None
         return cls(bucket=parts[0], name=parts[1])
+
+    @staticmethod
+    def trash_root() -> Path:
+        return WORKTREES_DIR.path.resolve() / TRASH_DIR_NAME
 
     # Only claimed names, never a listing of the bucket itself: a directory there
     # with no claim is either a live mkdir reservation or something the user
@@ -168,6 +187,13 @@ class WorktreeClaim:
     @property
     def directory(self) -> Path:
         return _claims_root() / self.bucket / self.name
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        root = _claims_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lease_directory_lock(root):
+            yield
 
     def write(self, record: WorktreeRecord) -> None:
         self._write_json(RECORD_FILENAME, record)
@@ -242,9 +268,13 @@ class WorktreeClaim:
         return candidate
 
     def add_holder(self, session_id: str) -> None:
-        self._acquire_holder(self._holder_path(session_id))
+        if session_id in {_STARTING_HOLDER, REMOVING_HOLDER}:
+            raise WorktreeRecordError(f"Reserved worktree holder id {session_id!r}.")
+        self._acquire_holder(self._holder_path(session_id), require_record=True)
 
     def remove_holder(self, session_id: str) -> None:
+        if session_id in {_STARTING_HOLDER, REMOVING_HOLDER}:
+            raise WorktreeRecordError(f"Reserved worktree holder id {session_id!r}.")
         self._release_holder(self._holder_path(session_id))
         # A delete that ran while this holder was still up could not rmdir past
         # it, and nothing revisits the leftovers - pruning skips a claim whose
@@ -255,7 +285,14 @@ class WorktreeClaim:
             self._discard_empty_directories()
 
     def holders(self) -> frozenset[str]:
-        return self._live_holders(exclude={_STARTING_HOLDER})
+        return self._live_holders(exclude={_STARTING_HOLDER, REMOVING_HOLDER})
+
+    def holders_excluding(self, session_id: str | None) -> frozenset[str]:
+        """The live holders minus the asking session, which never counts."""
+        held_by = self.holders()
+        if session_id is not None:
+            held_by -= {session_id}
+        return held_by
 
     def mark_starting(self) -> None:
         self._acquire_holder(
@@ -269,26 +306,60 @@ class WorktreeClaim:
     def is_starting(self) -> bool:
         return bool(self._live_holders(include={_STARTING_HOLDER}))
 
-    def _acquire_holder(self, holder: Path, *, reference_counted: bool = True) -> None:
-        holder.parent.mkdir(parents=True, exist_ok=True)
+    def is_removing(self) -> bool:
+        return bool(self._live_holders(include={REMOVING_HOLDER}))
+
+    @contextmanager
+    def removing(self, *, excluding: str | None = None) -> Iterator[bool]:
+        marker = self._holder_path(REMOVING_HOLDER)
         with _holder_registry_lock():
-            with _HELD_FILES_LOCK:
-                if held := _HELD_FILES.get(holder):
-                    if not reference_counted:
-                        raise WorktreeRecordError(
-                            f"Worktree holder {holder.name!r} is already active."
-                        )
-                    _HELD_FILES[holder] = (held[0], held[1] + 1)
-                    return
-                file = holder.open("a+b")
-                try:
-                    _acquire_file_lock(file)
-                except BlockingIOError as exc:
-                    file.close()
+            live = self._live_holders_locked()
+            if excluding not in {None, _STARTING_HOLDER, REMOVING_HOLDER}:
+                live -= {excluding}
+            acquired = not live
+            if acquired:
+                self._acquire_holder_locked(marker, reference_counted=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._release_holder(marker)
+                if not (self.directory / RECORD_FILENAME).exists():
+                    self._discard_empty_directories()
+
+    def _acquire_holder(
+        self,
+        holder: Path,
+        *,
+        reference_counted: bool = True,
+        require_record: bool = False,
+    ) -> None:
+        with _holder_registry_lock():
+            if require_record and self.read() is None:
+                raise WorktreeRecordError("Worktree claim is no longer available.")
+            if self._live_holders_locked(include={REMOVING_HOLDER}):
+                raise WorktreeRecordError("Worktree is being removed.")
+            self._acquire_holder_locked(holder, reference_counted=reference_counted)
+
+    def _acquire_holder_locked(self, holder: Path, *, reference_counted: bool) -> None:
+        holder.parent.mkdir(parents=True, exist_ok=True)
+        with _HELD_FILES_LOCK:
+            if held := _HELD_FILES.get(holder):
+                if not reference_counted:
                     raise WorktreeRecordError(
                         f"Worktree holder {holder.name!r} is already active."
-                    ) from exc
-                _HELD_FILES[holder] = (file, 1)
+                    )
+                _HELD_FILES[holder] = (held[0], held[1] + 1)
+                return
+            file = holder.open("a+b")
+            try:
+                acquire_file_lock(file)
+            except BlockingIOError as exc:
+                file.close()
+                raise WorktreeRecordError(
+                    f"Worktree holder {holder.name!r} is already active."
+                ) from exc
+            _HELD_FILES[holder] = (file, 1)
 
     def _release_holder(self, holder: Path) -> None:
         if not holder.exists() and not _holder_is_owned(holder):
@@ -303,7 +374,7 @@ class WorktreeClaim:
                         return
                     del _HELD_FILES[holder]
                     try:
-                        _release_file_lock(file)
+                        release_file_lock(file)
                     finally:
                         file.close()
                     holder.unlink(missing_ok=True)
@@ -313,21 +384,28 @@ class WorktreeClaim:
     def _live_holders(
         self, *, include: set[str] | None = None, exclude: set[str] | None = None
     ) -> frozenset[str]:
+        with _holder_registry_lock():
+            return frozenset(
+                self._live_holders_locked(include=include, exclude=exclude)
+            )
+
+    def _live_holders_locked(
+        self, *, include: set[str] | None = None, exclude: set[str] | None = None
+    ) -> set[str]:
         directory = self.directory / HOLDERS_DIR_NAME
         live: set[str] = set()
-        with _holder_registry_lock():
-            try:
-                entries = tuple(directory.iterdir())
-            except FileNotFoundError:
-                return frozenset()
-            for entry in entries:
-                if include is not None and entry.name not in include:
-                    continue
-                if exclude is not None and entry.name in exclude:
-                    continue
-                if _holder_is_live(entry):
-                    live.add(entry.name)
-        return frozenset(live)
+        try:
+            entries = tuple(directory.iterdir())
+        except FileNotFoundError:
+            return live
+        for entry in entries:
+            if include is not None and entry.name not in include:
+                continue
+            if exclude is not None and entry.name in exclude:
+                continue
+            if _holder_is_live(entry):
+                live.add(entry.name)
+        return live
 
     def _write_json(self, filename: str, model: BaseModel) -> None:
         directory = self.directory
@@ -378,12 +456,12 @@ def _discard_stale_holder(holder: Path) -> bool:
     except OSError:
         return False
     try:
-        _acquire_file_lock(file)
+        acquire_file_lock(file)
     except BlockingIOError:
         file.close()
         return False
     try:
-        _release_file_lock(file)
+        release_file_lock(file)
     finally:
         file.close()
     try:

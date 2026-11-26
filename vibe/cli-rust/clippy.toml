@@ -1,0 +1,15 @@
+disallowed-methods = [
+    { path = "crossterm::event::read", reason = "use `terminal_read::read`, which normalizes events for the platform" },
+    { path = "tokio::spawn", reason = "use `work::spawn` for work whose result must land before a replay ack, or `work::spawn_daemon` for long-lived tasks" },
+    { path = "tokio::task::spawn", reason = "use `work::spawn` or `work::spawn_daemon`" },
+    { path = "tokio::runtime::Handle::spawn", reason = "use `work::spawn` or `work::spawn_daemon`" },
+    { path = "tokio::task::JoinSet::spawn", reason = "use `work::spawn` or `work::spawn_daemon`" },
+    { path = "tokio::task::spawn_blocking", reason = "use `work::spawn_blocking`, which holds the client busy until it returns" },
+    { path = "std::time::Instant::now", reason = "use `clock::now` for what the user perceives (replay freezes it) or `clock::real_now` for timeouts and metrics" },
+    { path = "std::time::Instant::elapsed", reason = "use `clock::since`, or `clock::real_now().duration_since(..)` for timeouts and metrics" },
+    { path = "tokio::time::Instant::now", reason = "use `clock::now` or `clock::real_now`" },
+    { path = "tokio::time::Instant::elapsed", reason = "use `clock::since`, or `clock::real_now().duration_since(..)` for timeouts and metrics" },
+    { path = "tokio::time::sleep_until", reason = "use `clock::sleep_until` (UI deadlines) or `clock::sleep_until_real`" },
+    { path = "tokio::time::sleep", reason = "use `clock::sleep_until` (UI deadlines) or `clock::sleep_real`" },
+    { path = "tokio::time::interval", reason = "use `clock::interval` (animations, on UI time) or `clock::interval_real` (pacing, polling)" },
+]

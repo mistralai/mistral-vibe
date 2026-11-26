@@ -85,8 +85,8 @@ def test_load_config_parses_commands_with_budgets(tmp_path: Path) -> None:
         "budget = 68\n"
         "\n"
         "[[commands]]\n"
-        'label = "VibeApp"\n'
-        'code = "from vibe.cli.textual_ui.app import VibeApp"\n'
+        'label = "app server"\n'
+        'code = "import vibe.app_server.stdio"\n'
     )
 
     config = mod._load_config(_write_config(tmp_path, content))
@@ -156,6 +156,25 @@ def test_find_wheel_raises_on_multiple_wheels(tmp_path: Path) -> None:
         mod._find_wheel(dist_dir)
 
 
+def test_wheel_to_measure_uses_a_prebuilt_wheel_without_building(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prebuilt = tmp_path / "mistral_vibe-1.0.0-cp312-abi3-manylinux_2_28_x86_64.whl"
+    prebuilt.write_text("")
+
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a prebuilt wheel must not trigger a build")
+
+    monkeypatch.setattr(mod, "_run", fail_run)
+
+    assert mod._wheel_to_measure(tmp_path, prebuilt, tmp_path / "dist") == prebuilt
+
+
+def test_wheel_to_measure_rejects_a_missing_prebuilt_wheel(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="wheel not found"):
+        mod._wheel_to_measure(tmp_path, tmp_path / "missing.whl", tmp_path / "dist")
+
+
 def test_measure_strace_skips_on_non_zero_exit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -221,6 +240,95 @@ def test_measure_importtime_prints_stderr_and_exits_on_failure(
 
     captured = capsys.readouterr()
     assert "ImportError: bad wheel" in captured.err
+
+
+def _make_venv(tmp_path: Path) -> Path:
+    venv = tmp_path / "venv"
+    bin_dir = venv / ("Scripts" if mod.sys.platform == "win32" else "bin")
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / ("python.exe" if mod.sys.platform == "win32" else "python")
+    python.write_text("")
+    (venv / "pyvenv.cfg").write_text("")
+    return python
+
+
+def test_existing_venv_python_absolutizes_a_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = _make_venv(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    resolved = mod._existing_venv_python(Path("venv/bin/python"))
+
+    assert resolved.is_absolute()
+    assert resolved == python
+
+
+def test_existing_venv_python_does_not_dereference_the_interpreter_symlink(
+    tmp_path: Path,
+) -> None:
+    # `uv venv` symlinks bin/python to the base interpreter; resolving the
+    # symlink would fail the pyvenv.cfg check and run the base interpreter
+    # without the venv.
+    base = tmp_path / "base-python"
+    base.write_text("")
+    python = _make_venv(tmp_path)
+    python.unlink()
+    python.symlink_to(base)
+
+    assert mod._existing_venv_python(python) == python
+
+
+def test_existing_venv_python_requires_pyvenv_cfg(tmp_path: Path) -> None:
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+
+    with pytest.raises(SystemExit, match="pyvenv.cfg"):
+        mod._existing_venv_python(python)
+
+
+def test_python_mode_measures_the_venv_without_building(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    python = _make_venv(tmp_path)
+    config = _write_config(tmp_path, '[[commands]]\nlabel = "x"\ncode = "import x"\n')
+    # Measurements run with cwd=venv root, so a relative interpreter path would
+    # break: the subprocess must receive the absolute path.
+    monkeypatch.chdir(tmp_path)
+
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--python mode must not build or install anything")
+
+    monkeypatch.setattr(mod, "_run", fail_run)
+    interpreters: list[str] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        interpreters.append(args[0])
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        [
+            "check_startup_import_cost.py",
+            "--python",
+            "venv/bin/python",
+            "--config",
+            str(config),
+        ],
+    )
+
+    mod.main()
+
+    assert interpreters == [str(python)]
+    captured = capsys.readouterr()
+    assert "imported modules: 0 (no budget)" in captured.out
+    # The wheel-size report only exists when a wheel was built and installed.
+    assert "installed wheel size" not in captured.out
 
 
 def _write_config(tmp_path: Path, content: str) -> Path:

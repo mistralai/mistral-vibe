@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from difflib import SequenceMatcher
+from typing import NamedTuple
 
 from vibe.core.checkpoints._events import _Decide, _Edit, _Event, _rid_key, _TurnMark
 from vibe.core.checkpoints.models import (
@@ -35,17 +36,20 @@ def _lines(state: FileState) -> list[str]:
     return _decode_lines(state) or []
 
 
-def _reencode(text: str, ref: FileState) -> FileState:
-    """Re-encode reconstructed ``text`` preserving ``ref``'s encoding and newline
-    style, so a partial approve/revert of a CRLF, cp1252 or UTF-16 file does not
-    silently rewrite unrelated bytes to UTF-8/LF. ``ref`` is the domain's choice
-    of which file convention to keep; the byte mechanics live in ``encode_safe``.
+class _Convention(NamedTuple):
+    encoding: str
+    newline: str
+
+
+def _reencode(text: str, convention: _Convention | None) -> FileState:
+    """Re-encode reconstructed ``text`` in the file's ``convention``, so a partial
+    approve/revert of a CRLF, cp1252 or UTF-16 file does not silently rewrite
+    unrelated bytes to UTF-8/LF. The byte mechanics live in ``encode_safe``.
     """
-    if ref.data is None:
+    if convention is None:
         return FileState.from_text(text)
-    decoded = decode_safe(ref.data)
     return FileState(
-        encode_safe(text, encoding=decoded.encoding, newline=decoded.newline)
+        encode_safe(text, encoding=convention.encoding, newline=convention.newline)
     )
 
 
@@ -170,17 +174,22 @@ def _compute_changes(edit: _Edit) -> list[tuple[int, Region | OpaqueChange]]:
     return list(enumerate(_regions(_lines(edit.before), _lines(edit.after))))
 
 
-def _reference_state(edits: list[_Edit]) -> FileState:
-    """A present file state to source encoding/newline from when re-encoding a
-    reconstruction: the earliest concrete ``before``, else the earliest ``after``.
+def _convention(edits: list[_Edit]) -> _Convention | None:
+    """The convention to re-encode a reconstruction with: the encoding of the
+    earliest present state (concrete ``before`` first, then ``after``) and the
+    newline style of the earliest one with a line break. A file without one is no
+    evidence of a style, so it neither borrows ``os.linesep`` nor hides a later
+    CRLF; with no line break anywhere the text stays LF.
     """
-    for edit in edits:
-        if edit.before.data is not None:
-            return edit.before
-    for edit in edits:
-        if edit.after.data is not None:
-            return edit.after
-    return FileState.absent()
+    encoding: str | None = None
+    for state in [e.before for e in edits] + [e.after for e in edits]:
+        if state.data is None:
+            continue
+        decoded = decode_safe(state.data)
+        encoding = encoding or decoded.encoding
+        if not state.is_binary and "\n" in decoded.text:
+            return _Convention(encoding, decoded.newline)
+    return None if encoding is None else _Convention(encoding, "\n")
 
 
 class History:
@@ -208,9 +217,6 @@ class History:
             cached = _compute_changes(edit)
             self._changes_cache[edit.seq] = cached
         return cached
-
-    def has_edits(self, path: str) -> bool:
-        return bool(self._edits_for(path))
 
     def project(self, path: str, *, only_kept: bool) -> FileState:
         return self._reconstruct(path, self._applied(path, only_kept=only_kept))
@@ -534,7 +540,7 @@ class History:
         edits = self._edits_for(path)
         if not edits:
             return self.original(path)
-        ref = _reference_state(edits)
+        convention = _convention(edits)
         result = edits[0].before
         for edit in edits:
             here = [
@@ -553,7 +559,7 @@ class History:
                     _lines(edit.before),
                     [c for c in here if isinstance(c, Region)],
                 )
-                result = _reencode("".join(lines), ref)
+                result = _reencode("".join(lines), convention)
         return result
 
     def _reconstruct_with_prov(

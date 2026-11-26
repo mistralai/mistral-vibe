@@ -114,6 +114,7 @@ class KimiPluginAdapter:
                     source_path=skill.source_path,
                     allowed_tools=skill.allowed_tools,
                     user_invocable=skill.user_invocable,
+                    model_invocable=skill.model_invocable,
                     license=skill.license,
                     compatibility=skill.compatibility,
                     metadata=skill.metadata,
@@ -207,6 +208,7 @@ class KimiPluginAdapter:
             if (
                 skill := adapt_skill_file(
                     path=path,
+                    root=root,
                     source_format="kimi_code",
                     diagnostics=diagnostics,
                     normalize_vendor_fields=True,

@@ -1,25 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-from pydantic import JsonValue
-
+from vibe.app_server._config_paths import ACTIVE_MODEL_PATH, model_thinking_path
+from vibe.app_server._config_write import config_write_ops_to_patches
 from vibe.app_server.protocol import ConfigWriteOpWire
+from vibe.core.config.layer import ConfigLayerError, RawConfig
+from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
+from vibe.core.config.layers.default import DefaultConfigLayer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.overrides import OverridesLayer
-from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.orchestrator import ConfigOrchestrator, ConfigPatchValidationError
 from vibe.core.config.patch import AddOperationPatch, RemoveOperationPatch
 from vibe.core.config.vibe_schema import VibeConfigSchema
-
-ACTIVE_MODEL_PATH = "/active_model"
-
-
-def stored_session_active_model(config: Mapping[str, JsonValue] | None) -> str | None:
-    """Return a concrete model alias from a session config snapshot."""
-    if config is None:
-        return None
-    active_model = config.get("active_model")
-    return active_model if isinstance(active_model, str) and active_model else None
 
 
 def active_model_override_write_requested(ops: Sequence[ConfigWriteOpWire]) -> bool:
@@ -72,6 +67,7 @@ async def set_session_active_model_override(
     active_model: str,
     *,
     reason: str,
+    preflight: Callable[[VibeConfigSchema], Awaitable[None]] | None = None,
 ) -> list[BaseException]:
     if override_active_model(orchestrator) == active_model:
         return []
@@ -84,6 +80,7 @@ async def set_session_active_model_override(
             )
         ],
         reason=reason,
+        preflight=preflight,
     )
 
 
@@ -102,8 +99,97 @@ async def clear_session_active_model_override(
     )
 
 
-def config_active_model(metadata: Mapping[str, Any]) -> str | None:
-    raw_config = metadata.get("config")
-    if not isinstance(raw_config, dict):
+def _sets_thinking(
+    config: VibeConfigSchema, data: RawConfig | None, alias: str
+) -> bool:
+    if data is None:
+        return False
+    entry = config.layer_models(data.model_dump()).get(alias)
+    return isinstance(entry, Mapping) and isinstance(entry.get("thinking"), str)
+
+
+# These outrank the session override, so a level they set for a model is the one
+# that model runs whatever the session says.
+_LAYERS_OUTRANKING_THE_SESSION = frozenset({
+    AgentProfileLayer.NAME,
+    AdminConfigLayer.NAME,
+})
+
+
+# The layers a model's default level comes from: what it runs on when nobody
+# chose a level for it.
+_DEFAULT_LEVEL_LAYERS = frozenset({
+    DefaultConfigLayer.NAME,
+    ModelCatalogLayer.NAME,
+    GrowthbookLayer.NAME,
+})
+
+
+async def model_default_thinking(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], alias: str
+) -> str | None:
+    """The level this model runs on when no one chose one: the catalog
+    filter's when it sets one, else the catalog's or the built-in one.
+
+    None when none of those layers sets a level for it, as for a model only the
+    user's own config defines, or when they cannot be read on their own.
+    """
+    without = [
+        layer.name
+        for layer in orchestrator.layers
+        if layer.name not in _DEFAULT_LEVEL_LAYERS
+    ]
+    try:
+        config = await orchestrator.preview_patch([], without=without)
+    except (ConfigLayerError, ConfigPatchValidationError, ValueError):
         return None
-    return stored_session_active_model(raw_config)
+    model = config.models.get(alias)
+    if model is None or not model.thinking_is_set:
+        return None
+    return model.thinking
+
+
+def model_thinking_is_session_writable(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], alias: str
+) -> bool:
+    """Whether a level scoped to the session would be the one this model runs.
+
+    Declaring the model is not claiming its level: a profile that pins one
+    without saying how hard it thinks leaves that to whoever is using it.
+    """
+    return not any(
+        layer.name in _LAYERS_OUTRANKING_THE_SESSION
+        and _sets_thinking(orchestrator.config, layer.cached_data, alias)
+        for layer in orchestrator.layers
+    )
+
+
+async def set_session_reasoning_effort_override(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    reasoning_effort: str,
+    *,
+    reason: str,
+) -> list[BaseException]:
+    """Scope the active model's level to the session.
+
+    Through the same translation a ``config/write`` uses: a model that no
+    durable layer declares is materialized with its identity fields, except
+    one the catalog layer defines, which keeps a settings-only entry.
+    """
+    alias = orchestrator.config.get_active_model().alias
+    if not model_thinking_is_session_writable(orchestrator, alias):
+        return []
+    ops = [
+        ConfigWriteOpWire(
+            op="set",
+            path=model_thinking_path(alias),
+            value=reasoning_effort,
+            target_layer=OverridesLayer.NAME,
+        )
+    ]
+    operations = config_write_ops_to_patches(
+        orchestrator.config,
+        ops,
+        sparse_override_model_aliases=await orchestrator.sparse_override_model_aliases(),
+    )
+    return await orchestrator.apply_patch(operations, reason=reason)

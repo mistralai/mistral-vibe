@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import (
     ClientDescriptor,
     ContinueSessionIntent,
@@ -14,6 +15,7 @@ from vibe.app_server.client import AppServerClient
 from vibe.app_server.host import AppServerHost
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
+from vibe.core.platform_auth import PlatformCredentialFactory
 
 __all__ = [
     "ClientDescriptor",
@@ -31,7 +33,7 @@ class LocalHarness:
     def __init__(self, options: LocalHarnessOptions) -> None:
         self._options = options
         self._started = False
-        self._host = LocalHarnessHost()
+        self._host = LocalHarnessHost(shared=False)
 
     async def start(self) -> AppServerSession:
         if self._started:
@@ -48,10 +50,32 @@ class LocalHarness:
 
 
 class LocalHarnessHost:
-    def __init__(self) -> None:
+    def __init__(self, *, shared: bool = True) -> None:
+        self._shared = shared
+        # The entry point of an in-process app server: it owns the services.
+        self._services = ProcessServices.create()
         self._process: HarnessProcess | None = None
-        self._experimental_harness: bool | None = None
-        self._legacy_harness: bool | None = None
+        # The options the process was started with; later sessions must match.
+        self._process_options: LocalHarnessOptions | None = None
+
+    @property
+    def services(self) -> ProcessServices:
+        """The process services every session runs on. Exported for the
+        entry point owning this host; sessions read them through the app
+        server.
+        """
+        return self._services
+
+    def process_credentials(self) -> PlatformCredentialFactory:
+        """The shared process's credential selection, bound by the server.
+
+        Session builds and host reads ask it; ACP auth resolves over the
+        same selection so a status read matches what sessions run. The
+        process must exist: connect or start once first.
+        """
+        if self._process is None:
+            raise RuntimeError("The harness process is not created yet")
+        return self._process.credentials
 
     async def start(self, options: LocalHarnessOptions) -> AppServerSession:
         host = await self.connect(options)
@@ -62,9 +86,7 @@ class LocalHarnessHost:
             raise
 
     async def connect(self, options: LocalHarnessOptions) -> AppServerHost:
-        process = self._process_for(
-            options.experimental_harness, options.legacy_harness
-        )
+        process = self._process_for(options)
         client_transport, server_transport = memory_transport_pair()
         harness = await create_harness_server(
             server_transport, transport_kind="in_process", process=process
@@ -77,11 +99,18 @@ class LocalHarnessHost:
                 resume_session_id = session_id
             case ContinueSessionIntent():
                 continue_session = True
+        session_options = options.session_options
+        # A sandboxed session without a cwd starts in the sandbox's workspace,
+        # never in this process's directory.
+        if options.sandbox is not None and session_options.cwd is None:
+            session_options = session_options.model_copy(
+                update={"cwd": options.sandbox.workspace}
+            )
         return await AppServerHost.connect(
             client,
             client_info=options.client.info,
             capabilities=options.client.capabilities,
-            session_options=options.session_options,
+            session_options=session_options,
             resume_session_id=resume_session_id,
             continue_session=continue_session,
             client_tool_handler=options.client_tool_handler,
@@ -89,24 +118,34 @@ class LocalHarnessHost:
         )
 
     async def close(self) -> None:
-        if self._process is not None:
-            await self._process.close()
+        try:
+            if self._process is not None:
+                await self._process.close()
+        finally:
+            await self._services.close()
 
-    def _process_for(
-        self, experimental_harness: bool, legacy_harness: bool
-    ) -> HarnessProcess:
-        if self._process is None:
+    def _process_for(self, options: LocalHarnessOptions) -> HarnessProcess:
+        if self._process is None or self._process_options is None:
             self._process = HarnessProcess(
-                experimental_harness=experimental_harness, legacy_harness=legacy_harness
+                services=self._services,
+                shared=self._shared,
+                sandbox=options.sandbox,
+                client_tools=options.client_tools,
+                user_config=options.user_config,
+                project_instructions=options.project_instructions,
             )
-            self._experimental_harness = experimental_harness
-            self._legacy_harness = legacy_harness
+            self._process_options = options
             return self._process
+        started = self._process_options
         if (
-            self._experimental_harness != experimental_harness
-            or self._legacy_harness != legacy_harness
+            options.sandbox is not started.sandbox
+            or options.client_tools is not started.client_tools
+            or options.project_instructions != started.project_instructions
         ):
             raise RuntimeError(
-                "A LocalHarnessHost cannot mix legacy and Unified Harness backends"
+                "A LocalHarnessHost serves one sandbox, one set of client tools "
+                "and one set of project instructions"
             )
+        if options.user_config is not started.user_config:
+            raise RuntimeError("A LocalHarnessHost serves one user config")
         return self._process

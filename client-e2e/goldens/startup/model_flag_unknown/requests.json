@@ -1,0 +1,14 @@
+[
+ {
+  "method": "session/start",
+  "params": {
+   "agentConfig": {
+    "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal"
+   },
+   "historyLimit": 200,
+   "model": "nope",
+   "sessionOnly": true
+  }
+ }
+]

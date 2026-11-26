@@ -1,0 +1,11 @@
+[
+ {
+  "method": "loops/update",
+  "params": {
+   "interval": "1h",
+   "loopId": "weekdays",
+   "prompt": "Morning review\nReview yesterday's CI and flaky tests.",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

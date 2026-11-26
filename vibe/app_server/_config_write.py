@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from vibe.app_server._config_paths import ACTIVE_MODEL_PATH, model_thinking_path
 from vibe.app_server.protocol import ConfigWriteOpWire
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
@@ -12,14 +13,68 @@ from vibe.core.config.patch import (
     PatchOp,
     RemoveOperationPatch,
     escape_json_pointer_token,
+    unescape_json_pointer_token,
 )
 from vibe.core.config.vibe_schema import VibeConfigSchema
 
 # Only these fields are required for a valid persisted model entry; all other
 # ModelConfig fields have defaults. Writing only required fields + the changed
-# field avoids baking in values from higher-priority layers (admin/GrowthBook)
-# into the user's writable config.
+# field avoids baking in values from higher-priority layers (admin, agent
+# profiles) into the user's writable config.
 _REQUIRED_MODEL_FIELDS = {"name", "provider", "alias"}
+
+
+def model_after_write(config: VibeConfigSchema, model_alias: str | None) -> str:
+    """The model this write leaves active, which is where thinking belongs."""
+    if model_alias:
+        return model_alias
+    if model_alias == "":
+        return config.resolve_default_model_alias()
+    return config.get_active_model().alias
+
+
+def model_config_write_ops(
+    config: VibeConfigSchema,
+    *,
+    model_alias: str | None,
+    reasoning_effort: str | None,
+    default_thinking: str | None = None,
+) -> list[ConfigWriteOpWire]:
+    """The writes a model pick makes, from the pick itself.
+
+    Thinking is stored under whichever model is active after this write -- the
+    one being picked, or the current one when only thinking changes -- so the
+    two travel together and only this function needs to know the paths.
+
+    A level equal to that model's ``default_thinking`` is not stored, so the
+    model keeps following its default as the catalog or GrowthBook changes it:
+    the pick removes the level instead, which does nothing when none is saved.
+    Removing it rather than skipping the write keeps a level saved earlier from
+    staying in force over the default the user just picked.
+
+    An empty alias is how this configuration says "follow the default", and
+    writing it is the only way to unpin a session, so it is passed through
+    rather than looked up. A durable write of the pin names the model the way
+    the target file already does (an old name while it is there), via
+    ``ConfigSchema.layer_write_op``.
+
+    Raises ``ValueError`` for a model this configuration does not offer.
+    """
+    if model_alias and model_alias not in config.models:
+        available = ", ".join(sorted(config.models))
+        raise ValueError(f"Unknown model: {model_alias}. Available: {available}")
+    ops: list[ConfigWriteOpWire] = []
+    if model_alias is not None:
+        ops.append(
+            ConfigWriteOpWire(op="set", path=ACTIVE_MODEL_PATH, value=model_alias)
+        )
+    if reasoning_effort is not None:
+        path = model_thinking_path(model_after_write(config, model_alias))
+        if reasoning_effort != default_thinking:
+            ops.append(ConfigWriteOpWire(op="set", path=path, value=reasoning_effort))
+        else:
+            ops.append(ConfigWriteOpWire(op="remove", path=path))
+    return ops
 
 
 def config_write_targets(
@@ -45,23 +100,75 @@ def config_write_targets(
     return targets
 
 
+def _model_field_write(
+    path: str, config: VibeConfigSchema
+) -> tuple[str, ModelConfig, str] | None:
+    """The alias, model and field a write addresses, when it addresses one."""
+    match path.split("/"):
+        case ["", "models", token, field]:
+            alias = unescape_json_pointer_token(token)
+        case _:
+            return None
+    model = config.models.get(alias)
+    if model is None or field not in type(model).model_fields:
+        return None
+    return alias, model, field
+
+
+def _route(config: VibeConfigSchema, alias: str) -> tuple[Any, ...]:
+    """What a model's route compiles from: the model, which of its fields the
+    config sets (an unset thinking level is not an explicit one), and its
+    provider.
+    """
+    model = config.models[alias]
+    try:
+        provider = config.get_provider_for_model(model).model_dump()
+    except ValueError:
+        provider = None
+    return model.model_dump(), sorted(model.model_fields_set), provider
+
+
+def _active_alias(config: VibeConfigSchema) -> str | None:
+    try:
+        return config.get_active_model().alias
+    except ValueError:
+        return None
+
+
+def models_a_write_changes(
+    before: VibeConfigSchema, after: VibeConfigSchema
+) -> list[ModelConfig]:
+    """The models of ``after`` that read differently from ``before``, or that
+    the write made active.
+
+    A field, whole-model, provider or active-model write, or a removal that
+    uncovers a lower layer's value, all show up here, whatever path names them.
+    """
+    changed = {
+        alias: model
+        for alias, model in after.models.items()
+        if alias not in before.models or _route(before, alias) != _route(after, alias)
+    }
+    active = _active_alias(after)
+    if active in after.models and active != _active_alias(before):
+        changed.setdefault(active, after.models[active])
+    return list(changed.values())
+
+
 def config_write_ops_to_patches(
     config: VibeConfigSchema,
     ops: list[ConfigWriteOpWire],
     *,
-    durable_model_aliases: set[str],
+    sparse_override_model_aliases: set[str],
 ) -> list[PatchOp]:
-    model = config.get_active_model()
-    model_path = f"/models/{escape_json_pointer_token(model.alias)}"
-    model_prefix = f"{model_path}/"
-    model_fields = type(model).model_fields
-
-    # Materialize the active model when no durable layer can reconstruct it on
-    # restart; a sparse field-only override of such a model would be missing its
-    # required identity fields and fail schema validation next launch. Multiple
+    # A model outside ``sparse_override_model_aliases`` (no layer rebuilds it
+    # at launch) needs its identity materialized; every other model takes a
+    # bare field write. Held per
+    # alias, not just for the active model: a pick that names another model
+    # writes that model's fields before it becomes the active one. Multiple
     # field writes targeting the same alias in one batch fold into a single
     # upsert so earlier changes are not silently overwritten.
-    pending: dict[str | None, dict[str, Any]] = {}
+    pending: dict[tuple[str | None, str], tuple[ModelConfig, dict[str, Any]]] = {}
     operations: list[PatchOp] = []
 
     for op in ops:
@@ -71,13 +178,11 @@ def config_write_ops_to_patches(
             )
             continue
 
-        field = op.path.removeprefix(model_prefix)
-        if (
-            op.path.startswith(model_prefix)
-            and field in model_fields
-            and model.alias not in durable_model_aliases
-        ):
-            pending.setdefault(op.target_layer, {})[field] = op.value
+        write = _model_field_write(op.path, config)
+        if write is not None and write[0] not in sparse_override_model_aliases:
+            alias, model, field = write
+            _, overrides = pending.setdefault((op.target_layer, alias), (model, {}))
+            overrides[field] = op.value
             continue
 
         operations.append(
@@ -86,10 +191,10 @@ def config_write_ops_to_patches(
             )
         )
 
-    for target_layer, overrides in pending.items():
+    for (target_layer, alias), (model, overrides) in pending.items():
         operations.append(
             AddOperationPatch(
-                path=model_path,
+                path=f"/models/{escape_json_pointer_token(alias)}",
                 value=_minimal_model_payload(model, overrides),
                 target_layer_name=target_layer,
             )

@@ -1,0 +1,223 @@
+{
+  "interval": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "schedule",
+        "prompt": "check CI",
+        "interval_seconds": 90
+      },
+      "display": {
+        "summary": "Scheduling every 1 minute 30 seconds: check CI",
+        "verb": "Scheduling",
+        "message": "every 1 minute 30 seconds: check CI",
+        "settledVerb": "Scheduled",
+        "settledMessage": "every 1 minute 30 seconds: check CI",
+        "statusText": "Scheduling recurring prompts"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": "Prompt: check CI\nSchedule: every 1 minute 30 seconds\nNext run: 2026-09-22 09:00:00 UTC\nID: abc",
+      "outputText": "Prompt: check CI\nSchedule: every 1 minute 30 seconds\nNext run: 2026-09-22 09:00:00 UTC\nID: abc",
+      "display": {
+        "success": true,
+        "verb": "Scheduled",
+        "message": "every 1 minute 30 seconds: check CI",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  },
+  "calendar": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "schedule_cron",
+        "prompt": "review weekday builds",
+        "cron": "0 9 * * 1-5"
+      },
+      "display": {
+        "summary": "Scheduling cron 0 9 * * 1-5 (local time): review weekday builds",
+        "verb": "Scheduling",
+        "message": "cron 0 9 * * 1-5 (local time): review weekday builds",
+        "settledVerb": "Scheduled",
+        "settledMessage": "cron 0 9 * * 1-5 (local time): review weekday builds",
+        "statusText": "Scheduling recurring prompts"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": "Prompt: review weekday builds\nSchedule: cron 0 9 * * 1-5 (local time)\nNext run: 2026-09-23 09:00:00 UTC\nID: weekdays",
+      "outputText": "Prompt: review weekday builds\nSchedule: cron 0 9 * * 1-5 (local time)\nNext run: 2026-09-23 09:00:00 UTC\nID: weekdays",
+      "display": {
+        "success": true,
+        "verb": "Scheduled",
+        "message": "cron 0 9 * * 1-5 (local time): review weekday builds",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  },
+  "empty": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "list"
+      },
+      "display": {
+        "summary": "Listing scheduled prompts",
+        "verb": "Listing",
+        "message": "scheduled prompts",
+        "settledVerb": "Listed",
+        "settledMessage": "scheduled prompts",
+        "statusText": "Listing recurring prompts"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": "No scheduled prompts.",
+      "outputText": "No scheduled prompts.",
+      "display": {
+        "success": true,
+        "verb": "Listed",
+        "message": "0 scheduled prompts",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  },
+  "mixed": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "list"
+      },
+      "display": {
+        "summary": "Listing scheduled prompts",
+        "verb": "Listing",
+        "message": "scheduled prompts",
+        "settledVerb": "Listed",
+        "settledMessage": "scheduled prompts",
+        "statusText": "Listing recurring prompts"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": "Prompt: check CI\nSchedule: every 1 minute 30 seconds\nNext run: 2026-09-22 09:00:00 UTC\nID: abc\n\nPrompt: review weekday builds\nSchedule: cron 0 9 * * 1-5 (local time)\nNext run: 2026-09-23 09:00:00 UTC\nID: weekdays",
+      "outputText": "Prompt: check CI\nSchedule: every 1 minute 30 seconds\nNext run: 2026-09-22 09:00:00 UTC\nID: abc\n\nPrompt: review weekday builds\nSchedule: cron 0 9 * * 1-5 (local time)\nNext run: 2026-09-23 09:00:00 UTC\nID: weekdays",
+      "display": {
+        "success": true,
+        "verb": "Listed",
+        "message": "2 scheduled prompts",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  },
+  "cancelled": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "cancel",
+        "id": "abc"
+      },
+      "display": {
+        "summary": "Cancelling scheduled prompt abc",
+        "verb": "Cancelling",
+        "message": "scheduled prompt abc",
+        "settledVerb": "Cancelled",
+        "settledMessage": "scheduled prompt abc",
+        "statusText": "Cancelling recurring prompts"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": "Prompt: check CI\nSchedule: every 1 minute 30 seconds\nID: abc",
+      "outputText": "Prompt: check CI\nSchedule: every 1 minute 30 seconds\nID: abc",
+      "display": {
+        "success": true,
+        "verb": "Cancelled",
+        "message": "check CI",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  },
+  "cleared": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "clear"
+      },
+      "display": {
+        "summary": "Clearing scheduled prompts",
+        "verb": "Clearing",
+        "message": "scheduled prompts",
+        "settledVerb": "Cleared",
+        "settledMessage": "scheduled prompts",
+        "statusText": "Clearing recurring prompts"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": "Cleared 2 scheduled loops",
+      "outputText": "Cleared 2 scheduled loops",
+      "display": {
+        "success": true,
+        "verb": "Cleared",
+        "message": "2 scheduled loops",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  },
+  "failed": {
+    "title": "vibe.cron",
+    "detail": {
+      "kind": "tool",
+      "toolName": "vibe.cron",
+      "input": {
+        "action": "cancel",
+        "id": "missing"
+      },
+      "display": {
+        "summary": "Cancelling scheduled prompt missing",
+        "verb": "Cancelling",
+        "message": "scheduled prompt missing",
+        "settledVerb": "Cancelled",
+        "settledMessage": "scheduled prompt missing",
+        "statusText": "Cancelling recurring prompts"
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": {
+        "message": "No scheduled loop found with ID missing",
+        "code": null,
+        "details": null
+      },
+      "output": null,
+      "outputText": "",
+      "display": {
+        "success": false,
+        "verb": "Failed",
+        "message": "scheduled prompt missing",
+        "suffix": "",
+        "warnings": []
+      }
+    }
+  }
+}

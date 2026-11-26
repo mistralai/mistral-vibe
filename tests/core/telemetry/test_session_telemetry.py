@@ -39,7 +39,10 @@ def test_records_use_the_active_model(telemetry_events: list[dict[str, Any]]) ->
     # A model switch is reflected in every subsequent event.
     service.set_model("m2")
     service.record_subagent_tool_call_finished(
-        operation="spawn", outcome="success", profile_source="generic"
+        operation="spawn",
+        outcome="success",
+        profile_source="generic",
+        caller_agent_path="/root",
     )
 
     events = [
@@ -50,6 +53,36 @@ def test_records_use_the_active_model(telemetry_events: list[dict[str, Any]]) ->
     assert events[0]["properties"]["model"] == "m1"
     assert events[1]["properties"]["tool_name"] == "subagent.spawn"
     assert events[1]["properties"]["model"] == "m2"
+
+
+def test_record_tool_call_finished_carries_decision_and_approval_type(
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    service = _service()
+
+    service.record_tool_call_finished(
+        tool_name="write_file",
+        status="success",
+        agent_profile_name="default",
+        approval_policy="smart-approve",
+        nb_files_created=1,
+        nb_files_modified=0,
+        file_extension=".py",
+        decision="execute",
+        approval_type="ask",
+        approval_source="user",
+    )
+
+    events = [
+        e for e in telemetry_events if e["event_name"] == "vibe.tool_call_finished"
+    ]
+    assert len(events) == 1
+    props = events[0]["properties"]
+    assert props["agent_profile_name"] == "default"
+    assert props["approval_policy"] == "smart-approve"
+    assert props["decision"] == "execute"
+    assert props["approval_type"] == "ask"
+    assert props["approval_source"] == "user"
 
 
 def test_records_compaction_events(telemetry_events: list[dict[str, Any]]) -> None:

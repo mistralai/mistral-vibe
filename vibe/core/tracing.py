@@ -16,14 +16,15 @@ from vibe.core.config import (
     OtelRedactionMode,
     OtelSpanExporterConfig,
 )
+from vibe.core.config._defaults import PUBLIC_REGIONAL_MISTRAL_API_HOSTS
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.http import get_server_url_from_api_base
+from vibe.utils.oidc_marker import is_oidc_authorization
 
 if TYPE_CHECKING:
     from opentelemetry import trace
 
     from vibe.core.config import ProviderConfig, VibeConfigSchema
-    from vibe.core.llm.exceptions import BackendError
 
 from vibe.observability.logging import logger
 
@@ -34,10 +35,6 @@ VIBE_PROVIDER_API_STYLE = "vibe.provider.api_style"
 VIBE_REQUEST_CALL_TYPE = "vibe.request.call_type"
 VIBE_REQUEST_MESSAGE_ID = "vibe.request.message_id"
 VIBE_REQUEST_STREAMING = "vibe.request.streaming"
-_PUBLIC_REGIONAL_MISTRAL_API_HOSTS = frozenset({
-    "api.eu.mistral.ai",
-    "api.us.mistral.ai",
-})
 
 
 def _get_default_otel_server_url(mistral_provider: ProviderConfig | None) -> str:
@@ -46,7 +43,7 @@ def _get_default_otel_server_url(mistral_provider: ProviderConfig | None) -> str
     server_url = get_server_url_from_api_base(mistral_provider.api_base)
     if server_url is None:
         return DEFAULT_MISTRAL_SERVER_URL
-    if urlparse(server_url).hostname in _PUBLIC_REGIONAL_MISTRAL_API_HOSTS:
+    if urlparse(server_url).hostname in PUBLIC_REGIONAL_MISTRAL_API_HOSTS:
         return DEFAULT_MISTRAL_SERVER_URL
     return server_url
 
@@ -107,7 +104,14 @@ def setup_tracing(config: VibeConfigSchema) -> None:
         "service.name": VIBE_AGENT_NAME,
         "service.version": __version__,
     })
-    exporter: SpanExporter = OTLPSpanExporter(**exporter_cfg.model_dump())
+    if is_oidc_authorization((exporter_cfg.headers or {}).get("Authorization")):
+        from vibe.setup.auth._oidc_otel import OidcOTelTransport
+
+        exporter: SpanExporter = OTLPSpanExporter(
+            **exporter_cfg.model_dump(), _transport=OidcOTelTransport()
+        )
+    else:
+        exporter = OTLPSpanExporter(**exporter_cfg.model_dump())
     if config.otel_redaction is not OtelRedactionMode.NONE:
         from mistralai.extra.observability import (
             AttributeRedactionPolicy,
@@ -133,31 +137,9 @@ def _get_tracer() -> trace.Tracer:
     return trace.get_tracer(VIBE_TRACER_NAME, __version__)
 
 
-def _backend_error_from(exc: BaseException) -> BackendError | None:
-    from vibe.core.llm.exceptions import BackendError
-
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        if isinstance(current, BackendError):
-            return current
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
-    return None
-
-
 def _exception_status(
     exc: Exception, *, record_unhandled_exception: bool
 ) -> tuple[str, bool]:
-    if backend_error := _backend_error_from(exc):
-        status = (
-            str(backend_error.status) if backend_error.status is not None else "N/A"
-        )
-        return (
-            f"BackendError(provider={backend_error.provider}, status={status})",
-            False,
-        )
-
     if not record_unhandled_exception:
         return f"{type(exc).__name__} raised during model call.", False
 

@@ -1,29 +1,17 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator
 import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from vibe.core.skills.models import SkillInfo
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolConfig,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-    ToolPermission,
-)
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolPermission
 from vibe.core.tools.permissions import PermissionContext
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.utils.tool_presentation import ToolEffectKind
 
-_MAX_LISTED_FILES = 10
-_MAX_WALKED_ENTRIES = 200
-_SKIP_DIR_NAMES = frozenset({
+SAMPLED_SKILL_FILES = 10
+MAX_WALKED_SKILL_ENTRIES = 200
+SKIPPED_SKILL_DIR_NAMES = frozenset({
     ".git",
     "node_modules",
     "__pycache__",
@@ -59,20 +47,27 @@ def sample_skill_files(skill_dir: Path | None) -> list[str]:
     files: list[str] = []
     try:
         for root, dirnames, filenames in os.walk(skill_dir, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+            dirnames[:] = [d for d in dirnames if d not in SKIPPED_SKILL_DIR_NAMES]
             for name in filenames:
                 if name == "SKILL.md":
                     continue
                 files.append(str(Path(root, name).relative_to(skill_dir)))
-            if len(files) >= _MAX_WALKED_ENTRIES:
+            if len(files) >= MAX_WALKED_SKILL_ENTRIES:
                 break
     except OSError:
         pass
-    return sorted(files)[:_MAX_LISTED_FILES]
+    return sorted(files)[:SAMPLED_SKILL_FILES]
 
 
-def render_skill_result(skill_info: SkillInfo, files: list[str]) -> SkillResult:
-    skill_dir = skill_info.skill_dir
+def render_skill_result(
+    skill_info: SkillInfo, files: list[str], *, base_dir: str | None = None
+) -> SkillResult:
+    """Render a skill's content block.
+
+    ``base_dir`` overrides the skill's own directory, for a skill whose files
+    the model reads somewhere else, such as a copy in a sandbox.
+    """
+    skill_dir = base_dir or skill_info.skill_dir
 
     file_lines = "\n".join(f"<file>{f}</file>" for f in files)
     base_dir_lines: list[str] = []
@@ -110,77 +105,10 @@ def already_loaded_message(name: str) -> str:
     )
 
 
-def already_loaded_result(skill_info: SkillInfo) -> SkillResult:
-    skill_dir = skill_info.skill_dir
-    return SkillResult(
-        name=skill_info.name,
-        content=already_loaded_message(skill_info.name),
-        skill_dir=None if skill_dir is None else str(skill_dir),
-    )
-
-
-async def build_skill_result(
-    skill_info: SkillInfo, *, already_loaded: bool
-) -> SkillResult:
-    if already_loaded:
-        return already_loaded_result(skill_info)
-    files = await asyncio.to_thread(sample_skill_files, skill_info.skill_dir)
-    return render_skill_result(skill_info, files)
-
-
 class SkillToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
 
 
-class Skill(
-    BaseTool[SkillArgs, SkillResult, SkillToolConfig, BaseToolState],
-    ToolUIData[SkillArgs, SkillResult],
-):
-    effect_kind = ToolEffectKind.SKILL
-
-    @classmethod
-    def format_call_display(cls, args: SkillArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(
-            summary=f"Loading skill: {args.name}",
-            verb="Loading",
-            message=f"skill: {args.name}",
-            settled_verb="Loaded",
-            settled_message=f"skill: {args.name}",
-        )
-
-    @classmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if event.error:
-            return ToolResultDisplay(success=False, message=event.error)
-        if not isinstance(event.result, SkillResult):
-            return ToolResultDisplay(success=True, message="Skill loaded")
-        return ToolResultDisplay(
-            success=True, verb="Loaded", message=f"skill: {event.result.name}"
-        )
-
-    @classmethod
-    def get_status_text(cls) -> str:
-        return "Loading skill"
-
+class Skill(BaseTool[SkillArgs, SkillResult, SkillToolConfig, BaseToolState]):
     def resolve_permission(self, args: SkillArgs) -> PermissionContext | None:
         return PermissionContext(permission=ToolPermission.ALWAYS)
-
-    async def run(
-        self, args: SkillArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | SkillResult, None]:
-        if ctx is None or ctx.skill_manager is None:
-            raise ToolError("Skill manager not available")
-
-        skill_manager = ctx.skill_manager
-        skill_info = skill_manager.get_skill(args.name)
-
-        if skill_info is None:
-            available = ", ".join(sorted(skill_manager.available_skills.keys()))
-            raise ToolError(
-                f'Skill "{args.name}" not found. Available skills: {available or "none"}'
-            )
-
-        already_loaded = ctx.is_skill_loaded is not None and ctx.is_skill_loaded(
-            args.name
-        )
-        yield await build_skill_result(skill_info, already_loaded=already_loaded)

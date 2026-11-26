@@ -1,0 +1,234 @@
+//! Welcome banner: the model label and the model-driven cat sprite.
+
+use serde_json::{json, Value};
+use vibe_rs::ui::banner::petit_chat::{CatVariant, PetitChat};
+use vibe_rs::ui::banner::Banner;
+use vibe_rs::utils::startup_cache::StartupConfig;
+
+fn runtime(display_name: &str, thinking: &str, extra: Value) -> Value {
+    let mut runtime = json!({
+        "config": {
+            "theme": "ansi-dark",
+            "activeModel": {"displayName": display_name, "thinking": thinking},
+            "models": [{}, {}],
+        },
+        "skills": [
+            {"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"},
+            {"name": "builtin", "source": "builtin"},
+        ],
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        runtime[key] = value.clone();
+    }
+    json!({"runtime": runtime})
+}
+
+fn config(display_name: &str, thinking: &str, extra: Value) -> StartupConfig {
+    StartupConfig::from_runtime("1.0.0", &runtime(display_name, thinking, extra)).unwrap()
+}
+
+fn text(banner: &Banner, config: &StartupConfig) -> Vec<String> {
+    banner
+        .view(config, None, 120)
+        .lines()
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn the_model_label_shows_the_display_name_and_thinking_level() {
+    let config = config("glm-5.2 (Mistral Hosted)", "max", json!({}));
+    assert_eq!(config.active_model, "glm-5.2 (Mistral Hosted)[max]");
+    let lines = text(&Banner::default(), &config);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().ends_with("glm-5.2 (Mistral Hosted)[max]")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_given_model_replaces_the_session_s_in_the_banner() {
+    let config = config("Medium", "high", json!({}));
+    let lines: Vec<String> = Banner::default()
+        .view(&config, Some("deepseek[off]"), 120)
+        .lines()
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_end().ends_with("deepseek[off]")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Medium")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn large_models_pick_the_chonky_cat() {
+    for model in ["Mistral Large 3", "mistral-large-latest", "ml4", "le-chonk"] {
+        assert!(
+            CatVariant::from_model(model) == CatVariant::LeChonk,
+            "{model}"
+        );
+    }
+    for model in ["Medium", "devstral-2", "mistral-small"] {
+        assert!(
+            CatVariant::from_model(model) == CatVariant::LeChat,
+            "{model}"
+        );
+    }
+}
+
+#[test]
+fn a_model_switch_swaps_the_cat_sprite() {
+    let width = |banner: &Banner| {
+        banner
+            .chat_frame()
+            .lines()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let mut banner = Banner::default();
+    let classic = width(&banner);
+
+    banner.sync_model_variant(&config("Mistral Large 3", "off", json!({})));
+    let chonk = width(&banner);
+    assert!(chonk > classic, "{chonk} > {classic}");
+
+    banner.sync_model_variant(&config("Medium", "off", json!({})));
+    assert_eq!(width(&banner), classic);
+}
+
+#[test]
+fn every_cat_keeps_the_text_at_column_14() {
+    for model in ["Medium", "Mistral Large 3"] {
+        let config = config(model, "off", json!({}));
+        let mut banner = Banner::default();
+        banner.sync_model_variant(&config);
+        assert!(
+            banner
+                .chat_frame()
+                .lines()
+                .all(|row| row.chars().count() < 14),
+            "{model}"
+        );
+        let info: String = text(&banner, &config)[1].chars().skip(14).collect();
+        assert!(info.starts_with("Mistral Vibe"), "{model}: {info}");
+    }
+}
+
+#[test]
+fn the_cat_uses_the_banner_text_color() {
+    let config = config("Medium", "off", json!({}));
+    let lines = Banner::default().view(&config, None, 120);
+    let row = &lines.lines()[1];
+    assert_eq!(
+        row.spans[0].style.fg,
+        Some(vibe_rs::ui::theme::foreground())
+    );
+}
+
+/// Ticks `cat` for well over a round; a round must have moved dots meanwhile.
+fn play_round(cat: &mut PetitChat) {
+    let mut changed = false;
+    for _ in 0..200 {
+        changed |= cat.tick();
+    }
+    assert!(changed, "a round must move dots");
+}
+
+#[test]
+fn the_cat_plays_one_round_at_startup_then_rests() {
+    let mut cat = PetitChat::default();
+    let starting = cat.render();
+    play_round(&mut cat);
+    assert_eq!(
+        cat.render(),
+        starting,
+        "a round ends back at its start pose"
+    );
+    assert!(!cat.tick(), "a rested cat skips its tick");
+    assert_eq!(cat.render(), starting);
+}
+
+#[test]
+fn a_click_replays_one_round_then_rests() {
+    let mut cat = PetitChat::default();
+    let starting = cat.render();
+    play_round(&mut cat);
+    cat.restart();
+    assert_eq!(cat.render(), starting, "a restart keeps the resting pose");
+    play_round(&mut cat);
+    assert_eq!(cat.render(), starting);
+    assert!(!cat.tick());
+}
+
+#[test]
+fn a_spinning_cat_never_rests() {
+    let mut cat = PetitChat::default();
+    let starting = cat.render();
+    let mut departures = 0;
+    let mut previous = starting.clone();
+    for _ in 0..200 {
+        cat.spin();
+        let current = cat.render();
+        if previous == starting && current != starting {
+            departures += 1;
+        }
+        previous = current;
+    }
+    assert!(
+        departures >= 3,
+        "the cat left its start pose {departures} times"
+    );
+}
+
+#[test]
+fn a_click_while_a_round_plays_lets_it_finish() {
+    let mut cat = PetitChat::default();
+    let starting = cat.render();
+    cat.tick();
+    let mid = cat.render();
+    assert_ne!(mid, starting, "the first tick moves the cat");
+    cat.restart();
+    assert_eq!(
+        cat.render(),
+        mid,
+        "a restart never disturbs a running round"
+    );
+    play_round(&mut cat);
+    assert_eq!(cat.render(), starting);
+    assert!(!cat.tick());
+}
+
+#[test]
+fn a_variant_switch_replays_a_round_for_the_new_sprite() {
+    let mut cat = PetitChat::default();
+    play_round(&mut cat);
+    cat.set_variant(CatVariant::LeChonk);
+    let chonk_start = cat.render();
+    play_round(&mut cat);
+    assert_eq!(cat.render(), chonk_start);
+    assert!(!cat.tick());
+    cat.restart();
+    play_round(&mut cat);
+    assert_eq!(cat.render(), chonk_start);
+}

@@ -1,6 +1,6 @@
 ---
 name: vibe-async
-description: Async and concurrency patterns for Mistral Vibe. Use when working with asyncio, the agent loop, Textual TUI threading, HTTP clients, streaming surfaces, or core-to-TUI communication.
+description: Async and concurrency patterns for Mistral Vibe. Use when working with asyncio, the agent loop, the app server's event loop, HTTP clients, streaming surfaces, or core-to-client communication.
 metadata:
   display-name: Vibe Async
   short-description: Async and concurrency patterns for Vibe
@@ -9,7 +9,7 @@ metadata:
 
 # Vibe Async Patterns
 
-Conventions for async and concurrent code in Vibe. Apply when touching the agent loop, Textual event loop, HTTP clients, streaming, or any `async` code.
+Conventions for async and concurrent code in Vibe. Apply when touching the agent loop, the app server's event loop, HTTP clients, streaming, or any `async` code.
 
 ## Runtime
 
@@ -17,7 +17,7 @@ Conventions for async and concurrent code in Vibe. Apply when touching the agent
 
 ## Blocking work
 
-- Never run CPU-heavy or I/O-bound code on the UI thread. The Textual TUI and the agent loop share one event loop, so anything blocking (large JSON/Pydantic serialization, `os.fsync`, subprocess calls, recursive globs) freezes the UI — offload it with `asyncio.to_thread`.
+- Never run CPU-heavy or I/O-bound code on the event loop. The app server serves every session and its RPCs from one event loop, so anything blocking (large JSON/Pydantic serialization, `os.fsync`, subprocess calls, recursive globs) stalls the clients — offload it with `asyncio.to_thread`.
 - Async file wrappers don't make blocking syscalls non-blocking.
 - Use `anyio.Path` for file I/O on async paths.
 
@@ -25,9 +25,9 @@ Conventions for async and concurrent code in Vibe. Apply when touching the agent
 
 - Streaming surfaces return `AsyncGenerator[Event, None]`, not coroutines.
 
-## Core-to-TUI communication
+## Core-to-client communication
 
-- Route core-to-TUI communication through `vibe.app_server`. Server requests such as approvals and user input become canonical Vibe events; neither the TUI nor app server may register callbacks, listeners, or message observers directly on the agent loop.
+- Route core-to-client communication through `vibe.app_server`. Server requests such as approvals and user input become canonical Vibe events; neither the clients nor app server may register callbacks, listeners, or message observers directly on the agent loop.
 
 ## HTTP clients
 

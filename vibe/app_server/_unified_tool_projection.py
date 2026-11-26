@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+import os
+from pathlib import Path
+import re
+import shlex
 from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
@@ -15,15 +20,15 @@ from pydantic import (
     model_validator,
 )
 
+from vibe.app_server._cron import CronArgs
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
     CompletedEffectState,
     EffectCallDisplay,
     EffectDetail,
     EffectResultDisplay,
-    FileEditEffectBatchInput,
-    FileEditEffectChange,
     FileEditEffectDetail,
+    FileEditEffectInput,
     FileEditEffectOccurrence,
     FileEditEffectOutput,
     FileReadEffectDetail,
@@ -41,6 +46,12 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicEffectEntry,
     PublicHistoryEntry,
+    ScratchpadEffectDetail,
+    ScratchpadEffectInput,
+    ScratchpadEffectOutput,
+    ScratchpadListInput,
+    ScratchpadReadInput,
+    ScratchpadWriteInput,
     ShellEffectDetail,
     ShellEffectInput,
     ShellEffectOutput,
@@ -62,12 +73,28 @@ from vibe.app_server.models import (
     WebSearchEffectSource,
 )
 
+# The local runtime's file tool annotations.
 _SEARCH_REPLACE_ANNOTATION_KEY = "mistralai.vibe.sdk.search_replace"
+_WRITE_FILE_ANNOTATION_KEY = "mistralai.vibe.sdk.write_file"
+# The target runtime's, shared by write_file and edit. They mirror
+# `mistralai.vibe.harness.sandbox_helpers`, which the app server does not
+# depend on; tests pin the names.
+_FILE_DIFF_PREVIEW_BLOCKS_ANNOTATION_KEY = (
+    "mistralai.vibe.harness.file_diff_preview_blocks"
+)
+_FILE_PREVIOUS_CONTENT_ANNOTATION_KEY = "mistralai.vibe.harness.file_previous_content"
+# The target runtime's edit warning when it dropped diff blocks past its preview
+# limits: the blocks it kept cover only part of the change.
+_TARGET_PREVIEW_TRUNCATED_WARNING = (
+    "edit preview truncated because the diff exceeds preview limits"
+)
 type UnifiedToolCategory = Literal[
+    "cron",
     "file_edit",
     "file_read",
     "file_search",
     "file_write",
+    "scratchpad",
     "shell",
     "skill",
     "todo",
@@ -101,38 +128,64 @@ class _WriteArguments(_SourceModel):
 
 class _WriteResult(_SourceModel):
     path: str = Field(min_length=1)
+    # Required: a Runtime that does not report this leaves the call generic
+    # rather than having it read as a creation.
+    file_existed: bool
 
 
-class _SearchReplaceChange(_SourceModel):
-    old_str: str = Field(min_length=1)
-    new_str: str
+class _EditArguments(_SourceModel):
+    file_path: str = Field(min_length=1)
+    old_string: str = Field(min_length=1)
+    new_string: str
     replace_all: bool = False
 
     @model_validator(mode="after")
     def validate_change(self) -> Self:
-        if self.old_str == self.new_str:
-            raise ValueError("old_str and new_str must differ")
+        if self.old_string == self.new_string:
+            raise ValueError("old_string and new_string must differ")
         return self
 
 
-class _SearchReplaceArguments(_SourceModel):
-    file_path: str = Field(min_length=1)
-    content: list[_SearchReplaceChange] = Field(min_length=1)
-
-
-class _SearchReplaceResult(_SourceModel):
+class _EditResult(_SourceModel):
     file: str = Field(min_length=1)
     warnings: list[str] = Field(default_factory=list)
 
 
-class _SearchReplacePreview(_SourceModel):
+class _EditPreview(_SourceModel):
     old_start_line: int = Field(ge=1)
+    new_start_line: int | None = None
     old_lines: list[str]
     new_lines: list[str]
 
 
-class _SearchReplaceAnnotations(_SourceModel):
-    blocks: list[_SearchReplacePreview] = Field(min_length=1)
+class _EditAnnotations(_SourceModel):
+    blocks: list[_EditPreview] = Field(min_length=1)
+    previous_content: str | None = None
+
+
+class _WriteFileAnnotations(_SourceModel):
+    previous_content: str
+
+
+class _TargetPreviousContent(_SourceModel):
+    """The target runtime's replaced text, flat in ``_meta``.
+
+    Absent for a new, binary, non-UTF-8 or oversized file.
+    """
+
+    previous_content: str | None = Field(
+        default=None, alias=_FILE_PREVIOUS_CONTENT_ANNOTATION_KEY
+    )
+
+
+class _TargetEditAnnotations(_TargetPreviousContent):
+    """The target runtime's edit annotations: its diff blocks are absent for an
+    unchanged file, and partial or absent past its preview limits.
+    """
+
+    blocks: list[_EditPreview] = Field(
+        default_factory=list, alias=_FILE_DIFF_PREVIEW_BLOCKS_ANNOTATION_KEY
+    )
 
 
 class _ShellArguments(_SourceModel):
@@ -141,6 +194,10 @@ class _ShellArguments(_SourceModel):
 
 class _SkillArguments(_SourceModel):
     name: str = Field(min_length=1)
+
+
+class _SleepArguments(_SourceModel):
+    seconds: float = Field(gt=0, allow_inf_nan=False)
 
 
 class _ShellResult(_SourceModel):
@@ -178,6 +235,20 @@ class _WebFetchResult(_SourceModel):
     was_truncated: bool = False
 
 
+class _ConnectorWebSearchCard(_SourceModel):
+    # The web search connector answers with result cards keyed by the opaque
+    # reference id the model cites them under; display rows follow `rank`.
+    url: str
+    title: str
+    rank: int = 0
+
+
+class _ConnectorOpenUrlPage(_SourceModel):
+    url: str
+    content: str = ""
+    can_open: bool = True
+
+
 class _GrepArguments(_SourceModel):
     pattern: str = Field(min_length=1)
     path: str = "."
@@ -203,11 +274,55 @@ class _TodoResult(_SourceModel):
     total_count: int = Field(ge=0)
 
 
+class _ScratchpadArguments(_SourceModel):
+    action: str = Field(min_length=1)
+    path: str | None = None
+    content: str | None = None
+
+
+class _ScratchpadResult(_SourceModel):
+    verb: str = Field(min_length=1)
+    path: str | None = None
+    content: str | None = None
+    files: list[str] = Field(default_factory=list)
+
+
+class _CronLoop(_SourceModel):
+    id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    interval_seconds: int | None = Field(default=None, ge=30)
+    cron: str | None = None
+    next_fire_at: float = Field(allow_inf_nan=False)
+
+
+class _CronResult(_SourceModel):
+    message: str
+    loops: list[_CronLoop]
+    cleared_count: int | None = Field(default=None, ge=0)
+
+
 class _ToolResultEnvelope(_SourceModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
+    content: list[dict[str, JsonValue]] = Field(default_factory=list)
     structured_content: dict[str, JsonValue]
     meta: dict[str, JsonValue] | None = Field(default=None, alias="_meta")
+
+
+# Mirrors the tag the Harness stamps into large-output receipts
+# (format_truncated_output in harness-core/src/core/features/large_output/mod.rs).
+# If the Harness renames it, receipt detection silently breaks.
+_TRUNCATED_OUTPUT_TAG = "<truncated-output>"
+
+
+class _ReceiptBlock(_SourceModel):
+    text: str
+
+
+class _LargeOutputReceipt(_SourceModel):
+    content: list[_ReceiptBlock]
+    # Only its absence matters, so a normal result is not validated in depth.
+    structured_content: object = None
 
 
 class _ProcessStartArguments(_SourceModel):
@@ -281,6 +396,10 @@ class _ProcessWriteResult(_SourceModel):
 class _ProcessOutputEnvelope(_SourceModel):
     """Wraps a process result with the tool name so ProcessResultWidget can branch."""
 
+    # The projectors build it by field name; without this, aliased fields such
+    # as `processId` are dropped as extras and serialized as null.
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
     tool_name: str
     process_id: Annotated[str | None, Field(default=None, alias="processId")] = None
     status: str | None = None
@@ -305,16 +424,22 @@ class _ProjectedCall:
     project_result: Callable[[CompletedEffectState], CompletedEffectState]
 
 
-def project_unified_history_entry(entry: PublicHistoryEntry) -> PublicHistoryEntry:
-    """Project one migration history entry without mutating source history."""
+def project_unified_history_entry(
+    entry: PublicHistoryEntry, display_roots: Sequence[Path] = ()
+) -> PublicHistoryEntry:
+    """Project one migration history entry without mutating source history.
+
+    Displayed file paths under one of ``display_roots`` (first match wins) are
+    shown relative to it.
+    """
     if isinstance(entry, PublicEffectEntry):
-        return _project_effect(entry)
+        return _project_effect(entry, display_roots)
     if not isinstance(entry, PublicCallbackEntry):
         return entry
     detail = entry.detail
     if not isinstance(detail, ApprovalCallbackDetail):
         return entry
-    projected = _project_call(detail.effect)
+    projected = _project_call(detail.effect, display_roots)
     if projected is None:
         return entry
     return entry.model_copy(
@@ -338,12 +463,22 @@ def unified_tool_category(entry: PublicHistoryEntry) -> UnifiedToolCategory | No
     return _TOOL_CATEGORIES.get(detail.tool_name)
 
 
-def _project_effect(entry: PublicEffectEntry) -> PublicEffectEntry:
-    projected = _project_call(entry.detail)
+def _project_effect(
+    entry: PublicEffectEntry, display_roots: Sequence[Path]
+) -> PublicEffectEntry:
+    projected = _project_call(entry.detail, display_roots)
     if projected is None:
         return entry
     state = entry.state
-    if isinstance(state, CompletedEffectState):
+    semantic = not isinstance(projected.detail, GenericEffectDetail)
+    receipt = (
+        _receipt_text(state)
+        if semantic and isinstance(state, CompletedEffectState)
+        else None
+    )
+    if isinstance(state, CompletedEffectState) and receipt is not None:
+        state = _receipt_state(state, projected.detail, receipt)
+    elif isinstance(state, CompletedEffectState):
         try:
             state = projected.project_result(state)
         except (TypeError, ValueError, ValidationError):
@@ -351,22 +486,80 @@ def _project_effect(entry: PublicEffectEntry) -> PublicEffectEntry:
     return entry.model_copy(update={"detail": projected.detail, "state": state})
 
 
-def _project_call(detail: EffectDetail) -> _ProjectedCall | None:
+def is_large_output_receipt(entry: PublicHistoryEntry) -> bool:
+    """Whether the Harness swapped this call's oversized result for a text receipt."""
+    return (
+        isinstance(entry, PublicEffectEntry)
+        and isinstance(entry.state, CompletedEffectState)
+        and _receipt_text(entry.state) is not None
+    )
+
+
+def _receipt_text(state: CompletedEffectState) -> str | None:
+    try:
+        receipt = _LargeOutputReceipt.model_validate(state.output)
+    except ValidationError:
+        return None
+    text = "\n".join(block.text for block in receipt.content)
+    if receipt.structured_content is not None or _TRUNCATED_OUTPUT_TAG not in text:
+        return None
+    return text
+
+
+def _receipt_state(
+    state: CompletedEffectState, detail: EffectDetail, receipt: str
+) -> CompletedEffectState:
+    # The structured result is gone, so keep the semantic call and settle its
+    # header. The receipt does not fit the kind's output, so clients show it
+    # from output_text, unless the call already streamed its own output there.
+    call = detail.display
+    display = EffectResultDisplay(
+        success=state.display.success,
+        verb=call.settled_verb,
+        message=call.settled_message or call.message or call.summary,
+        suffix="(truncated)",
+    )
+    return _completed_state(
+        state, None, display, output_text=state.output_text or receipt
+    )
+
+
+def _project_call(
+    detail: EffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall | None:
     if not isinstance(detail, GenericEffectDetail):
         return None
+    path_projector = _PATH_PROJECTORS.get(detail.tool_name)
     projector = _CALL_PROJECTORS.get(detail.tool_name)
-    if projector is not None:
-        try:
+    try:
+        if path_projector is not None:
+            return path_projector(detail, display_roots)
+        if projector is not None:
             return projector(detail)
-        except (TypeError, ValueError, ValidationError):
-            return None
+    except (TypeError, ValueError, ValidationError):
+        return None
     label = _TOOL_LABELS.get(detail.tool_name)
     if label is not None:
         return _project_labeled(detail, label)
     return None
 
 
-def _project_read(detail: GenericEffectDetail) -> _ProjectedCall:
+def _display_path(path: str, display_roots: Sequence[Path]) -> str:
+    """The path relative to the first display root holding it, else unchanged."""
+    target = Path(path)
+    if not target.is_absolute():
+        return path
+    target = Path(os.path.normpath(target))
+    for root in display_roots:
+        if target.is_relative_to(root):
+            relative = target.relative_to(root)
+            return target.name if relative == Path() else str(relative)
+    return path
+
+
+def _project_read(
+    detail: GenericEffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall:
     arguments = _ReadArguments.model_validate(detail.input)
     requested_offset = _display_offset(arguments.offset)
     semantic = FileReadEffectDetail(
@@ -374,7 +567,9 @@ def _project_read(detail: GenericEffectDetail) -> _ProjectedCall:
         input=FileReadEffectInput(
             file_path=arguments.path, offset=requested_offset, limit=arguments.limit
         ),
-        display=_file_display("Reading", "Read", arguments.path),
+        display=_file_display(
+            "Reading", "Read", _display_path(arguments.path, display_roots)
+        ),
     )
 
     def project_result(state: CompletedEffectState) -> CompletedEffectState:
@@ -389,11 +584,16 @@ def _project_read(detail: GenericEffectDetail) -> _ProjectedCall:
             requested_limit=arguments.limit,
             was_truncated=result.was_truncated,
         )
-        word = "line" if result.lines_read == 1 else "lines"
+        path = _display_path(result.path, display_roots)
+        if any(block.get("type") == "image" for block in envelope.content):
+            message = f"the image {path}"
+        else:
+            word = "line" if result.lines_read == 1 else "lines"
+            message = f"{result.lines_read} {word} from {path}"
         display = EffectResultDisplay(
             success=True,
             verb="Read",
-            message=f"{result.lines_read} {word} from {result.path}",
+            message=message,
             suffix="(truncated)" if result.was_truncated else "",
         )
         return _completed_state(state, output, display)
@@ -401,69 +601,440 @@ def _project_read(detail: GenericEffectDetail) -> _ProjectedCall:
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-def _project_write(detail: GenericEffectDetail) -> _ProjectedCall:
+def _project_write(
+    detail: GenericEffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall:
     arguments = _WriteArguments.model_validate(detail.input)
     semantic = FileWriteEffectDetail(
         tool_name=detail.tool_name,
         input=FileWriteEffectInput(file_path=arguments.path, content=arguments.content),
         display=_file_display(
-            "Writing", "Created", arguments.path, content=arguments.content
+            "Writing",
+            "Created",
+            _display_path(arguments.path, display_roots),
+            content=arguments.content,
         ),
     )
 
     def project_result(state: CompletedEffectState) -> CompletedEffectState:
         envelope = _ToolResultEnvelope.model_validate(state.output)
         result = _WriteResult.model_validate(envelope.structured_content)
-        output = FileWriteEffectOutput(file_path=result.path, content=arguments.content)
-        display = EffectResultDisplay(success=True, verb="Created", message=result.path)
+        previous_content = _replaced_content(envelope)
+        output = FileWriteEffectOutput(
+            file_path=result.path,
+            content=_written_content(arguments.content, previous_content),
+            file_existed=result.file_existed,
+            previous_content=previous_content,
+        )
+        display = EffectResultDisplay(
+            success=True,
+            verb="Updated" if result.file_existed else "Created",
+            message=_display_path(result.path, display_roots),
+        )
         return _completed_state(state, output, display)
 
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-def _project_search_replace(detail: GenericEffectDetail) -> _ProjectedCall:
-    arguments = _SearchReplaceArguments.model_validate(detail.input)
+def _written_content(content: str, previous_content: str | None) -> str:
+    """The text a write put on disk, so a diff against the replaced text is exact.
+
+    A write reads ``\\n``, ``\\r\\n`` and ``\\r`` as line breaks and keeps the
+    dominant line ending of the file it replaces. A new file's line ending
+    depends on where the Runtime runs, so its content stands as given.
+    """
+    if not previous_content:
+        return content
+    crlf = previous_content.count("\r\n")
+    counts = {
+        "\r\n": crlf,
+        "\n": previous_content.count("\n") - crlf,
+        "\r": previous_content.count("\r") - crlf,
+    }
+    newline = max(counts, key=counts.__getitem__)
+    if counts[newline] == 0:
+        return content
+    lf_content = content.replace("\r\n", "\n").replace("\r", "\n")
+    return lf_content if newline == "\n" else lf_content.replace("\n", newline)
+
+
+def _project_edit(
+    detail: GenericEffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall:
+    arguments = _EditArguments.model_validate(detail.input)
     semantic = FileEditEffectDetail(
         tool_name=detail.tool_name,
-        input=FileEditEffectBatchInput(
+        input=FileEditEffectInput(
             file_path=arguments.file_path,
-            changes=[
-                FileEditEffectChange(
-                    old_string=change.old_str,
-                    new_string=change.new_str,
-                    replace_all=change.replace_all,
-                )
-                for change in arguments.content
-            ],
+            old_string=arguments.old_string,
+            new_string=arguments.new_string,
+            replace_all=arguments.replace_all,
         ),
-        display=_file_display("Editing", "Edited", arguments.file_path),
+        display=_file_display(
+            "Editing", "Edited", _display_path(arguments.file_path, display_roots)
+        ),
     )
 
     def project_result(state: CompletedEffectState) -> CompletedEffectState:
         envelope = _ToolResultEnvelope.model_validate(state.output)
-        result = _SearchReplaceResult.model_validate(envelope.structured_content)
-        annotations = _search_replace_annotations(envelope)
+        result = _EditResult.model_validate(envelope.structured_content)
+        blocks, previous_content = _edit_annotations(
+            envelope, result.warnings, arguments
+        )
         output = FileEditEffectOutput(
             file=result.file,
+            # Without blocks, the call's own strings stand for the change.
+            old_string=None if blocks else arguments.old_string,
+            new_string=None if blocks else arguments.new_string,
             occurrences=[
                 FileEditEffectOccurrence(
                     start_line=block.old_start_line,
+                    new_start_line=block.new_start_line,
                     old_text="".join(block.old_lines),
                     new_text="".join(block.new_lines),
                 )
-                for block in annotations.blocks
+                for block in blocks
             ],
+            previous_content=previous_content,
         )
         display = EffectResultDisplay(
-            success=True, verb="Edited", message=result.file, warnings=result.warnings
+            success=True,
+            verb="Edited",
+            message=_display_path(result.file, display_roots),
+            warnings=result.warnings,
         )
         return _completed_state(state, output, display)
 
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-def _project_shell(detail: GenericEffectDetail) -> _ProjectedCall:
+@dataclass(frozen=True)
+class _ShellGrep:
+    """A bash command that is a plain grep/rg invocation worth rendering as a search."""
+
+    pattern: str
+    path: str
+
+
+# The harness dropped the grep tool on purpose: the agent greps through bash,
+# but a plain `grep`/`rg` call is still worth the search UI. The shell projector
+# recognizes unambiguous invocations and renders them as a file search;
+# anything ambiguous (pipes, redirects, compound commands, unknown flags, output
+# without line numbers or path prefixes) keeps the plain shell display.
+_SHELL_OPERATOR_CHARS = frozenset("&|;<>")
+# Flags that are safe in both grep and rg and keep the `path:line:content`
+# output shape. `-s` means --no-messages in grep and --case-sensitive in rg;
+# `-I` means ignore-binary in grep and --no-messages in rg; both are safe.
+# Context flags (-A/-B/-C and --context/--after-context/--before-context) and
+# invert-match (-v/--invert-match) are rejected on purpose: they print
+# non-matching lines, which would parse as matches and inflate the count.
+_GREP_SHORT_FLAGS = frozenset("niwEFPI")
+_GREP_GREP_ONLY_SHORT_FLAGS = frozenset("asG")
+_GREP_SHORT_VALUE_FLAGS = frozenset("me")
+_GREP_LONG_FLAGS = frozenset({
+    "recursive",
+    "line-number",
+    "ignore-case",
+    "word-regexp",
+    "extended-regexp",
+    "fixed-strings",
+    "text",
+    "no-messages",
+    "basic-regexp",
+    "perl-regexp",
+    "pcre2",
+})
+_GREP_RG_ONLY_LONG_FLAGS = frozenset({
+    "no-ignore",
+    "hidden",
+    "no-heading",
+    "unrestricted",
+    "follow",
+    "no-require-git",
+    "with-filename",
+    "vimgrep",
+})
+_GREP_LONG_VALUE_FLAGS = frozenset({"include", "exclude", "max-count"})
+_GREP_RG_ONLY_LONG_VALUE_FLAGS = frozenset({
+    "glob",
+    "max-depth",
+    "max-filesize",
+    "ignore-file",
+})
+
+_GREP_MATCH_LINE = re.compile(r"^(?P<path>.+?):(?P<line>[1-9]\d*):(?P<text>.*)$")
+_GREP_BINARY_LINE = re.compile(r"^Binary file (?P<path>.+?) matches$")
+_GREP_MAX_PARSED_MATCHES = 200
+
+
+def _split_shell(command: str) -> list[str] | None:
+    """Tokenize a shell command, or None when it is not a plain single command."""
+    if "\n" in command or "`" in command or "$(" in command:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    if any(
+        token and all(character in _SHELL_OPERATOR_CHARS for character in token)
+        for token in tokens
+    ):
+        return None
+    return tokens
+
+
+@dataclass
+class _GrepParseState:
+    pattern: str | None = None
+    paths: list[str] = field(default_factory=list)
+    line_numbers: bool = False
+    prefixes_path: bool = False
+
+
+def _parse_grep_long_flag(
+    token: str, is_rg: bool, state: _GrepParseState, index: int
+) -> int | None:
+    """Consume a `--flag[=value]` token; returns the next index or None."""
+    name, has_value, _ = token[2:].partition("=")
+    value_flags = _GREP_LONG_VALUE_FLAGS
+    plain_flags = _GREP_LONG_FLAGS
+    if is_rg:
+        value_flags |= _GREP_RG_ONLY_LONG_VALUE_FLAGS
+        plain_flags |= _GREP_RG_ONLY_LONG_FLAGS
+    if name in value_flags:
+        return index if has_value else index + 1
+    if name in plain_flags:
+        if name in {"line-number", "vimgrep"}:
+            state.line_numbers = True
+        if name == "with-filename":
+            state.prefixes_path = True
+        return index
+    return None
+
+
+def _parse_grep_short_flags(
+    token: str, is_rg: bool, state: _GrepParseState, tokens: list[str], index: int
+) -> int | None:
+    """Consume a `-abc` token; returns the next index or None."""
+    chars = token[1:]
+    position = 0
+    while position < len(chars):
+        flag = chars[position]
+        position += 1
+        if flag in _GREP_SHORT_VALUE_FLAGS:
+            if position < len(chars):
+                value = chars[position:]
+                position = len(chars)
+            else:
+                if index >= len(tokens):
+                    return None
+                value = tokens[index]
+                index += 1
+            if flag == "e":
+                if state.pattern is not None:
+                    return None
+                state.pattern = value
+            continue
+        if flag in _GREP_SHORT_FLAGS:
+            if flag == "n":
+                state.line_numbers = True
+            continue
+        if flag == "H":
+            state.prefixes_path = True
+            continue
+        if flag == "r":
+            # grep's -r is recursive and implies the path prefix. rg is
+            # recursive by default and its -r is --replace (it takes a
+            # value), so an rg invocation using it is not a plain search.
+            if is_rg:
+                return None
+            state.prefixes_path = True
+            continue
+        if not is_rg and flag in _GREP_GREP_ONLY_SHORT_FLAGS:
+            continue
+        return None
+    return index
+
+
+def _parse_grep_invocation(command: str) -> _ShellGrep | None:
+    """Recognize a plain `grep`/`rg <flags> <pattern> <path>` command.
+
+    Conservative on purpose: only invocations whose output is guaranteed to be
+    `path:line:content` lines are recognized. The harness pipes stdout, so both
+    tools need `-n`/`--line-number` for line numbers. A path prefix needs
+    `-r`/`-H` for grep, while rg prints it for directory searches (`-H`/
+    `--with-filename` for a single file target). Unknown flags, context flags,
+    invert-match, rg's `-r` (`--replace`), multiple `-e` patterns, and missing
+    paths all fall back to the plain shell display.
+    """
+    tokens = _split_shell(command)
+    if not tokens:
+        return None
+    program = Path(tokens[0]).name
+    if program not in {"grep", "rg"}:
+        return None
+    is_rg = program == "rg"
+    state = _parse_grep_tokens(tokens, is_rg)
+    if (
+        state is None
+        or not state.pattern
+        or not state.paths
+        or not state.line_numbers
+        or not state.prefixes_path
+    ):
+        return None
+    return _ShellGrep(
+        pattern=state.pattern, path=state.paths[0] if len(state.paths) == 1 else "."
+    )
+
+
+def _rg_prefixes_path(paths: list[str]) -> bool:
+    """Whether piped rg prints the path prefix for these targets by itself.
+
+    rg prints the prefix for directory searches and multiple targets; a
+    single file target needs -H/--with-filename.
+    """
+    return len(paths) > 1 or paths[0] in {".", ".."} or paths[0].endswith("/")
+
+
+def _parse_grep_tokens(tokens: list[str], is_rg: bool) -> _GrepParseState | None:
+    # The harness runs commands with piped stdout, so rg's TTY defaults (line
+    # numbers, path prefixes) are off: both tools must ask for them explicitly.
+    state = _GrepParseState()
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token.startswith("--"):
+            index = _parse_grep_long_flag(token, is_rg, state, index)
+            if index is None:
+                return None
+            continue
+        if token.startswith("-") and token != "-":
+            index = _parse_grep_short_flags(token, is_rg, state, tokens, index)
+            if index is None:
+                return None
+            continue
+        if token == "-":
+            return None
+        if state.pattern is None:
+            state.pattern = token
+        else:
+            state.paths.append(token)
+    if (
+        is_rg
+        and not state.prefixes_path
+        and state.paths
+        and _rg_prefixes_path(state.paths)
+    ):
+        state.prefixes_path = True
+    return state
+
+
+def _parse_grep_stdout(stdout: str) -> tuple[list[FileSearchEffectMatch], bool]:
+    """Parse `path:line:content` match lines; returns the matches and a capped flag."""
+    matches: list[FileSearchEffectMatch] = []
+    truncated = False
+    for line in stdout.splitlines():
+        if len(matches) >= _GREP_MAX_PARSED_MATCHES:
+            truncated = True
+            break
+        found = _GREP_MATCH_LINE.match(line)
+        if found is not None:
+            matches.append(
+                FileSearchEffectMatch(
+                    path=found.group("path").removeprefix("./"),
+                    line=int(found.group("line")),
+                )
+            )
+            continue
+        binary = _GREP_BINARY_LINE.match(line)
+        if binary is not None:
+            matches.append(
+                FileSearchEffectMatch(path=binary.group("path").removeprefix("./"))
+            )
+    return matches, truncated
+
+
+def _project_shell_grep(
+    grep: _ShellGrep, display_roots: Sequence[Path]
+) -> _ProjectedCall:
+    pattern = grep.pattern
+    message = f"'{pattern}'"
+    searched = Path(os.path.normpath(grep.path))
+    if grep.path != "." and searched not in display_roots[:1]:
+        message += f" in {_display_path(grep.path, display_roots)}"
+    semantic = FileSearchEffectDetail(
+        tool_name="grep",
+        input=FileSearchEffectInput(pattern=pattern, path=grep.path),
+        display=EffectCallDisplay(
+            summary=f"Grepping {message}",
+            verb="Searching",
+            message=message,
+            settled_verb="Searched",
+            settled_message=message,
+            status_text="Searching files",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        try:
+            result = _ShellResult.model_validate(envelope.structured_content)
+            transcript = ShellEffectOutput(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                output=result.output,
+                truncated=result.was_truncated,
+            ).transcript
+            # grep/rg exit 1 means "no matches", not an error.
+            is_error = result.returncode not in {0, 1}
+            was_truncated = result.was_truncated
+        except ValidationError:
+            result = None
+            transcript = str(envelope.structured_content.get("error", ""))
+            is_error = True
+            was_truncated = False
+        stdout = result.stdout if result is not None else ""
+        parsed, capped = _parse_grep_stdout(stdout)
+        if (
+            result is not None
+            and result.returncode == 0
+            and stdout.strip()
+            and not parsed
+        ):
+            # The output shape did not match (e.g. a RIPGREP_CONFIG_PATH
+            # override): fall back to the raw shell entry instead of
+            # reporting "0 matches" for a search that did match.
+            raise ValueError(f"unparseable grep output for {grep.pattern!r}")
+        output = FileSearchEffectOutput(
+            matches=stdout,
+            match_count=len(parsed),
+            was_truncated=was_truncated or capped,
+            parsed_matches=parsed,
+        )
+        count = len(parsed)
+        word = "match" if count == 1 else "matches"
+        display = EffectResultDisplay(
+            success=not is_error,
+            verb="Searched",
+            message=f"{pattern} ({count} {word})",
+            suffix="(truncated)" if output.was_truncated else "",
+        )
+        return _completed_state(state, output, display, output_text=transcript)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_shell(
+    detail: GenericEffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall:
     arguments = _ShellArguments.model_validate(detail.input)
+    grep = _parse_grep_invocation(arguments.command)
+    if grep is not None:
+        return _project_shell_grep(grep, display_roots)
     semantic = ShellEffectDetail(
         tool_name=detail.tool_name,
         input=ShellEffectInput(command=arguments.command),
@@ -531,6 +1102,41 @@ def _project_skill(detail: GenericEffectDetail) -> _ProjectedCall:
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
+def _project_sleep(detail: GenericEffectDetail) -> _ProjectedCall:
+    # A sleep only runs inside a model-written script, which goes on with more
+    # tool calls afterwards: say the script is still running, not that it idles.
+    try:
+        arguments = _SleepArguments.model_validate(detail.input)
+    except ValidationError:
+        return _project_labeled(
+            detail, _ToolLabel("Script in progress", "", "Script waited")
+        )
+    duration = f"{arguments.seconds:g}s"
+    semantic = detail.model_copy(
+        update={
+            "display": EffectCallDisplay(
+                summary=f"Script in progress, next step in {duration}",
+                verb="Script in progress,",
+                message=f"next step in {duration}",
+                settled_verb="Script waited",
+                settled_message=duration,
+                status_text="Script in progress",
+            )
+        }
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        # The Harness stamps the raw tool key into the settled result message.
+        if state.display.message != detail.tool_name:
+            return state
+        display = state.display.model_copy(
+            update={"verb": "Script waited", "message": duration}
+        )
+        return state.model_copy(update={"display": display})
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
 _SHORT_PROCESS_ID_LEN = 8
 
 
@@ -544,15 +1150,21 @@ def _short_process_id(process_id: str) -> str:
 
 
 def _process_call_display(
-    verb: str, message: str, settled_verb: str, settled_message: str
+    verb: str,
+    message: str,
+    settled_verb: str,
+    settled_message: str,
+    *,
+    status_text: str | None = None,
 ) -> EffectCallDisplay:
+    summary = f"{verb} {message}".strip()
     return EffectCallDisplay(
-        summary=f"{verb} {message}".strip(),
+        summary=summary,
         verb=verb,
         message=message,
         settled_verb=settled_verb,
         settled_message=settled_message,
-        status_text=f"{verb} {message}".strip(),
+        status_text=status_text or summary,
     )
 
 
@@ -567,7 +1179,11 @@ def _process_detail(
 def _project_process_start(detail: GenericEffectDetail) -> _ProjectedCall:
     arguments = _ProcessStartArguments.model_validate(detail.input)
     display = _process_call_display(
-        "Starting", arguments.command, "Started", arguments.command
+        "Starting",
+        arguments.command,
+        "Started",
+        arguments.command,
+        status_text="Starting process",
     )
     semantic = _process_detail(detail, display)
 
@@ -806,12 +1422,95 @@ def _project_web_fetch(detail: GenericEffectDetail) -> _ProjectedCall:
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-def _project_grep(detail: GenericEffectDetail) -> _ProjectedCall:
+def _project_connector_web_search(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _WebSearchArguments.model_validate(detail.input)
+    query = arguments.query
+    semantic = WebSearchEffectDetail(
+        tool_name=detail.tool_name,
+        input=WebSearchEffectInput(query=query),
+        display=EffectCallDisplay(
+            summary=f"Searching the web: {query!r}",
+            verb="Searching",
+            message=f"the web: {query!r}",
+            settled_verb="Searched",
+            settled_message=f"the web: {query!r}",
+            status_text="Searching the web",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        cards = [
+            _ConnectorWebSearchCard.model_validate(card)
+            for card in envelope.structured_content.values()
+        ]
+        sources = [
+            WebSearchEffectSource(title=card.title, url=card.url)
+            for card in sorted(cards, key=lambda card: card.rank)
+        ]
+        # The connector answers with cards, not a synthesized answer; the model
+        # reads the cards, so there is no answer text to carry over.
+        output = WebSearchEffectOutput(query=query, answer="", sources=sources)
+        source_count = len(sources)
+        plural = "" if source_count == 1 else "s"
+        display = EffectResultDisplay(
+            success=True,
+            verb="Searched",
+            message=f"{query!r} ({source_count} source{plural})",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_connector_open_url(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _WebFetchArguments.model_validate(detail.input)
+    url = arguments.url
+    parsed = _url_domain(url)
+    display_message = parsed
+    if arguments.timeout is not None:
+        display_message += f" (timeout {arguments.timeout}s)"
+    semantic = WebFetchEffectDetail(
+        tool_name=detail.tool_name,
+        input=WebFetchEffectInput(url=url, timeout=arguments.timeout),
+        display=EffectCallDisplay(
+            summary=f"Fetching: {display_message}",
+            verb="Fetching",
+            message=display_message,
+            settled_verb="Fetched",
+            settled_message=display_message,
+            status_text="Fetching URL",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        page = _ConnectorOpenUrlPage.model_validate(envelope.structured_content)
+        # The connector page carries no media type or truncation flag.
+        output = WebFetchEffectOutput(
+            url=page.url, content=page.content, content_type="", was_truncated=False
+        )
+        message = f"{page.url} ({len(page.content):,} chars)"
+        display = EffectResultDisplay(
+            success=True,
+            verb="Fetched",
+            message=message if page.can_open else page.url,
+            suffix="" if page.can_open else "(unreadable)",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_grep(
+    detail: GenericEffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall:
     arguments = _GrepArguments.model_validate(detail.input)
     pattern = arguments.pattern
     message = f"'{pattern}'"
-    if arguments.path != ".":
-        message += f" in {arguments.path}"
+    searched = Path(os.path.normpath(arguments.path))
+    if arguments.path != "." and searched not in display_roots[:1]:
+        message += f" in {_display_path(arguments.path, display_roots)}"
     if arguments.max_matches is not None:
         message += f" (max {arguments.max_matches} matches)"
     if not arguments.use_default_ignore:
@@ -902,19 +1601,478 @@ def _project_todo(detail: GenericEffectDetail) -> _ProjectedCall:
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-def _search_replace_annotations(
-    envelope: _ToolResultEnvelope,
-) -> _SearchReplaceAnnotations:
-    if envelope.meta is None:
-        raise ValueError("search_replace result has no annotations")
-    return _SearchReplaceAnnotations.model_validate(
-        envelope.meta.get(_SEARCH_REPLACE_ANNOTATION_KEY)
+def _cron_schedule(interval_seconds: int | None, cron: str | None) -> str:
+    if (interval_seconds is None) == (cron is None):
+        raise ValueError("A scheduled prompt must have exactly one schedule")
+    if interval_seconds is None:
+        return f"cron {cron} (local time)"
+    parts = []
+    for divisor, unit in (
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+        (1, "second"),
+    ):
+        count, interval_seconds = divmod(interval_seconds, divisor)
+        if count:
+            parts.append(f"{count} {unit}{'s' if count != 1 else ''}")
+    return f"every {' '.join(parts)}"
+
+
+def _cron_prompt_summary(prompt: str) -> str:
+    # The prompt's first line is the loop's title.
+    return " ".join(prompt.strip().split("\n", 1)[0].split())[:100]
+
+
+def _cron_result_text(result: _CronResult, *, action: str) -> str:
+    if action == "clear":
+        count = result.cleared_count
+        return (
+            result.message
+            if count is None
+            else f"Cleared {count} scheduled loop{'s' if count != 1 else ''}"
+        )
+    if not result.loops:
+        return "No scheduled prompts."
+    sections = []
+    for loop in result.loops:
+        schedule = _cron_schedule(loop.interval_seconds, loop.cron)
+        prompt = loop.prompt.replace("\n", "\n  ")
+        lines = [f"Prompt: {prompt}", f"Schedule: {schedule}"]
+        if action != "cancel":
+            try:
+                next_run = datetime.fromtimestamp(loop.next_fire_at).astimezone()
+            except (OverflowError, OSError) as exc:
+                raise ValueError("Invalid scheduled prompt timestamp") from exc
+            lines.append(f"Next run: {next_run:%Y-%m-%d %H:%M:%S %Z}")
+        lines.append(f"ID: {loop.id}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _project_cron(detail: GenericEffectDetail) -> _ProjectedCall:
+    args = CronArgs.model_validate(detail.input).root
+    match args.action:
+        case "schedule":
+            verb, settled = "Scheduling", "Scheduled"
+            message = f"{_cron_schedule(args.interval_seconds, None)}: {_cron_prompt_summary(args.prompt)}"
+        case "schedule_cron":
+            verb, settled = "Scheduling", "Scheduled"
+            message = f"{_cron_schedule(None, args.cron)}: {_cron_prompt_summary(args.prompt)}"
+        case "list":
+            verb, settled, message = "Listing", "Listed", "scheduled prompts"
+        case "cancel":
+            verb, settled, message = (
+                "Cancelling",
+                "Cancelled",
+                f"scheduled prompt {args.id}",
+            )
+        case "clear":
+            verb, settled, message = "Clearing", "Cleared", "scheduled prompts"
+    display = EffectCallDisplay(
+        summary=f"{verb} {message}",
+        verb=verb,
+        message=message,
+        settled_verb=settled,
+        settled_message=message,
+        status_text=f"{verb} recurring prompts",
     )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _CronResult.model_validate(envelope.structured_content)
+        settled_message = message
+        if args.action == "list":
+            count = len(result.loops)
+            settled_message = f"{count} scheduled prompt{'s' if count != 1 else ''}"
+        elif args.action == "cancel" and result.loops:
+            settled_message = _cron_prompt_summary(result.loops[0].prompt)
+        elif args.action == "clear":
+            count = result.cleared_count
+            settled_message = (
+                "scheduled prompts"
+                if count is None
+                else f"{count} scheduled loop{'s' if count != 1 else ''}"
+            )
+        body = _cron_result_text(result, action=args.action)
+        return state.model_copy(
+            update={
+                "display": state.display.model_copy(
+                    update={"verb": settled, "message": settled_message}
+                ),
+                "output": body,
+                "output_text": body,
+            }
+        )
+
+    return _ProjectedCall(
+        detail=detail.model_copy(update={"display": display}),
+        project_result=project_result,
+    )
+
+
+# `update_goal` statuses, as the header reads them.
+_GOAL_STATUS_VERBS: dict[str, tuple[str, str]] = {
+    "complete": ("Completing", "Completed"),
+    "blocked": ("Marking", "Marked"),
+    "paused": ("Pausing", "Paused"),
+}
+
+
+def _goal_objective_summary(objective: str) -> str:
+    return " ".join(objective.split())[:100]
+
+
+def _project_goal(detail: GenericEffectDetail) -> _ProjectedCall:
+    """Headers for the goal tools: the model reads, creates or ends the goal."""
+    arguments = detail.input if isinstance(detail.input, dict) else {}
+    match detail.tool_name:
+        case "vibe.get_goal":
+            verb, settled, message = "Reading", "Read", "the goal"
+        case "vibe.create_goal":
+            objective = arguments.get("objective")
+            if not isinstance(objective, str) or not objective.strip():
+                raise ValueError("create_goal names no objective")
+            verb, settled = "Setting", "Set"
+            message = f"goal: {_goal_objective_summary(objective)}"
+        case _:
+            status = arguments.get("status")
+            if not isinstance(status, str) or status not in _GOAL_STATUS_VERBS:
+                raise ValueError(f"unknown goal status: {status}")
+            verb, settled = _GOAL_STATUS_VERBS[status]
+            message = "the goal blocked" if status == "blocked" else "the goal"
+    display = EffectCallDisplay(
+        summary=f"{verb} {message}",
+        verb=verb,
+        message=message,
+        settled_verb=settled,
+        settled_message=message,
+        status_text=f"{verb} {message}",
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        return state.model_copy(
+            update={
+                "display": state.display.model_copy(
+                    update={"verb": settled, "message": message}
+                )
+            }
+        )
+
+    return _ProjectedCall(
+        detail=detail.model_copy(update={"display": display}),
+        project_result=project_result,
+    )
+
+
+_SCRATCHPAD_VERBS: dict[str, tuple[str, str]] = {
+    "list": ("Listing", "Listed"),
+    "read": ("Reading", "Read"),
+    "write": ("Saving", "Saved"),
+}
+
+
+# An action outside these three is not a scratchpad call this surface knows, so
+# `_project_call` catches the error and the entry stays generic.
+def _scratchpad_input(arguments: _ScratchpadArguments) -> ScratchpadEffectInput:
+    match arguments.action:
+        case "list":
+            return ScratchpadListInput()
+        case "read":
+            if arguments.path is None:
+                raise ValueError("a scratchpad read names no file")
+            return ScratchpadReadInput(path=arguments.path)
+        case "write":
+            if arguments.path is None or arguments.content is None:
+                raise ValueError("a scratchpad write has no file or no note")
+            return ScratchpadWriteInput(path=arguments.path, content=arguments.content)
+        case _:
+            raise ValueError(f"unknown scratchpad action: {arguments.action}")
+
+
+def _project_scratchpad(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _ScratchpadArguments.model_validate(detail.input)
+    semantic_input = _scratchpad_input(arguments)
+    verb, settled_verb = _SCRATCHPAD_VERBS[semantic_input.action]
+    noun = (
+        "the scratchpad"
+        if isinstance(semantic_input, ScratchpadListInput)
+        else semantic_input.path
+    )
+    display = EffectCallDisplay(
+        summary=f"{verb} {noun}",
+        verb=verb,
+        message=noun,
+        settled_verb=settled_verb,
+        settled_message=noun,
+        status_text="Using the scratchpad",
+    )
+    semantic = ScratchpadEffectDetail(
+        tool_name=detail.tool_name, input=semantic_input, display=display
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ScratchpadResult.model_validate(envelope.structured_content)
+        settled = result.path or f"{len(result.files)} files"
+        # The executor does not echo a write's note back, so it comes from the call.
+        content = (
+            semantic_input.content
+            if isinstance(semantic_input, ScratchpadWriteInput)
+            else result.content
+        )
+        output = ScratchpadEffectOutput(
+            path=result.path, content=content, files=result.files
+        )
+        return state.model_copy(
+            update={
+                "display": state.display.model_copy(
+                    update={"verb": result.verb, "message": settled}
+                ),
+                "output": cast(
+                    JsonValue,
+                    output.model_dump(mode="json", by_alias=True, exclude_none=False),
+                ),
+            }
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _replaced_content(envelope: _ToolResultEnvelope) -> str | None:
+    """What the write replaced, absent for a creation or an unreadable file."""
+    if envelope.meta is None:
+        return None
+    annotation = envelope.meta.get(_WRITE_FILE_ANNOTATION_KEY)
+    if annotation is not None:
+        return _WriteFileAnnotations.model_validate(annotation).previous_content
+    return _TargetPreviousContent.model_validate(envelope.meta).previous_content
+
+
+def _edit_annotations(
+    envelope: _ToolResultEnvelope, warnings: Sequence[str], arguments: _EditArguments
+) -> tuple[list[_EditPreview], str | None]:
+    """An edit's diff blocks and the text it replaced.
+
+    The blocks are empty when the target runtime truncated its preview: partial
+    blocks would show part of the change, and a rewind without the replaced
+    text would undo only that part. The target runtime then often sends no
+    annotation at all.
+    """
+    meta = envelope.meta or {}
+    annotation = meta.get(_SEARCH_REPLACE_ANNOTATION_KEY)
+    if annotation is not None:
+        local = _EditAnnotations.model_validate(annotation)
+        return local.blocks, local.previous_content
+    if _TARGET_PREVIEW_TRUNCATED_WARNING in warnings:
+        return [], _TargetPreviousContent.model_validate(meta).previous_content
+    target = _TargetEditAnnotations.model_validate(meta)
+    if not target.blocks:
+        raise ValueError("edit result has no diff blocks")
+    blocks = _with_context_lines(
+        target.blocks, target.previous_content, _call_change(arguments)
+    )
+    bare_removals = [not block.new_lines for block in blocks]
+    if (
+        target.previous_content is None
+        and any(bare_removals)
+        and not all(bare_removals)
+    ):
+        # Without the replaced text a rewind undoes the blocks by position, and
+        # it skips a block with no new lines: it would undo the other blocks
+        # alone. The call's strings show the change and give it no position.
+        return [], None
+    return blocks, target.previous_content
+
+
+@dataclass(frozen=True)
+class _CallChange:
+    """An edit call that only inserts or only removes whole lines.
+
+    ``old_lines`` are the lines the call matches. ``changed`` are the lines it
+    puts in (an insertion) or takes out (a removal), right after
+    ``old_lines[:index]``. All use ``\\n`` line breaks. ``line_after`` tells
+    whether the call kept a line after the change.
+    """
+
+    old_lines: list[str]
+    changed: list[str]
+    index: int
+    insertion: bool
+    line_after: bool
+
+
+def _call_change(arguments: _EditArguments) -> _CallChange | None:
+    """The call's insertion or removal, aligned as the target runtime aligns it:
+    after the lines both strings start with. None when the call does both.
+
+    The alignment is exact only when the call kept a line after the change
+    (``line_after``): at the end of the match, the Runtime also skips the file
+    lines past it that equal the changed ones, so the change can sit lower than
+    the call tells.
+    """
+    old = _lf(arguments.old_string).splitlines(keepends=True)
+    new = _lf(arguments.new_string).splitlines(keepends=True)
+    insertion = len(new) > len(old)
+    longer, shorter = (new, old) if insertion else (old, new)
+    index = 0
+    while index < len(shorter) and shorter[index] == longer[index]:
+        index += 1
+    changed = longer[index : len(longer) - (len(shorter) - index)]
+    if not changed or [*shorter[:index], *changed, *shorter[index:]] != longer:
+        return None
+    return _CallChange(
+        old_lines=old,
+        changed=changed,
+        index=index,
+        insertion=insertion,
+        line_after=index < len(shorter),
+    )
+
+
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _with_context_lines(
+    blocks: list[_EditPreview], previous_content: str | None, call: _CallChange | None
+) -> list[_EditPreview]:
+    """The target runtime's blocks, each one-sided block given a line of context.
+
+    The target runtime leaves unchanged lines out of its blocks, so a block
+    that only adds lines has no old lines, and one that only removes lines has
+    no new lines. Such a block takes the unchanged line next to it on both
+    sides (:func:`_with_context_line`), as a local runtime edit shows the text
+    it matched: no side of the diff is empty.
+
+    An insertion's ``old_start_line`` names the line before it, as a unified
+    diff does; it is first moved to where its lines land in the file before
+    the edit: its ``new_start_line`` less the lines the earlier blocks added.
+    A removal's ``new_start_line`` names the line before it in the edited
+    file; it moves to the line after it when that line is the context.
+    """
+    lines = (
+        None if previous_content is None else previous_content.splitlines(keepends=True)
+    )
+    anchored: list[_EditPreview] = []
+    added = 0
+    for block in blocks:
+        if block.new_start_line is not None and bool(block.old_lines) != bool(
+            block.new_lines
+        ):
+            if not block.old_lines:
+                block = block.model_copy(
+                    update={"old_start_line": max(1, block.new_start_line - added)}
+                )
+            block = _with_context_line(block, lines, call, added=added)
+        anchored.append(block)
+        added += len(block.new_lines) - len(block.old_lines)
+    return anchored
+
+
+def _with_context_line(
+    block: _EditPreview,
+    lines: list[str] | None,
+    call: _CallChange | None,
+    *,
+    added: int,
+) -> _EditPreview:
+    """A one-sided block with the unchanged line next to it on both sides.
+
+    The line is the one before the changed lines, or the one after them when
+    the call changed the start of what it matched or the change starts the
+    file. It comes from the replaced text, numbered as the Runtime numbers
+    lines (Python's line breaks, the BOM aside), else from the call's matched
+    lines, with the file's line ending, but only when the call kept a line
+    after the change (otherwise the Runtime may have moved the change down past
+    equal lines, and a context line in the wrong place would make a rewind
+    undo some hunks and not others) and only when the line is whole: not the
+    first matched line before the change, nor a last one without a line
+    break. The block stays bare when neither gives the line. ``added`` counts
+    the lines the earlier blocks added.
+    """
+    insertion = not block.old_lines
+    changed = block.new_lines if insertion else block.old_lines
+    start = block.old_start_line
+    new_start = block.new_start_line or start
+    after = start == 1 or (call is not None and call.index == 0)
+    # The line after the change, counted in the file before the edit.
+    after_line = start if insertion else start + len(changed)
+    # The call's own line next to the change, when the call is this change.
+    call_index: int | None = None
+    if (
+        call is not None
+        and call.insertion == insertion
+        and [_lf(line) for line in changed] == call.changed
+    ):
+        if not after:
+            call_index = call.index - 1
+        else:
+            call_index = call.index if insertion else call.index + len(call.changed)
+        if not 0 <= call_index < len(call.old_lines):
+            # The call matched no unchanged line: a local runtime edit shows
+            # none either.
+            return block
+    context: str | None = None
+    if lines is not None:
+        index = after_line - 1 if after else start - 2
+        if 0 <= index < len(lines):
+            line = lines[index]
+            context = line.removeprefix("\ufeff") if index == 0 else line
+    elif call is not None and call_index is not None and call.line_after:
+        context = _whole_call_line(
+            call, call_index, after_insertion=after and insertion
+        )
+        if context is not None:
+            context = context.removesuffix("\n") + _line_break(changed[-1])
+    # The line before the change, or the change before the line, must end in a
+    # line break, or the lines would join.
+    if context is None or not _line_break(changed[-1] if after else context):
+        return block
+    if after:
+        return block.model_copy(
+            update={
+                # A removal's context line follows the earlier blocks' changes.
+                "new_start_line": new_start if insertion else start + added,
+                "old_lines": [*block.old_lines, context],
+                "new_lines": [*block.new_lines, context],
+            }
+        )
+    return block.model_copy(
+        update={
+            "old_start_line": start - 1,
+            "new_start_line": new_start - 1 if insertion else new_start,
+            "old_lines": [context, *block.old_lines],
+            "new_lines": [context, *block.new_lines],
+        }
+    )
+
+
+def _whole_call_line(
+    call: _CallChange, index: int, *, after_insertion: bool
+) -> str | None:
+    """The call's matched line at ``index``, when it is a whole file line.
+
+    The match can start or end mid-line, so the line must end in a line
+    break and follow one: from the call, or from lines inserted before it,
+    which add no line of their own unless the match starts a line. A partial
+    line does not sit in the file, and a rewind of a replace_all would undo
+    the sites where the line is whole and skip the others.
+    """
+    line = call.old_lines[index]
+    if not line.endswith("\n") or (index == 0 and not after_insertion):
+        return None
+    return line
+
+
+def _line_break(line: str) -> str:
+    """The line break ending ``line``, empty when it has none."""
+    return line[len(line.splitlines()[0]) :] if line else ""
 
 
 def _completed_state(
     state: CompletedEffectState,
-    output: BaseModel,
+    output: BaseModel | None,
     display: EffectResultDisplay,
     *,
     output_text: str | None = None,
@@ -932,7 +2090,9 @@ def _completed_state(
     if carry:
         display = display.model_copy(update=carry)
     update: dict[str, object] = {
-        "output": cast(
+        "output": None
+        if output is None
+        else cast(
             JsonValue, output.model_dump(mode="json", by_alias=True, exclude_none=False)
         ),
         "display": display,
@@ -1017,7 +2177,16 @@ class _ToolLabel:
 _TOOL_LABELS: dict[str, _ToolLabel] = {
     # ── Built-in harness tools ──────────────────────────────────────────
     "ui.ask_user_question": _ToolLabel("Asking", "a question", "Asked"),
-    "self.sleep": _ToolLabel("Sleeping", "", "Slept"),
+    # The model waits for its subagents or background processes, not for the
+    # user: a message the user sends joins the waiting turn.
+    "self.wait": _ToolLabel("Waiting", "for background work", "Waited"),
+    "agents.list_configs": _ToolLabel("Listing", "subagent configs", "Listed"),
+    "agents.list": _ToolLabel("Listing", "subagents", "Listed"),
+    "agents.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),
+    "agents.interrupt": _ToolLabel("Interrupting", "a subagent", "Interrupted"),
+    # Deprecated: pre-rename "subagent.*" spellings, kept only so persisted
+    # sessions keep their labels. Use the "agents.*" keys above; "wait" and
+    # "stop" were retired ("stop" without a replacement).
     "subagent.list": _ToolLabel("Listing", "subagents", "Listed"),
     "subagent.wait": _ToolLabel("Waiting", "for a subagent", "Waited"),
     "subagent.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),
@@ -1167,6 +2336,22 @@ _TOOL_LABELS: dict[str, _ToolLabel] = {
     "connector_google_drive_mcp.search_files": _ToolLabel(
         "Searching", "Drive files", "Searched"
     ),
+    # ── Document Library connector ──────────────────────────────────────
+    "connector_document_library.library_search": _ToolLabel(
+        "Searching", "documents", "Searched"
+    ),
+    "connector_document_library.library_list_documents": _ToolLabel(
+        "Listing", "documents", "Listed"
+    ),
+    "connector_document_library.open_library_result": _ToolLabel(
+        "Opening", "a document", "Opened"
+    ),
+    "connector_document_library.library_fetch": _ToolLabel(
+        "Fetching", "a document", "Fetched"
+    ),
+    "connector_document_library.library_open_image": _ToolLabel(
+        "Opening", "an image", "Opened"
+    ),
     # ── Mistral AI connector ────────────────────────────────────────────
     "connector_mistral_ai.delete_skill": _ToolLabel("Deleting", "a skill", "Deleted"),
     "connector_mistral_ai.list_skills": _ToolLabel("Listing", "skills", "Listed"),
@@ -1306,26 +2491,40 @@ def _project_labeled(detail: GenericEffectDetail, label: _ToolLabel) -> _Project
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-_CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
+_PATH_PROJECTORS: dict[
+    str, Callable[[GenericEffectDetail, Sequence[Path]], _ProjectedCall]
+] = {
     "read_file": _project_read,
     "file_system.read_file": _project_read,
     "write_file": _project_write,
     "file_system.write_file": _project_write,
-    "search_replace": _project_search_replace,
-    "file_system.search_replace": _project_search_replace,
+    "edit": _project_edit,
+    "file_system.edit": _project_edit,
+    "grep": _project_grep,
     "bash": _project_shell,
     "file_system.bash": _project_shell,
+}
+
+_CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
     "skill.read": _project_skill,
+    "self.sleep": _project_sleep,
     "process.start": _project_process_start,
     "process.stop": _project_process_stop,
     "process.output": _project_process_output,
     "process.list": _project_process_list,
     "process.write": _project_process_write,
     "ui.ask_user_question": _project_ask_user_question,
+    "connector_web_search.web_search": _project_connector_web_search,
+    "connector_web_search.open_url": _project_connector_open_url,
     "web_search": _project_web_search,
     "web_fetch": _project_web_fetch,
-    "grep": _project_grep,
     "todo": _project_todo,
+    "vibe.todo": _project_todo,
+    "vibe.cron": _project_cron,
+    "vibe.unified_harness_scratchpad": _project_scratchpad,
+    "vibe.get_goal": _project_goal,
+    "vibe.create_goal": _project_goal,
+    "vibe.update_goal": _project_goal,
 }
 
 _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
@@ -1333,20 +2532,26 @@ _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
     "file_system.read_file": "file_read",
     "write_file": "file_write",
     "file_system.write_file": "file_write",
-    "search_replace": "file_edit",
-    "file_system.search_replace": "file_edit",
+    "edit": "file_edit",
+    "file_system.edit": "file_edit",
     "bash": "shell",
     "file_system.bash": "shell",
     "skill.read": "skill",
+    "connector_web_search.web_search": "web_search",
+    "connector_web_search.open_url": "web_fetch",
     "web_search": "web_search",
     "web_fetch": "web_fetch",
     "grep": "file_search",
     "todo": "todo",
+    "vibe.todo": "todo",
+    "vibe.cron": "cron",
+    "vibe.unified_harness_scratchpad": "scratchpad",
 }
 
 
 __all__ = [
     "UnifiedToolCategory",
+    "is_large_output_receipt",
     "project_unified_history_entry",
     "unified_tool_category",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 
 from vibe.app_server._dispatch import RequestFailure
@@ -26,8 +27,11 @@ from vibe.core.utils import kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command
 
 type ShellOutputObserver = Callable[[str], Awaitable[None]]
+type ShellStartObserver = Callable[[], Awaitable[None]]
 
 DEFAULT_MAX_OUTPUT_BYTES = 16_000
+# How long a killed command's last output may take to arrive.
+_KILLED_OUTPUT_GRACE_SECONDS = 0.5
 
 
 class ShellConflictError(RuntimeError):
@@ -190,15 +194,57 @@ def restored_shell_effect_state(context: ManualShellContext) -> EffectState:
     )
 
 
+def capped_shell_effect_state(state: EffectState, limit: int) -> EffectState:
+    """Bound every output field of a terminal shell effect state.
+
+    A durable record must never hold more output than the model itself was
+    shown, so each field is capped with the same truncation marker the
+    model-visible text uses and the structured output reports that it was
+    truncated. States that were already within the limit come back unchanged.
+    """
+    if not isinstance(
+        state, CompletedEffectState | FailedEffectState | CancelledEffectState
+    ):
+        # Only terminal shell states carry output; a non-terminal state has
+        # nothing a durable record needs to bound.
+        return state
+    output_text = _cap_output(state.output_text, limit)
+    if isinstance(state, CompletedEffectState | FailedEffectState):
+        output = state.output
+        if isinstance(output, dict):
+            capped_output = {
+                key: _cap_output(value, limit) if isinstance(value, str) else value
+                for key, value in output.items()
+            }
+            truncated = output_text != state.output_text or capped_output != output
+        else:
+            capped_output = output
+            truncated = output_text != state.output_text
+        if not truncated:
+            return state
+        if isinstance(capped_output, dict):
+            capped_output = {**capped_output, "truncated": True}
+        return state.model_copy(
+            update={"output": capped_output, "output_text": output_text}
+        )
+    if output_text == state.output_text:
+        return state
+    return state.model_copy(update={"output_text": output_text})
+
+
 class ShellController:
     def __init__(self, cwd: Path) -> None:
         self._cwd = cwd
         self._operations: set[str] = set()
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._interrupted: set[str] = set()
+        self._killed: dict[str, asyncio.Event] = {}
 
     async def run(
-        self, params: ShellRunParams, observe_output: ShellOutputObserver | None = None
+        self,
+        params: ShellRunParams,
+        observe_output: ShellOutputObserver | None = None,
+        observe_start: ShellStartObserver | None = None,
     ) -> ShellRunResponse:
         if params.operation_id in self._operations:
             raise ShellConflictError(
@@ -214,6 +260,8 @@ class ShellController:
         timed_out = False
         interrupted = False
         try:
+            if observe_start is not None:
+                await observe_start()
             process = await spawn_shell_command(params.command, cwd=cwd)
             self._processes[params.operation_id] = process
             readers = [
@@ -227,14 +275,10 @@ class ShellController:
             if params.operation_id in self._interrupted:
                 await kill_async_subprocess(process)
             else:
-                try:
-                    await asyncio.wait_for(
-                        process.wait(), timeout=params.timeout_seconds
-                    )
-                except TimeoutError:
-                    timed_out = True
-                    await kill_async_subprocess(process)
-            await asyncio.gather(*readers)
+                timed_out = await self._wait_or_kill(params, process)
+            await _collect_output(
+                readers, killed=timed_out or params.operation_id in self._interrupted
+            )
         except BaseException:
             if process is not None:
                 await kill_async_subprocess(process)
@@ -247,6 +291,7 @@ class ShellController:
                 await asyncio.gather(*readers, return_exceptions=True)
             interrupted = params.operation_id in self._interrupted
             self._interrupted.discard(params.operation_id)
+            self._killed.pop(params.operation_id, None)
             self._processes.pop(params.operation_id, None)
             self._operations.discard(params.operation_id)
 
@@ -263,6 +308,35 @@ class ShellController:
             interrupted=interrupted,
         )
 
+    async def _wait_or_kill(
+        self, params: ShellRunParams, process: asyncio.subprocess.Process
+    ) -> bool:
+        """Wait for the command to end, be interrupted, or time out.
+
+        Returns whether it timed out, in which case it was killed. Waiting for
+        the process waits for its output pipes too, so an interrupt also wakes
+        this up: past the kill, a process that escaped the group must not keep
+        the command running.
+        """
+        killed = asyncio.Event()
+        self._killed[params.operation_id] = killed
+        waiting = asyncio.create_task(process.wait())
+        kill_seen = asyncio.create_task(killed.wait())
+        try:
+            await asyncio.wait(
+                (waiting, kill_seen),
+                timeout=params.timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            kill_seen.cancel()
+            if not waiting.done():
+                waiting.cancel()
+        if waiting.done() or killed.is_set():
+            return False
+        await kill_async_subprocess(process)
+        return True
+
     def is_running(self, operation_id: str) -> bool:
         return operation_id in self._operations
 
@@ -272,6 +346,8 @@ class ShellController:
         self._interrupted.add(operation_id)
         if process := self._processes.get(operation_id):
             await kill_async_subprocess(process)
+        if killed := self._killed.get(operation_id):
+            killed.set()
         return True
 
     async def close(self) -> None:
@@ -297,3 +373,20 @@ class ShellController:
             parts.append(text)
             if observe_output is not None:
                 await observe_output(text)
+
+
+async def _collect_output(readers: list[asyncio.Task[None]], *, killed: bool) -> None:
+    """Wait for the output readers to reach the end of both pipes.
+
+    A finished command keeps its output open while a background job it started
+    still runs, and that job's output is part of the result. After a kill, a
+    process that escaped the group can hold the pipes indefinitely, so only the
+    output that arrives within a short grace is kept.
+    """
+    if not killed:
+        await asyncio.gather(*readers)
+        return
+    with suppress(TimeoutError):
+        await asyncio.wait_for(
+            asyncio.shield(asyncio.gather(*readers)), _KILLED_OUTPUT_GRACE_SECONDS
+        )

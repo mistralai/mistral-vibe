@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 import contextlib
 from contextlib import asynccontextmanager
 from functools import lru_cache
 import locale
 import os
 from pathlib import Path
+import re
+import secrets
 import shutil
 import sys
-import time
 from typing import NamedTuple
 
 import anyio
@@ -101,6 +102,25 @@ def normalize_newlines(text: str) -> tuple[str, str]:
     return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 
 
+def normalize_edit_strings(old: str, new: str) -> tuple[str, str]:
+    r"""Return an edit's old and new text with ``\n`` line endings.
+
+    A trailing lone ``\r`` is the first half of a CRLF copied from a
+    ``read_file`` line. On ``old`` it becomes ``\n``, so the text still only
+    matches at the end of a line, and ``new`` then ends with ``\n`` too, so the
+    replacement keeps that line break. On ``new`` alone it is dropped, unless
+    ``old`` ends a line.
+    """
+    old_ends_with_cr = old.endswith("\r")
+    old = normalize_newlines(old)[0]
+    if not old.endswith("\n"):
+        new = new.removesuffix("\r")
+    new = normalize_newlines(new)[0]
+    if old_ends_with_cr and not new.endswith("\n"):
+        new += "\n"
+    return old, new
+
+
 def _decode(
     raw: bytes, *, raise_on_error: bool, preferred: str | None
 ) -> tuple[str, str]:
@@ -143,14 +163,30 @@ def decode_console_safe(raw: bytes, *, raise_on_error: bool = False) -> str:
 def encode_safe(text: str, *, encoding: str = "utf-8", newline: str = "\n") -> bytes:
     r"""Inverse of :func:`decode_safe`: translate ``\n`` line endings to
     ``newline`` and encode with ``encoding``, falling back to UTF-8 when the codec
-    cannot represent the text. The in-memory sibling of ``atomic_replace``'s
-    ``open(..., newline=...)`` write.
+    cannot represent the text.
     """
-    body = text if newline == "\n" else text.replace("\n", newline)
+    body = _translate_newlines(text, newline)
     try:
         return body.encode(encoding)
     except (LookupError, UnicodeError):
         return body.encode("utf-8")
+
+
+def _translate_newlines(text: str, newline: str) -> str:
+    # "" leaves newlines untranslated, as open(newline="") does.
+    return text if newline in {"", "\n"} else text.replace("\n", newline)
+
+
+type FileSignature = tuple[int, int, int, int, int] | None
+
+
+def file_signature(path: Path) -> FileSignature:
+    """Identifies a file's bytes only if it is replaced by rename, never edited."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mode, stat.st_mtime_ns, stat.st_size)
 
 
 def read_safe(path: Path, *, raise_on_error: bool = False) -> ReadSafeResult:
@@ -166,10 +202,23 @@ async def read_safe_async(
     return decode_safe(raw, raise_on_error=raise_on_error)
 
 
+def split_lines_verbatim(text: str) -> list[str]:
+    r"""Split ``text`` on ``\n`` only, keeping any ``\r`` inside its line.
+
+    A CRLF line keeps its trailing ``\r``, so the caller sees the file's line
+    endings as shell commands show them.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 class BoundedReadResult(NamedTuple):
     r"""A bounded slice of a file's lines plus truncation metadata.
 
-    ``lines`` are decoded and ``\n``-normalized, without trailing newlines.
+    ``lines`` are decoded, without trailing newlines. They are
+    ``\n``-normalized unless the read kept carriage returns.
     ``total_lines`` is ``None`` when the read stopped early at the line or byte
     budget (the true total is unknown without scanning the rest of the file);
     otherwise it is the number of lines in the file. ``was_truncated`` is true
@@ -182,14 +231,21 @@ class BoundedReadResult(NamedTuple):
 
 
 def read_lines_safe(
-    path: Path, *, start_line: int = 1, limit: int, max_bytes: int
+    path: Path,
+    *,
+    start_line: int = 1,
+    limit: int,
+    max_bytes: int,
+    keep_carriage_returns: bool = False,
 ) -> BoundedReadResult:
     r"""Read up to ``limit`` lines from ``start_line`` (1-indexed) bounded by bytes.
 
     Streams the file line-by-line in binary and stops once ``limit`` lines or
     ``max_bytes`` of selected content have been collected, so large files are
-    never loaded whole. The collected bytes are decoded once via
-    :func:`decode_safe`, which also normalizes ``\r\n``/``\r`` to ``\n``.
+    never loaded whole. The collected bytes are decoded once with the
+    :func:`decode_safe` fallback chain, and ``\r\n``/``\r`` are normalized to
+    ``\n`` unless ``keep_carriage_returns`` is set, in which case they are
+    split by :func:`split_lines_verbatim`.
     """
     raw_lines: list[bytes] = []
     bytes_read = 0
@@ -214,16 +270,31 @@ def read_lines_safe(
             was_truncated = False
 
     total_lines = None if was_truncated else line_number
-    lines = decode_safe(b"".join(raw_lines)).text.splitlines()
+    raw = b"".join(raw_lines)
+    if keep_carriage_returns:
+        text, _encoding = _decode(raw, raise_on_error=False, preferred=None)
+        lines = split_lines_verbatim(text)
+    else:
+        lines = decode_safe(raw).text.splitlines()
     return BoundedReadResult(lines, total_lines, was_truncated)
 
 
 async def read_lines_safe_async(
-    path: Path, *, start_line: int = 1, limit: int, max_bytes: int
+    path: Path,
+    *,
+    start_line: int = 1,
+    limit: int,
+    max_bytes: int,
+    keep_carriage_returns: bool = False,
 ) -> BoundedReadResult:
     """Async :func:`read_lines_safe` (runs the blocking read in a thread)."""
     return await asyncio.to_thread(
-        read_lines_safe, path, start_line=start_line, limit=limit, max_bytes=max_bytes
+        read_lines_safe,
+        path,
+        start_line=start_line,
+        limit=limit,
+        max_bytes=max_bytes,
+        keep_carriage_returns=keep_carriage_returns,
     )
 
 
@@ -250,20 +321,70 @@ async def file_write_lock(path: Path) -> AsyncIterator[None]:
         yield
 
 
+ATOMIC_WRITE_TEMP = re.compile(r"\.vibe-[0-9a-f]{16}\.tmp")
+
+
+def _temp_path(path: Path) -> Path:
+    # Short name: a 255-byte target name would overflow a name derived from it.
+    return path.parent / f".vibe-{secrets.token_hex(8)}.tmp"
+
+
+def _discard(tmp: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        tmp.unlink()
+
+
+def _write_temp(tmp: Path, data: bytes) -> None:
+    try:
+        # Not mkstemp: its 0o600 would hide a new file from other users.
+        with open(tmp, "xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        _discard(tmp)
+        raise
+
+
+def _commit_temp(tmp: Path, path: Path) -> None:
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        _discard(tmp)
+        raise
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    tmp = _temp_path(path)
+    _write_temp(tmp, data)
+    _commit_temp(tmp, path)
+
+
 async def atomic_replace(
     path: Path, content: str, *, encoding: str = "utf-8", newline: str | None = None
 ) -> None:
+    content = _translate_newlines(content, os.linesep if newline is None else newline)
     target = Path(path)
-    tmp = target.parent / f".{target.name}.tmp.{os.getpid()}.{time.time_ns()}"
+    tmp = _temp_path(target)
+    write = asyncio.create_task(
+        asyncio.to_thread(_write_temp, tmp, content.encode(encoding))
+    )
     try:
-        async with await anyio.Path(tmp).open(
-            mode="w", encoding=encoding, newline=newline
-        ) as f:
-            await f.write(content)
-        with contextlib.suppress(FileNotFoundError):
-            shutil.copymode(target, tmp)
-        os.replace(tmp, target)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
+        await asyncio.shield(write)
+    except asyncio.CancelledError:
+        # The thread outlives the cancel: drop its temp file once it is done.
+        write.add_done_callback(_discard_after(tmp))
         raise
+    # Renamed here, not in the thread, so a cancelled write never lands.
+    _commit_temp(tmp, target)
+
+
+def _discard_after(tmp: Path) -> Callable[[asyncio.Future[None]], None]:
+    def callback(done: asyncio.Future[None]) -> None:
+        if not done.cancelled():
+            done.exception()
+        _discard(tmp)
+
+    return callback

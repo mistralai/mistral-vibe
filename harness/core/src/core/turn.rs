@@ -1,0 +1,1405 @@
+mod completion;
+mod lifecycle_hooks;
+mod outcome;
+
+pub(crate) use lifecycle_hooks::PendingLifecycleHook;
+pub(crate) use outcome::TurnOutcome;
+
+use crate::core::action_id;
+use crate::core::error::CoreError;
+
+use self::completion::candidate::{
+    AcceptedCompletion, AcceptedCompletionContinuation, CandidateContext, CandidateHooks,
+    CandidateTurn, CompletionEvent, CompletionFinish, CompletionResolution, CompletionTransition,
+    CompletionWait, parse_completion_result, resolve_completion,
+};
+use self::completion::{AgentCompletionPlan, AgentCompletionRequest, plan_agent_completion};
+use self::lifecycle_hooks::{
+    HookResolution, resolve_failed_lifecycle_hook, resolve_lifecycle_hook,
+};
+use crate::core::features::compaction::{
+    AgentRefusal, CompactionAttemptResolution, CompactionResolution, CompactionStartResolution,
+    PendingCompaction, correct_refused_agent_request, finish_summary_request, is_context_overflow,
+    model_input_reaches_compaction_threshold, record_reply_size, start_automatic_compaction,
+    start_manual_compaction as start_manual_compaction_request,
+};
+use crate::core::features::instructions;
+use crate::core::features::notifications::{Notification, notification_messages};
+use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
+use crate::core::features::repeated_tool_failure;
+use crate::core::hooks::{HookCall, HookPoint, HookResult};
+use crate::core::pending_input::PendingEntry;
+use crate::core::state::hook_binding_ids;
+use crate::core::state::{
+    ActivePhase, ActiveTurn, HarnessState, InterruptionResolution, TurnState,
+};
+use crate::core::step_protocol::Action;
+use crate::core::step_protocol::DeterminismContext;
+use crate::core::step_protocol::FilesystemResult;
+use crate::core::step_protocol::{
+    ActionAbandonedCause, CandidateDiscardCause, Observation, Outcome, TurnStopReason,
+};
+use crate::core::tools::execution::batch::{
+    ToolBatchResolution, ToolBatchTransition, fail_tool_batch_hook, finish_tool_batch_action,
+    finish_tool_batch_approval, finish_tool_batch_filesystem_write, finish_tool_batch_hook,
+};
+use crate::core::wire::completion::CompletionResult;
+use crate::core::wire::content::ContentBlock;
+use crate::core::wire::content::validate_non_empty_content;
+use crate::core::wire::message::{Message, StoredMessage};
+use crate::core::wire::tool::{ProtocolError, ToolResult};
+use crate::core::wire::user_message::{OutputType, UserMessageMode};
+
+pub(crate) enum TurnEvent {
+    Approval {
+        action_id: String,
+        resolution: Result<ApprovalOutcome, ApprovalFailureReason>,
+    },
+    UserMessage {
+        turn_id: String,
+        content: Vec<ContentBlock>,
+        mode: UserMessageMode,
+        output_type: Option<OutputType>,
+    },
+    ContextMessage {
+        content: Vec<ContentBlock>,
+    },
+    InstructionsUpsert {
+        key: String,
+        content: String,
+    },
+    InstructionsDelete {
+        key: String,
+    },
+    ManualCompaction {
+        extra_instructions: String,
+    },
+    Interrupt {
+        expected_turn_id: String,
+        reason: Option<String>,
+    },
+    FailTurn {
+        expected_turn_id: String,
+        action_id: String,
+        error: ProtocolError,
+    },
+    Completion {
+        action_id: String,
+        result: Result<CompletionResult, ProtocolError>,
+    },
+    Hook {
+        action_id: String,
+        result: Result<HookResult, ProtocolError>,
+    },
+    Tool {
+        action_id: String,
+        call_id: String,
+        report: ReportedToolResult,
+    },
+    Filesystem {
+        action_id: String,
+        result: Result<FilesystemResult, ProtocolError>,
+    },
+}
+
+pub(crate) enum ReportedToolResult {
+    Succeeded(ToolResult),
+    Failed(ToolResult),
+}
+
+pub(crate) fn dispatch(
+    state: &mut HarnessState,
+    event: TurnEvent,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    match event {
+        TurnEvent::Approval {
+            action_id,
+            resolution,
+        } => finish_pending_approval(state, action_id, resolution, determinism),
+        TurnEvent::UserMessage {
+            turn_id,
+            content,
+            mode: UserMessageMode::Queue,
+            output_type,
+        } if !matches!(state.turn, TurnState::Compacting { .. }) => {
+            handle_user_message(state, turn_id, content, UserMessageMode::Queue, output_type)
+        }
+        TurnEvent::UserMessage {
+            turn_id,
+            content,
+            mode: UserMessageMode::Steer,
+            output_type,
+        } if state.active().is_some() => {
+            handle_user_message(state, turn_id, content, UserMessageMode::Steer, output_type)
+        }
+        TurnEvent::UserMessage { .. } => Err(invalid_state(state)),
+
+        TurnEvent::ContextMessage { content }
+            if state.active().is_some() || state.pending_action_ids().is_empty() =>
+        {
+            handle_context_message(state, content)
+        }
+        TurnEvent::ContextMessage { .. } => Err(invalid_state(state)),
+        TurnEvent::InstructionsUpsert { key, content }
+            if state.active().is_some() || state.pending_action_ids().is_empty() =>
+        {
+            handle_instructions_upsert(state, key, &content)
+        }
+        TurnEvent::InstructionsDelete { key }
+            if state.active().is_some() || state.pending_action_ids().is_empty() =>
+        {
+            handle_instructions_delete(state, key)
+        }
+        TurnEvent::InstructionsUpsert { .. } | TurnEvent::InstructionsDelete { .. } => {
+            Err(invalid_state(state))
+        }
+
+        TurnEvent::ManualCompaction { extra_instructions }
+            if !matches!(
+                state.turn,
+                TurnState::Active(_) | TurnState::Compacting { .. }
+            ) =>
+        {
+            start_manual_compaction(state, extra_instructions)
+        }
+        TurnEvent::ManualCompaction { .. } => Err(invalid_state(state)),
+
+        TurnEvent::Interrupt {
+            expected_turn_id,
+            reason,
+        } if state.active().is_some() => abandon_turn(
+            state,
+            expected_turn_id,
+            TurnAbandonment::Interrupt {
+                reason: reason.filter(|reason| !reason.trim().is_empty()),
+            },
+            determinism,
+        ),
+        TurnEvent::Interrupt {
+            expected_turn_id, ..
+        } if state.is_idempotent_late_interrupt(&expected_turn_id) => Ok(Outcome::quiet()),
+        TurnEvent::Interrupt { .. } => Err(invalid_state(state)),
+
+        TurnEvent::FailTurn {
+            expected_turn_id,
+            action_id,
+            error,
+        } if state.active().is_some() => abandon_turn(
+            state,
+            expected_turn_id,
+            TurnAbandonment::RuntimeFailure { action_id, error },
+            determinism,
+        ),
+        TurnEvent::FailTurn { .. } => Err(invalid_state(state)),
+
+        TurnEvent::Completion { action_id, result } => {
+            finish_pending_completion(state, action_id, result, determinism)
+        }
+        TurnEvent::Hook { action_id, result } => {
+            finish_pending_hook(state, action_id, result, determinism)
+        }
+        TurnEvent::Tool {
+            action_id,
+            call_id,
+            report,
+        } => finish_pending_tool(state, action_id, call_id, report, determinism),
+        TurnEvent::Filesystem { action_id, result } => {
+            finish_pending_filesystem(state, action_id, result)
+        }
+    }
+}
+
+fn finish_pending_completion(
+    state: &mut HarnessState,
+    action_id: String,
+    result: Result<CompletionResult, ProtocolError>,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    enum PendingCompletion {
+        Agent,
+        Compaction(PendingCompaction),
+    }
+
+    let pending = match &state.turn {
+        TurnState::Compacting { pending } if pending.action_id() == action_id => {
+            PendingCompletion::Compaction(pending.clone())
+        }
+        TurnState::Active(active) => match &active.phase {
+            ActivePhase::AwaitingCompletion {
+                action_id: expected,
+            } if expected == &action_id => PendingCompletion::Agent,
+            ActivePhase::AwaitingCompaction { pending } if pending.action_id() == action_id => {
+                PendingCompletion::Compaction(pending.clone())
+            }
+            ActivePhase::AwaitingToolBatch { .. } | ActivePhase::AwaitingHook { .. } => {
+                return Err(invalid_state(state));
+            }
+            ActivePhase::AwaitingCompletion { .. } | ActivePhase::AwaitingCompaction { .. } => {
+                return Err(invalid_state(state));
+            }
+        },
+        TurnState::Idle | TurnState::Terminal { .. } => return Err(invalid_state(state)),
+        TurnState::Compacting { .. } => return Err(invalid_state(state)),
+    };
+    match (pending, result) {
+        (PendingCompletion::Agent, result) => {
+            finish_agent_completion(state, action_id, result, determinism)
+        }
+        (PendingCompletion::Compaction(pending), result) => {
+            let reply = match result {
+                Ok(result) => Ok(parse_completion_result(result)?),
+                Err(error) => Err(error),
+            };
+            let (outcome, resolution) = finish_summary_request(state, pending, reply)?;
+            Ok(outcome.after(apply_compaction_attempt_resolution(state, resolution)?))
+        }
+    }
+}
+
+fn apply_compaction_attempt_resolution(
+    state: &mut HarnessState,
+    resolution: CompactionAttemptResolution,
+) -> Result<Outcome, CoreError> {
+    match resolution {
+        CompactionAttemptResolution::Retry(pending) => install_compaction_retry(state, pending),
+        CompactionAttemptResolution::Compacted(resolution)
+        | CompactionAttemptResolution::Resolve(resolution) => {
+            apply_compaction_resolution(state, *resolution)
+        }
+    }
+}
+
+fn apply_compaction_resolution(
+    state: &mut HarnessState,
+    resolution: CompactionResolution,
+) -> Result<Outcome, CoreError> {
+    match resolution {
+        CompactionResolution::ContinueTurn {
+            outcome,
+            input_reduced,
+        } => {
+            if input_reduced {
+                state.require_active_mut()?.input_reduced = true;
+            }
+            // Compaction just ran, so resume with an agent completion without
+            // checking the automatic threshold again.
+            state.mark_model_input_ready()?;
+            let action = continue_after_compaction(state)?;
+            Ok(outcome.after(outcome_for_action(state, action)?))
+        }
+        CompactionResolution::ReturnIdle { outcome } => {
+            state.turn = TurnState::Idle;
+            Ok(outcome)
+        }
+        CompactionResolution::FailTurn {
+            mut outcome,
+            turn_id,
+            error,
+        } => {
+            outcome.observe(Observation::TurnFailed {
+                turn_id,
+                error: error.clone(),
+            });
+            state.finish_turn(TurnOutcome::Failed { error })?;
+            Ok(outcome)
+        }
+    }
+}
+
+fn install_compaction_retry(
+    state: &mut HarnessState,
+    pending: PendingCompaction,
+) -> Result<Outcome, CoreError> {
+    match &mut state.turn {
+        TurnState::Compacting { pending: current } => *current = pending,
+        TurnState::Active(active)
+            if matches!(active.phase, ActivePhase::AwaitingCompaction { .. }) =>
+        {
+            active.phase = ActivePhase::AwaitingCompaction { pending };
+        }
+        TurnState::Idle | TurnState::Active(_) | TurnState::Terminal { .. } => {
+            return Err(CoreError::invariant(
+                "compaction retry has no pending compaction state",
+            ));
+        }
+    }
+    Ok(Outcome::action(pending_single_action(state)?))
+}
+
+fn finish_pending_hook(
+    state: &mut HarnessState,
+    action_id: String,
+    result: Result<HookResult, ProtocolError>,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    let Some(phase) = state.active().map(|active| active.phase.clone()) else {
+        return Err(invalid_state(state));
+    };
+    match (phase, result) {
+        (ActivePhase::AwaitingHook { pending }, Ok(result)) => {
+            let resolution = resolve_lifecycle_hook(pending, action_id, result)?;
+            apply_lifecycle_hook_resolution(state, resolution, determinism)
+        }
+        (ActivePhase::AwaitingHook { pending }, Err(error)) => {
+            let resolution = resolve_failed_lifecycle_hook(pending, action_id, error)?;
+            apply_lifecycle_hook_resolution(state, resolution, determinism)
+        }
+        (ActivePhase::AwaitingToolBatch { batch }, Ok(result)) => {
+            let tools = state.tool_context()?;
+            let resolution = finish_tool_batch_hook(tools, batch, &action_id, result, determinism)?;
+            apply_tool_batch_transition(state, resolution)
+        }
+        (ActivePhase::AwaitingToolBatch { batch }, Err(error)) => {
+            let tools = state.tool_context()?;
+            let resolution = fail_tool_batch_hook(tools, batch, &action_id, error, determinism)?;
+            apply_tool_batch_transition(state, resolution)
+        }
+        (ActivePhase::AwaitingCompletion { .. } | ActivePhase::AwaitingCompaction { .. }, _) => {
+            Err(invalid_state(state))
+        }
+    }
+}
+
+fn finish_pending_tool(
+    state: &mut HarnessState,
+    action_id: String,
+    call_id: String,
+    report: ReportedToolResult,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    if !state.pending_tool_call_matches(&action_id, &call_id) {
+        return Err(invalid_state(state));
+    }
+    let result = match report {
+        ReportedToolResult::Succeeded(result @ ToolResult::Success { .. })
+        | ReportedToolResult::Failed(result @ ToolResult::Failure { .. }) => result,
+        ReportedToolResult::Succeeded(ToolResult::Failure { .. }) => {
+            return Err(CoreError::invalid_command(
+                "tool_succeeded requires a success result",
+            ));
+        }
+        ReportedToolResult::Failed(ToolResult::Success { .. }) => {
+            return Err(CoreError::invalid_command(
+                "tool_failed requires a failure result",
+            ));
+        }
+    };
+    let Some(ActivePhase::AwaitingToolBatch { batch }) =
+        state.active().map(|active| active.phase.clone())
+    else {
+        return Err(invalid_state(state));
+    };
+    let tools = state.tool_context()?;
+    let resolution = finish_tool_batch_action(tools, batch, &action_id, result, determinism)?;
+    apply_tool_batch_transition(state, resolution)
+}
+
+fn finish_pending_filesystem(
+    state: &mut HarnessState,
+    action_id: String,
+    result: Result<FilesystemResult, ProtocolError>,
+) -> Result<Outcome, CoreError> {
+    let Some(ActivePhase::AwaitingToolBatch { batch }) =
+        state.active().map(|active| active.phase.clone())
+    else {
+        return Err(invalid_state(state));
+    };
+    let tools = state.tool_context()?;
+    let resolution = finish_tool_batch_filesystem_write(tools, batch, &action_id, result)?;
+    apply_tool_batch_transition(state, resolution)
+}
+
+fn invalid_state(state: &HarnessState) -> CoreError {
+    CoreError::invalid_state(state.command_state())
+}
+
+fn next_completion(state: &HarnessState) -> Result<ActivePhase, CoreError> {
+    Ok(active_phase_for_agent_completion(
+        plan_next_agent_completion(state)?,
+    ))
+}
+
+fn plan_next_agent_completion(state: &HarnessState) -> Result<AgentCompletionPlan, CoreError> {
+    let config = state.config();
+    let task_scope = action_id::task_scope(&config.task_id, config.action_id_namespace.as_deref());
+    plan_agent_completion(AgentCompletionRequest::new(
+        &task_scope,
+        state.context.message_count(),
+        state.compaction_count,
+        hook_binding_ids(state, HookPoint::PreLlmCall, None),
+    ))
+}
+
+fn active_phase_for_agent_completion(plan: AgentCompletionPlan) -> ActivePhase {
+    match plan {
+        AgentCompletionPlan::AwaitCompletion { action_id } => {
+            ActivePhase::AwaitingCompletion { action_id }
+        }
+        AgentCompletionPlan::AwaitPreLlmHook { pending } => {
+            ActivePhase::AwaitingHook { pending: *pending }
+        }
+    }
+}
+
+fn pending_single_action(state: &HarnessState) -> Result<Action, CoreError> {
+    let mut actions = state.pending_actions();
+    if actions.len() != 1 {
+        return Err(CoreError::invariant(format!(
+            "expected exactly one pending action, found {}",
+            actions.len()
+        )));
+    }
+    Ok(actions.pop().expect("pending action count was checked"))
+}
+
+fn install_active_phase(state: &mut HarnessState, phase: ActivePhase) -> Result<Action, CoreError> {
+    state.require_active_mut()?.phase = phase;
+    pending_single_action(state)
+}
+
+fn continue_after_compaction(state: &mut HarnessState) -> Result<Action, CoreError> {
+    let plan = plan_next_agent_completion(state)?;
+    install_active_phase(state, active_phase_for_agent_completion(plan))
+}
+
+fn start_manual_compaction(
+    state: &mut HarnessState,
+    extra_instructions: String,
+) -> Result<Outcome, CoreError> {
+    match start_manual_compaction_request(state, &extra_instructions)? {
+        CompactionStartResolution::Pending(pending) => {
+            state.turn = TurnState::Compacting { pending };
+            Ok(Outcome::action(pending_single_action(state)?))
+        }
+        CompactionStartResolution::Failed(resolution) => {
+            apply_compaction_resolution(state, *resolution)
+        }
+    }
+}
+
+/// Installs an automatic compaction started inside the active turn.
+fn apply_in_turn_compaction_start(
+    state: &mut HarnessState,
+    start: CompactionStartResolution,
+) -> Result<Outcome, CoreError> {
+    match start {
+        CompactionStartResolution::Pending(pending) => {
+            let action = install_active_phase(state, ActivePhase::AwaitingCompaction { pending })?;
+            Ok(Outcome::action(action))
+        }
+        CompactionStartResolution::Failed(resolution) => {
+            apply_compaction_resolution(state, *resolution)
+        }
+    }
+}
+
+/// Installs the next completion on the active turn and yields its action.
+fn continue_active_turn(state: &mut HarnessState) -> Result<Action, CoreError> {
+    let phase = next_completion(state)?;
+    install_active_phase(state, phase)
+}
+
+fn finish_agent_completion(
+    state: &mut HarnessState,
+    action_id: String,
+    result: Result<CompletionResult, ProtocolError>,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    let event = match result {
+        Ok(result) => CompletionEvent::Succeeded { action_id, result },
+        Err(error) if is_context_overflow(&error) => {
+            return match correct_refused_agent_request(state, &action_id, error)? {
+                AgentRefusal::Fail { outcome, error } => Ok(outcome.after(apply_completion_event(
+                    state,
+                    CompletionEvent::Failed { action_id, error },
+                    determinism,
+                )?)),
+                AgentRefusal::Compact { outcome, start } => {
+                    Ok(outcome.after(apply_in_turn_compaction_start(state, start)?))
+                }
+            };
+        }
+        Err(error) => CompletionEvent::Failed { action_id, error },
+    };
+    apply_completion_event(state, event, determinism)
+}
+
+fn apply_lifecycle_hook_resolution(
+    state: &mut HarnessState,
+    resolution: HookResolution,
+    determinism: crate::core::step_protocol::DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    match resolution {
+        HookResolution::PreAgentSkip {
+            turn_id,
+            content,
+            reason,
+        } => {
+            let mut outcome = Outcome::quiet();
+            outcome.observe(Observation::TurnStarted { turn_id, content });
+            Ok(outcome.after(finish_completed_turn(
+                state,
+                reason,
+                Some(TurnStopReason::Skipped),
+            )?))
+        }
+        HookResolution::PreAgentFailed {
+            turn_id,
+            content,
+            error,
+        } => {
+            let mut outcome = Outcome::quiet();
+            outcome.observe(Observation::TurnStarted { turn_id, content });
+            let completed_turn_id = state.finish_turn(TurnOutcome::Failed {
+                error: error.clone(),
+            })?;
+            outcome.observe(Observation::TurnFailed {
+                turn_id: completed_turn_id,
+                error,
+            });
+            Ok(outcome)
+        }
+        HookResolution::CommitPreAgentTurn { turn_id, message } => {
+            // The Turn waiting on its pre-agent Hook holds the output type it started with.
+            let output_type = state.require_active()?.output_type.clone();
+            commit_turn(state, turn_id, message, output_type)
+        }
+        HookResolution::ResolveCompletion(resolution) => {
+            apply_completion_event(state, CompletionEvent::Hook(resolution), determinism)
+        }
+    }
+}
+
+fn apply_completion_event(
+    state: &mut HarnessState,
+    event: CompletionEvent,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    let transition = {
+        let active = state.require_active()?;
+        let post_llm_hook_binding_ids = hook_binding_ids(state, HookPoint::PostLlmCall, None);
+        let post_agent_hook_binding_ids = hook_binding_ids(state, HookPoint::PostAgentTurn, None);
+        let tools = crate::core::tools::context::ToolContext::new(
+            state.resolved_tools(),
+            state.hook_binding_index(),
+            &active.turn_id,
+            state.context.message_count() + 1,
+            state.config().settings.tools.permissions.as_ref(),
+        );
+        resolve_completion(
+            CandidateContext::new(
+                CandidateTurn::new(
+                    active.iterations,
+                    state.config().settings.turn.max_iterations,
+                    state.config().settings.turn.output_limit_recovery,
+                    active.output_limit_retries,
+                ),
+                CandidateHooks::new(post_llm_hook_binding_ids, post_agent_hook_binding_ids),
+                tools,
+                determinism,
+            ),
+            event,
+        )?
+    };
+    apply_completion_transition(state, transition)
+}
+
+fn apply_completion_transition(
+    state: &mut HarnessState,
+    transition: CompletionTransition,
+) -> Result<Outcome, CoreError> {
+    match transition.resolution {
+        CompletionResolution::Wait(wait) => {
+            let phase = match *wait {
+                CompletionWait::Completion(plan) => active_phase_for_agent_completion(plan),
+                CompletionWait::LifecycleHook(pending) => {
+                    ActivePhase::AwaitingHook { pending: *pending }
+                }
+            };
+            let action = install_active_phase(state, phase)?;
+            outcome_for_action(state, action)
+        }
+        CompletionResolution::Retry {
+            action_id,
+            next_iteration,
+            feedback,
+            output_limit,
+        } => {
+            let mut outcome = Outcome::quiet();
+            outcome.observe(Observation::AgentCompletionCandidateDiscarded {
+                turn_id: active_turn_id(state)?.to_string(),
+                action_id,
+                cause: CandidateDiscardCause::Retry,
+            });
+            let active = state.require_active_mut()?;
+            active.iterations = next_iteration;
+            if output_limit {
+                active.output_limit_retries += 1;
+            }
+            // The discarded candidate leaves the context at the boundary its
+            // request ended on, so context a hook sent precedes the feedback,
+            // unless it waits for a pending steer.
+            let context = state.take_context_unless_steering_waits()?;
+            state.context.extend_current_turn(context);
+            state.context.push_in_current_turn(feedback);
+            let action = continue_active_turn(state)?;
+            Ok(outcome.after(outcome_for_action(state, action)?))
+        }
+        CompletionResolution::Finish(finish) => apply_completion_finish(state, finish),
+        CompletionResolution::Accept(accepted) => apply_accepted_completion(state, accepted),
+    }
+}
+
+fn apply_completion_finish(
+    state: &mut HarnessState,
+    finish: CompletionFinish,
+) -> Result<Outcome, CoreError> {
+    let mut outcome = Outcome::quiet();
+    match finish {
+        CompletionFinish::Skipped { action_id, reason } => {
+            outcome.observe(Observation::AgentCompletionCandidateDiscarded {
+                turn_id: active_turn_id(state)?.to_string(),
+                action_id,
+                cause: CandidateDiscardCause::Skipped,
+            });
+            outcome = outcome.after(finish_completed_turn(
+                state,
+                reason,
+                Some(TurnStopReason::Skipped),
+            )?);
+        }
+        CompletionFinish::Rejected {
+            action_id,
+            next_iteration,
+            reason,
+        } => {
+            outcome.observe(Observation::AgentCompletionCandidateDiscarded {
+                turn_id: active_turn_id(state)?.to_string(),
+                action_id,
+                cause: CandidateDiscardCause::Rejected,
+            });
+            state.require_active_mut()?.iterations = next_iteration;
+            let output = vec![ContentBlock::text(reason.clone())];
+            let turn_id = state.finish_turn(TurnOutcome::Rejected { reason })?;
+            outcome.observe(Observation::TurnCompleted {
+                turn_id,
+                output,
+                stop_reason: Some(TurnStopReason::Rejected),
+            });
+        }
+        CompletionFinish::Failed { action_id, error } => {
+            outcome.observe(Observation::AgentCompletionCandidateDiscarded {
+                turn_id: active_turn_id(state)?.to_string(),
+                action_id,
+                cause: CandidateDiscardCause::Failure {
+                    error: error.clone(),
+                },
+            });
+            outcome.observe(Observation::TurnFailed {
+                turn_id: active_turn_id(state)?.to_string(),
+                error: error.clone(),
+            });
+            remove_rejected_turn_input(state, &error)?;
+            state.finish_turn(TurnOutcome::Failed { error })?;
+        }
+    }
+    Ok(outcome)
+}
+
+/// Replaces the active Turn's input in the model context with a note when the provider
+/// rejected the agent request carrying it for good: sent again, the same input fails again
+/// on every later Turn. A retryable rejection may succeed with the same input, so it keeps it.
+/// A compaction request never carries the input as it is (the in-context request ends
+/// before it, the standalone one renders images as text), so its rejection removes nothing.
+///
+/// Runs before finishing the Turn, which adds pending steering to its group. After a
+/// compaction reduced the Turn's input into its summary view, no single message is the
+/// input, so nothing is removed.
+fn remove_rejected_turn_input(
+    state: &mut HarnessState,
+    error: &ProtocolError,
+) -> Result<(), CoreError> {
+    let active = state.require_active_mut()?;
+    if !is_rejected_request(error) || error.retryable || active.input_reduced {
+        return Ok(());
+    }
+    let delivered_steering = active.delivered_steering;
+    let note = state.config().settings.prompts.rejected_input_note.clone();
+    state
+        .context
+        .replace_rejected_turn_input(delivered_steering, &note);
+    Ok(())
+}
+
+/// The code a Runtime reports for a request the provider rejected as invalid, such as an
+/// unreadable image.
+const REJECTED_REQUEST: &str = "completion_rejected";
+
+fn is_rejected_request(error: &ProtocolError) -> bool {
+    error.code == REJECTED_REQUEST
+}
+
+fn apply_accepted_completion(
+    state: &mut HarnessState,
+    accepted: AcceptedCompletion,
+) -> Result<Outcome, CoreError> {
+    let AcceptedCompletion {
+        action_id,
+        next_iteration,
+        context_tokens,
+        input_tokens,
+        message,
+        candidate,
+        continuation,
+    } = accepted;
+    state.require_active_mut()?.iterations = next_iteration;
+    record_reply_size(state, input_tokens, context_tokens)?;
+    state.context.push_in_current_turn(message);
+    let mut outcome = Outcome::quiet();
+    // Even a private-only candidate settles provisional output from a retried call.
+    outcome.observe(Observation::AssistantMessageCommitted {
+        turn_id: active_turn_id(state)?.to_string(),
+        action_id,
+        candidate,
+    });
+    match continuation {
+        AcceptedCompletionContinuation::Complete {
+            output,
+            stop_reason,
+        } => {
+            state.mark_model_input_ready()?;
+            Ok(outcome.after(complete_output(state, output, stop_reason)?))
+        }
+        AcceptedCompletionContinuation::ToolBatch(transition) => {
+            Ok(outcome.after(apply_tool_batch_transition(state, *transition)?))
+        }
+    }
+}
+
+fn apply_tool_batch_transition(
+    state: &mut HarnessState,
+    transition: ToolBatchTransition,
+) -> Result<Outcome, CoreError> {
+    let ToolBatchTransition {
+        resolution,
+        observations,
+    } = transition;
+    let mut outcome = Outcome::quiet();
+    for observation in observations {
+        outcome.observe(observation);
+    }
+    let continuation = match resolution {
+        ToolBatchResolution::AwaitingActions { batch, actions } => {
+            state.require_active_mut()?.phase = ActivePhase::AwaitingToolBatch { batch };
+            Outcome::actions(actions)
+        }
+        ToolBatchResolution::ContinueTurn { messages } => {
+            state
+                .context
+                .extend_current_turn(messages.into_iter().map(StoredMessage::visible));
+            state.mark_model_input_ready()?;
+            let turn_settings = &state.config().settings.turn;
+            let max_iterations = turn_settings.max_iterations;
+            // Pending steering or a notification can change the model's next call, so it
+            // reaches the model before the turn stops.
+            let repeated_failure = !state.has_pending_turn_input()
+                && turn_settings
+                    .max_identical_tool_failures
+                    .is_some_and(|limit| {
+                        repeated_tool_failure::limit_reached(&state.context, limit)
+                    });
+            let iterations = state.require_active()?.iterations;
+            if repeated_failure {
+                finish_completed_turn(
+                    state,
+                    vec![ContentBlock::text(repeated_tool_failure::STOP_MESSAGE)],
+                    Some(TurnStopReason::RepeatedToolFailure),
+                )?
+            } else if max_iterations.is_some_and(|max_iterations| iterations >= max_iterations) {
+                // The partial output is what a final answer would hold: the latest
+                // assistant message's content, never tool results.
+                let output = state.context.latest_assistant_content_in_current_turn();
+                finish_completed_turn(state, output, Some(TurnStopReason::IterationLimit))?
+            } else {
+                let action = continue_active_turn(state)?;
+                outcome_for_action(state, action)?
+            }
+        }
+    };
+    Ok(outcome.after(continuation))
+}
+
+fn finish_pending_approval(
+    state: &mut HarnessState,
+    action_id: String,
+    resolution: Result<ApprovalOutcome, ApprovalFailureReason>,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    let Some(ActivePhase::AwaitingToolBatch { batch }) =
+        state.active().map(|active| active.phase.clone())
+    else {
+        return Err(invalid_state(state));
+    };
+    let tools = state.tool_context()?;
+    let transition = finish_tool_batch_approval(tools, batch, &action_id, resolution, determinism)?;
+    apply_tool_batch_transition(state, transition)
+}
+
+fn handle_context_message(
+    state: &mut HarnessState,
+    content: Vec<ContentBlock>,
+) -> Result<Outcome, CoreError> {
+    validate_non_empty_content(&content, "context message content")?;
+    add_context(state, StoredMessage::injected(Message::context(content)))
+}
+
+/// Appends a note that delivers `content` as the live instructions for `key`,
+/// even when they are already live with that text. A live key gets the note
+/// that says its previous text no longer applies.
+fn handle_instructions_upsert(
+    state: &mut HarnessState,
+    key: String,
+    content: &str,
+) -> Result<Outcome, CoreError> {
+    instructions::validate_upsert(&key, content).map_err(CoreError::invalid_command)?;
+    let note = instructions::upsert_note(state, key, content);
+    instructions::admit(state, std::slice::from_ref(&note))?;
+    add_context(state, note)
+}
+
+/// Appends a note that the instructions for `key` no longer apply, without the
+/// history before it changing. Nothing happens when the key is not live.
+fn handle_instructions_delete(state: &mut HarnessState, key: String) -> Result<Outcome, CoreError> {
+    crate::core::wire::message::validate_instructions_key(&key)
+        .map_err(CoreError::invalid_command)?;
+    let Some(note) = instructions::delete_note(state, key) else {
+        return Ok(Outcome::quiet());
+    };
+    add_context(state, note)
+}
+
+fn add_context(state: &mut HarnessState, message: StoredMessage) -> Result<Outcome, CoreError> {
+    // During a Turn, context waits for the Turn's next Agent completion, or for the
+    // one that delivers the steering or notifications admitted before it. Unlike
+    // steering, it never extends a Turn that would otherwise finish: a Turn that
+    // ends first commits it for the next Turn.
+    if matches!(state.turn, TurnState::Active(_)) {
+        state.defer_context(message)?;
+        return Ok(Outcome::quiet());
+    }
+    state.ensure_system_prompt();
+    state.context.push_before_next_turn(message)?;
+    // Injecting context clears the previous turn's result: the session is idle
+    // again, not sitting on a finished turn.
+    state.turn = TurnState::Idle;
+    Ok(Outcome::quiet())
+}
+
+fn handle_user_message(
+    state: &mut HarnessState,
+    turn_id: String,
+    content: Vec<ContentBlock>,
+    mode: UserMessageMode,
+    output_type: Option<OutputType>,
+) -> Result<Outcome, CoreError> {
+    validate_turn_id(&turn_id, "user message turn_id")?;
+    if let Some(output_type) = &output_type {
+        output_type.validate().map_err(CoreError::invalid_command)?;
+    }
+    let observed_content = content.clone();
+    let message = StoredMessage::visible(content_to_user_message(content)?);
+    match mode {
+        UserMessageMode::Queue => match &mut state.turn {
+            TurnState::Idle | TurnState::Terminal { .. } => {
+                start_turn(state, turn_id, message, output_type)
+            }
+            TurnState::Compacting { .. } => Err(CoreError::invalid_command(
+                "cannot start a turn while compaction is pending",
+            )),
+            TurnState::Active(_) => Err(invalid_state(state)),
+        },
+        UserMessageMode::Steer => {
+            require_active_turn_id(state, &turn_id, "steer")?;
+            // A steer joins the active Turn, which keeps the output type it started with.
+            if output_type.is_some() && output_type != state.require_active()?.output_type {
+                return Err(CoreError::output_type_mismatch());
+            }
+            let mut outcome = Outcome::quiet();
+            outcome.observe(Observation::TurnSteeringReceived {
+                turn_id: turn_id.clone(),
+                content: observed_content,
+            });
+            state.defer_steer(message)?;
+            Ok(outcome)
+        }
+    }
+}
+
+fn content_to_user_message(content: Vec<ContentBlock>) -> Result<Message, CoreError> {
+    validate_non_empty_content(&content, "user message content")?;
+    Ok(Message::user(content))
+}
+
+fn outcome_for_action(state: &mut HarnessState, action: Action) -> Result<Outcome, CoreError> {
+    let delivers_model_input = matches!(
+        &action,
+        Action::Completion {
+            kind: crate::core::step_protocol::CompletionActionKind::Agent,
+            ..
+        }
+    );
+    let precedes_agent_provider_call = delivers_model_input
+        || matches!(
+            &action,
+            Action::Hook {
+                call: HookCall::PreLlmCall,
+                ..
+            }
+        );
+    if !precedes_agent_provider_call {
+        return Ok(Outcome::action(action));
+    }
+    let outcome = if delivers_model_input {
+        commit_pending_model_input(state)?
+    } else {
+        Outcome::quiet()
+    };
+    Ok(outcome.after(preflight_agent_action(state, action)?))
+}
+
+/// Commits pending input to model context in admission order. Consecutive
+/// notifications share one injected message.
+fn commit_pending_model_input(state: &mut HarnessState) -> Result<Outcome, CoreError> {
+    // An Agent request always ends where the model accepts input, so hook context joins every
+    // one, including a retry, which does not mark model input ready, unless it waits for a steer.
+    if !state.require_active_mut()?.take_model_input_ready() {
+        let context = state.take_context_unless_steering_waits()?;
+        state.context.extend_current_turn(context);
+        return Ok(Outcome::quiet());
+    }
+    let active = state.require_active_mut()?;
+    let context = std::mem::take(&mut active.pending_context);
+    let turn_id = active.turn_id.clone();
+    let entries = state
+        .pending_input
+        .take_all(state.config().settings.context.notifications.recent_ids);
+    // Context messages wait with the steering but are injected, so only the user's steering
+    // counts toward finding a rejected request's input.
+    let user_steering = entries
+        .iter()
+        .filter(|entry| matches!(entry, PendingEntry::Steering(message) if !message.is_injected()))
+        .count();
+    let active = state.require_active_mut()?;
+    active.delivered_steering = active
+        .delivered_steering
+        .saturating_add(u32::try_from(user_steering).unwrap_or(u32::MAX));
+    state.context.extend_current_turn(context);
+    let mut outcome = Outcome::quiet();
+    let mut notifications = Vec::new();
+    for entry in entries {
+        let message = match entry {
+            PendingEntry::Notification(notification) => {
+                notifications.push(notification);
+                continue;
+            }
+            PendingEntry::Steering(message) => message,
+        };
+        commit_notifications(
+            state,
+            &turn_id,
+            std::mem::take(&mut notifications),
+            &mut outcome,
+        )?;
+        let Message::User {
+            content, context, ..
+        } = &message.message
+        else {
+            return Err(CoreError::invariant(
+                "pending steering must contain user or context messages",
+            ));
+        };
+        if !context {
+            outcome.observe(Observation::TurnSteered {
+                turn_id: turn_id.clone(),
+                content: content.clone(),
+            });
+        }
+        state.context.push_in_current_turn(message);
+    }
+    commit_notifications(state, &turn_id, notifications, &mut outcome)?;
+    Ok(outcome)
+}
+
+fn commit_notifications(
+    state: &mut HarnessState,
+    turn_id: &str,
+    notifications: Vec<Notification>,
+    outcome: &mut Outcome,
+) -> Result<(), CoreError> {
+    state.context.extend_current_turn(notification_messages(
+        &notifications,
+        &state.config().settings.prompts.agent_messages,
+        state
+            .config()
+            .settings
+            .tools
+            .subagents
+            .messages_resume_idle_children(),
+    )?);
+    for notification in notifications {
+        outcome.observe(Observation::NotificationDelivered {
+            turn_id: turn_id.to_string(),
+            notification,
+        });
+    }
+    Ok(())
+}
+
+fn preflight_agent_action(state: &mut HarnessState, action: Action) -> Result<Outcome, CoreError> {
+    if !model_input_reaches_compaction_threshold(state)? {
+        return Ok(Outcome::action(action));
+    }
+    let active = state.require_active()?;
+    let turn_id = active.turn_id.clone();
+    let iterations = active.iterations;
+    let start = start_automatic_compaction(state, &turn_id, iterations)?;
+    apply_in_turn_compaction_start(state, start)
+}
+
+fn start_turn(
+    state: &mut HarnessState,
+    turn_id: String,
+    message: StoredMessage,
+    output_type: Option<OutputType>,
+) -> Result<Outcome, CoreError> {
+    let hook_binding_ids = hook_binding_ids(state, HookPoint::PreAgentTurn, None);
+
+    if !hook_binding_ids.is_empty() {
+        let user_content = match message.message {
+            Message::User { content, .. } => content,
+            _ => Vec::new(),
+        };
+        validate_non_empty_content(&user_content, "pre-agent user content")?;
+        let pending =
+            PendingLifecycleHook::pre_agent_turn(turn_id.clone(), user_content, hook_binding_ids)?;
+        state.turn = TurnState::Active(ActiveTurn {
+            turn_id: turn_id.clone(),
+            iterations: 0,
+            phase: ActivePhase::AwaitingHook { pending },
+            pending_context: Vec::new(),
+            model_input_ready: false,
+            output_limit_retries: 0,
+            output_type,
+            delivered_steering: 0,
+            input_reduced: false,
+        });
+        return Ok(Outcome::action(pending_single_action(state)?));
+    }
+    commit_turn(state, turn_id, message, output_type)
+}
+
+fn commit_turn(
+    state: &mut HarnessState,
+    turn_id: String,
+    message: StoredMessage,
+    output_type: Option<OutputType>,
+) -> Result<Outcome, CoreError> {
+    let content = match &message.message {
+        Message::User { content, .. } => content.clone(),
+        _ => Vec::new(),
+    };
+    // Context sent by a pre-agent hook precedes the message it reviewed.
+    let hook_context = match &mut state.turn {
+        TurnState::Active(active) => std::mem::take(&mut active.pending_context),
+        TurnState::Idle | TurnState::Compacting { .. } | TurnState::Terminal { .. } => Vec::new(),
+    };
+    let mut outcome = Outcome::quiet();
+    outcome.observe(Observation::TurnStarted {
+        turn_id: turn_id.clone(),
+        content,
+    });
+    state.ensure_system_prompt();
+    // Inputs retained while idle precede the command that starts this Turn.
+    // Steering cannot wait here: ending a Turn commits its steering.
+    let notifications = state
+        .pending_input
+        .take_all(state.config().settings.context.notifications.recent_ids)
+        .into_iter()
+        .map(|entry| match entry {
+            PendingEntry::Notification(notification) => Ok(notification),
+            PendingEntry::Steering(_) => Err(CoreError::invariant(
+                "pending steering requires an active turn",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let messages = notification_messages(
+        &notifications,
+        &state.config().settings.prompts.agent_messages,
+        state
+            .config()
+            .settings
+            .tools
+            .subagents
+            .messages_resume_idle_children(),
+    )?;
+    for notification in notifications {
+        outcome.observe(Observation::NotificationDelivered {
+            turn_id: turn_id.clone(),
+            notification,
+        });
+    }
+    // Context from the pre-agent hook is the newest context waiting for this Turn.
+    for context in hook_context {
+        state.context.push_before_next_turn(context)?;
+    }
+    state.context.extend_new_turn(messages, message)?;
+    let phase = next_completion(state)?;
+    state.turn = TurnState::Active(ActiveTurn {
+        turn_id,
+        iterations: 0,
+        phase,
+        pending_context: Vec::new(),
+        model_input_ready: true,
+        output_limit_retries: 0,
+        output_type,
+        delivered_steering: 0,
+        input_reduced: false,
+    });
+    let action = pending_single_action(state)?;
+    outcome.absorb(outcome_for_action(state, action)?);
+    Ok(outcome)
+}
+
+/// Why the Runtime closes the active turn before the turn completes.
+enum TurnAbandonment {
+    /// `reason` is `None` or has non-blank text.
+    Interrupt { reason: Option<String> },
+    RuntimeFailure {
+        action_id: String,
+        error: ProtocolError,
+    },
+}
+
+fn abandon_turn(
+    state: &mut HarnessState,
+    expected_turn_id: String,
+    abandonment: TurnAbandonment,
+    determinism: DeterminismContext,
+) -> Result<Outcome, CoreError> {
+    let (command, turn_id_label, message, discard_cause, abandoned_cause) = match &abandonment {
+        TurnAbandonment::Interrupt { reason } => (
+            "interrupt",
+            "interrupt expected_turn_id",
+            reason
+                .as_deref()
+                .unwrap_or("Interrupted by the runtime before completion."),
+            CandidateDiscardCause::Interrupt,
+            ActionAbandonedCause::Interrupt,
+        ),
+        TurnAbandonment::RuntimeFailure { error, .. } => (
+            "fail_turn",
+            "fail_turn expected_turn_id",
+            error.message.as_str(),
+            CandidateDiscardCause::Failure {
+                error: error.clone(),
+            },
+            ActionAbandonedCause::RuntimeFailure,
+        ),
+    };
+    validate_turn_id(&expected_turn_id, turn_id_label)?;
+    require_active_turn_id(state, &expected_turn_id, command)?;
+    let pending_ids = state.pending_action_ids();
+    if let TurnAbandonment::RuntimeFailure { action_id, .. } = &abandonment
+        && !pending_ids.contains(action_id)
+    {
+        return Err(CoreError::invalid_correlation(action_id, pending_ids));
+    }
+    let resolution =
+        state
+            .require_active()?
+            .phase
+            .interrupt(&state.tool_context()?, message, determinism)?;
+    let mut outcome = Outcome::quiet();
+    match resolution {
+        InterruptionResolution::Quiet => {}
+        InterruptionResolution::DiscardCompletion { action_id } => {
+            outcome.observe(Observation::AgentCompletionCandidateDiscarded {
+                turn_id: expected_turn_id.clone(),
+                action_id,
+                cause: discard_cause,
+            });
+        }
+        InterruptionResolution::CommitToolMessages { messages } => {
+            state
+                .context
+                .extend_current_turn(messages.into_iter().map(StoredMessage::visible));
+        }
+    }
+    // The interrupted output is read after the tool messages are committed.
+    let (terminal, turn_outcome) = match abandonment {
+        TurnAbandonment::Interrupt { reason } => (
+            Observation::TurnInterrupted {
+                turn_id: expected_turn_id.clone(),
+                reason: reason.clone(),
+                output: state.context.latest_assistant_content_in_current_turn(),
+            },
+            TurnOutcome::Interrupted { reason },
+        ),
+        TurnAbandonment::RuntimeFailure { error, .. } => (
+            Observation::TurnFailed {
+                turn_id: expected_turn_id.clone(),
+                error: error.clone(),
+            },
+            TurnOutcome::Failed { error },
+        ),
+    };
+    outcome.observe(terminal);
+    state.finish_turn(turn_outcome)?;
+    for action_id in pending_ids {
+        outcome.observe(Observation::ActionAbandoned {
+            turn_id: expected_turn_id.clone(),
+            action_id,
+            cause: abandoned_cause,
+        });
+    }
+    Ok(outcome)
+}
+
+fn validate_turn_id(turn_id: &str, label: &str) -> Result<(), CoreError> {
+    if turn_id.trim().is_empty() {
+        return Err(CoreError::invalid_command(format!(
+            "{label} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn require_turn_id(label: &str, expected: &str, actual: &str) -> Result<(), CoreError> {
+    if expected == actual {
+        return Ok(());
+    }
+    Err(CoreError::invalid_command(format!(
+        "{label} mismatch: expected {expected:?}, got {actual:?}"
+    )))
+}
+
+fn require_active_turn_id(
+    state: &HarnessState,
+    actual: &str,
+    command: &str,
+) -> Result<(), CoreError> {
+    let expected = state.active_turn_id().ok_or_else(|| {
+        CoreError::invalid_command(format!("cannot {command} a session without an active turn"))
+    })?;
+    require_turn_id(&format!("{command} turn"), expected, actual)
+}
+
+fn active_turn_id(state: &HarnessState) -> Result<&str, CoreError> {
+    Ok(state.require_active()?.turn_id.as_str())
+}
+
+/// `stop_reason`: why the final reply ends the turn early, such as `OutputLimit`. The turn
+/// ends at its iteration limit instead when steering or a notification is still pending.
+fn complete_output(
+    state: &mut HarnessState,
+    output: Vec<ContentBlock>,
+    stop_reason: Option<TurnStopReason>,
+) -> Result<Outcome, CoreError> {
+    let iterations = state.require_active()?.iterations;
+    let has_pending_turn_input = state.has_pending_turn_input();
+    if has_pending_turn_input
+        && state
+            .config()
+            .settings
+            .turn
+            .max_iterations
+            .is_none_or(|max_iterations| iterations < max_iterations)
+    {
+        let action = continue_active_turn(state)?;
+        return outcome_for_action(state, action);
+    }
+    let stop_reason = if has_pending_turn_input {
+        Some(TurnStopReason::IterationLimit)
+    } else {
+        stop_reason
+    };
+    finish_completed_turn(state, output, stop_reason)
+}
+
+fn finish_completed_turn(
+    state: &mut HarnessState,
+    output: Vec<ContentBlock>,
+    stop_reason: Option<TurnStopReason>,
+) -> Result<Outcome, CoreError> {
+    let turn_id = state.finish_turn(TurnOutcome::Completed {
+        output: output.clone(),
+    })?;
+    let mut outcome = Outcome::quiet();
+    outcome.observe(Observation::TurnCompleted {
+        turn_id,
+        output,
+        stop_reason,
+    });
+
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::features::compaction::record_exact_request_tokens;
+    use crate::core::testing::*;
+
+    #[test]
+    fn an_exact_request_count_at_the_threshold_starts_compaction_on_its_own() {
+        let mut state = started_with(with_threshold(1_000_000));
+        let action = pending_single_action(&state).unwrap();
+        assert!(!model_input_reaches_compaction_threshold(&state).unwrap());
+
+        record_exact_request_tokens(&mut state, 1_000_000);
+        preflight_agent_action(&mut state, action).unwrap();
+
+        assert!(matches!(
+            state.require_active().unwrap().phase,
+            ActivePhase::AwaitingCompaction { .. }
+        ));
+    }
+
+    #[test]
+    fn interrupt_closes_an_open_tool_call() {
+        let running = advance_llm(
+            started(),
+            assistant_tool(
+                "run_typescript",
+                json!({"code": "async function main() { return tools.file_system.read_file({ path: 'artifact.txt' }); }"}),
+            ),
+        );
+
+        let interrupted = advance(
+            running.state,
+            HarnessCommand::Interrupt {
+                expected_turn_id: "turn-1".to_string(),
+                reason: Some("stop now".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(interrupted.effect, None);
+        assert!(matches!(
+            turn_outcome(&interrupted.state),
+            Some(TurnOutcome::Interrupted { .. })
+        ));
+        assert!(
+            interrupted
+                .state
+                .context
+                .messages()
+                .last()
+                .is_some_and(|message| {
+                    message_role(&message.message) == Role::Tool
+                        && message_text(message).contains("stop now")
+                })
+        );
+    }
+}

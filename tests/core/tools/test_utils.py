@@ -4,14 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.config.harness_files import (
-    HarnessFilesManager,
-    reset_harness_files_manager,
-)
-from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs
-from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.tools.utils import display_file_path, resolve_tool_path
-from vibe.core.types import ToolCallEvent
+from vibe.core.tools.utils import is_stream_device_path, names_a_link, resolve_tool_path
 from vibe.utils import paths
 
 
@@ -65,119 +58,45 @@ def test_windows_msys_path_with_surrounding_whitespace_resolves_consistently(
     assert resolve_tool_path(raw, tmp_path) == Path("C:/Users/acmedev/notes.md")
 
 
-def test_display_file_path_uses_cwd_relative_path(
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/dev/null", True),
+        ("/dev/stdout", True),
+        ("/dev/fd/3", True),
+        ("/dev/null/", True),
+        ("/dev/fd/3/passwd", False),
+        ("/dev/fd/3/../123", False),
+        ("/dev/fd/3/../../null", False),
+        ("/dev/fd/../../etc/passwd", False),
+        ("/dev/./null", False),
+        ("/dev/sda", False),
+        ("dev/null", False),
+    ],
+)
+def test_only_the_null_device_and_streams_count_as_stream_devices(
+    path: str, expected: bool
+) -> None:
+    assert is_stream_device_path(path) is expected
+
+
+def test_a_bare_name_counts_as_a_link_only_when_it_is_one(tmp_path: Path) -> None:
+    (tmp_path / "plain.txt").write_text("x")
+    try:
+        (tmp_path / "lnk").symlink_to(tmp_path / "plain.txt")
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+
+    assert names_a_link("lnk", tmp_path)
+    assert not names_a_link("plain.txt", tmp_path)
+    assert not names_a_link("missing", tmp_path)
+    assert not names_a_link("bad\0name", tmp_path)
+
+
+def test_a_bare_name_naming_a_junction_counts_as_a_link(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workdir = tmp_path / "project"
-    target = workdir / "pkg" / "config.py"
-    workdir.mkdir()
-    target.parent.mkdir()
-    target.write_text("x", encoding="utf-8")
-    monkeypatch.chdir(workdir)
-    reset_harness_files_manager()
+    (tmp_path / "jnk").mkdir()
+    monkeypatch.setattr(Path, "is_junction", lambda self: self.name == "jnk")
 
-    assert display_file_path(str(target)) == "pkg/config.py"
-
-
-def test_display_file_path_keeps_outside_absolute_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workdir = tmp_path / "project"
-    outside = tmp_path / "outside" / "config.py"
-    workdir.mkdir()
-    outside.parent.mkdir()
-    outside.write_text("x", encoding="utf-8")
-    monkeypatch.chdir(workdir)
-    reset_harness_files_manager()
-
-    assert display_file_path(str(outside)) == str(outside.resolve())
-
-
-def test_display_file_path_keeps_repo_sibling_absolute_when_outside_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = tmp_path / "repo"
-    workdir = repo / "subdir"
-    target = repo / "pkg" / "config.py"
-    workdir.mkdir(parents=True)
-    target.parent.mkdir()
-    target.write_text("x", encoding="utf-8")
-    monkeypatch.chdir(workdir)
-    reset_harness_files_manager()
-
-    assert display_file_path(str(target)) == str(target.resolve())
-
-
-def test_display_file_path_resolves_relative_input_from_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workdir = tmp_path / "project"
-    target = workdir / "pkg" / "config.py"
-    workdir.mkdir()
-    target.parent.mkdir()
-    target.write_text("x", encoding="utf-8")
-    monkeypatch.chdir(workdir)
-    reset_harness_files_manager()
-
-    assert display_file_path("pkg/config.py") == "pkg/config.py"
-
-
-def test_tool_display_uses_session_harness_when_process_cwd_differs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = tmp_path / "home"
-    repo = tmp_path / "repo"
-    workdir = repo / "subdir"
-    target = workdir / "pkg" / "config.py"
-    home.mkdir()
-    workdir.mkdir(parents=True)
-    target.parent.mkdir()
-    target.write_text("x", encoding="utf-8")
-    monkeypatch.chdir(home)
-    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
-        workdir
-    )
-    event = ToolCallEvent(
-        tool_call_id="test",
-        tool_name="read_file",
-        tool_class=ReadFile,
-        args=ReadFileArgs(file_path=str(target)),
-    )
-
-    presentation = ToolUIDataAdapter(
-        ReadFile, harness_files=harness_files
-    ).get_call_presentation(event)
-
-    assert presentation.display.summary == "Reading pkg/config.py"
-    assert presentation.display.message == "pkg/config.py"
-    assert presentation.display.settled_message == "pkg/config.py"
-
-
-def test_tool_display_keeps_absolute_path_outside_session_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = tmp_path / "home"
-    workdir = tmp_path / "repo" / "subdir"
-    target = tmp_path / "repo" / "pkg" / "config.py"
-    home.mkdir()
-    workdir.mkdir(parents=True)
-    target.parent.mkdir()
-    target.write_text("x", encoding="utf-8")
-    monkeypatch.chdir(home)
-    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
-        workdir
-    )
-    event = ToolCallEvent(
-        tool_call_id="test",
-        tool_name="read_file",
-        tool_class=ReadFile,
-        args=ReadFileArgs(file_path=str(target)),
-    )
-
-    presentation = ToolUIDataAdapter(
-        ReadFile, harness_files=harness_files
-    ).get_call_presentation(event)
-
-    assert presentation.display.summary == f"Reading {target.resolve()}"
-    assert presentation.display.message == str(target.resolve())
-    assert presentation.display.settled_message == str(target.resolve())
+    assert names_a_link("jnk", tmp_path)

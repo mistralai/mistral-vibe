@@ -22,7 +22,13 @@ from vibe.cli.transcribe.transcribe_client_port import (
     TranscribeSessionCreated,
     TranscribeTextDelta,
 )
-from vibe.utils.api_keys import resolve_api_key
+from vibe.core.platform_auth import (
+    UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
+    PlatformCredentialProvider,
+    PlatformCredentialRequired,
+    PlatformCredentialSnapshot,
+)
+from vibe.core.platform_auth._mistral import resolve_snapshot
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context, get_user_agent
 
 # The server rejects an end-of-stream flush when no audio was captured (the user
@@ -36,8 +42,11 @@ class MistralTranscribeClient:
         provider: AudioProviderView,
         model: TranscribeModelConfigView,
         metadata_getter: RequestMetadataGetter | None = None,
+        credentials: PlatformCredentialProvider | None = None,
     ) -> None:
-        self._api_key = resolve_api_key(provider.api_key_env_var) or ""
+        self._credentials = credentials or _process_credentials(
+            provider.api_key_env_var
+        )
         self._server_url = provider.api_base
         self._model_name = model.name
         self._audio_format = AudioFormat(
@@ -48,23 +57,36 @@ class MistralTranscribeClient:
         self._client: Mistral | None = None
         self._http_client: VibeAsyncHTTPClient | None = None
 
-    def _get_client(self) -> Mistral:
+    def _get_client(
+        self, snapshot: PlatformCredentialSnapshot | None = None
+    ) -> Mistral:
+        """The SDK client; ``snapshot`` sets the redirect rule of the request
+        about to carry it: an API key follows redirects, a user token never.
+        """
         if self._client is None:
-            self._http_client = VibeAsyncHTTPClient(
-                verify=build_ssl_context(), follow_redirects=True
-            )
+            # The credential travels per request (``http_headers``).
+            self._http_client = VibeAsyncHTTPClient(verify=build_ssl_context())
             self._client = Mistral(
-                api_key=self._api_key,
-                server_url=self._server_url,
-                async_client=self._http_client,
+                api_key="", server_url=self._server_url, async_client=self._http_client
             )
+        if snapshot is not None and self._http_client is not None:
+            self._http_client.follow_redirects = snapshot.follows_redirects
         return self._client
 
     async def transcribe(
         self, audio_stream: AsyncIterator[bytes]
     ) -> AsyncIterator[TranscribeEvent]:
-        client = self._get_client()
         metadata = self._metadata_getter()
+        headers = {
+            "user-agent": get_user_agent("mistral"),
+            "x-metadata": json.dumps(metadata),
+        }
+        snapshot = await resolve_snapshot(self._credentials, self._server_url)
+        if isinstance(snapshot, PlatformCredentialRequired):
+            yield TranscribeError(message=_credential_error(snapshot))
+            return
+        client = self._get_client(snapshot)
+        headers.update(snapshot.headers)
         completed = False
         stream_ended = False
 
@@ -80,10 +102,7 @@ class MistralTranscribeClient:
                 model=self._model_name,
                 audio_format=self._audio_format,
                 target_streaming_delay_ms=self._target_streaming_delay_ms,
-                http_headers={
-                    "user-agent": get_user_agent("mistral"),
-                    "x-metadata": json.dumps(metadata),
-                },
+                http_headers=headers,
             ):
                 if isinstance(event, RealtimeTranscriptionSessionCreated):
                     yield TranscribeSessionCreated(request_id=event.session.request_id)
@@ -131,3 +150,17 @@ class MistralTranscribeClient:
         finally:
             if http_client is not None:
                 await http_client.aclose()
+
+
+def _process_credentials(api_key_env_var: str) -> PlatformCredentialProvider:
+    from vibe.app_server._credential_selection import cli_process_credentials
+
+    return cli_process_credentials(api_key_env_var)
+
+
+def _credential_error(required: PlatformCredentialRequired) -> str:
+    if required.reason == "missing":
+        return "No Mistral credential: set an API key or sign in"
+    if required.reason == "unauthorized_after_refresh":
+        return UNAUTHORIZED_AFTER_REFRESH_MESSAGE
+    return "Mistral sign-in required: sign in again"

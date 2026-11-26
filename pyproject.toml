@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.25.4"
+version = "3.1.5"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,10 +18,11 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
-    "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Utilities",
@@ -29,104 +30,104 @@ classifiers = [
 dependencies = [
     "agent-client-protocol==0.11.0",
     "annotated-types==0.7.0",
-    "anyio==4.14.1",
+    "anyio==4.15.1",
     "attrs==26.1.0",
+    "authlib==1.9.1",
     "beautifulsoup4==4.14.3",
+    "brotli==1.2.1 ; platform_python_implementation == 'CPython'",
+    "brotlicffi==1.2.1.0 ; platform_python_implementation != 'CPython'",
     "cachetools==7.0.6",
-    "certifi==2026.7.22",
-    "cffi==2.0.0",
+    "certifi==2026.10.19",
+    "cffi==2.1.1",
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
+    "croniter==6.2.4",
     "cryptography==50.0.0",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
-    "gitpython==3.1.58",
+    "gitpython==3.2.1",
     "giturlparse==0.15.0",
-    "google-auth==2.49.2",
+    "google-auth==2.62.0",
     "googleapis-common-protos==1.74.0",
     "h11==0.16.0",
     "httpcore==1.0.9",
+    "httpcore2==2.16.0 ; sys_platform != 'emscripten'",
     "httpx==0.28.1",
-    "httpx-sse==0.4.3",
+    "httpx2==2.16.0",
+    "httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'",
     "humanize==4.16.0",
     "idna==3.18",
-    "importlib-metadata==8.7.1",
     "jaraco-classes==3.4.0",
     "jaraco-context==6.1.2",
     "jaraco-functools==4.4.0",
     "jeepney==0.9.0 ; sys_platform == 'linux'",
+    "joserfc==1.7.7",
     "jsonpatch==1.33",
     "jsonpath-python==1.1.5",
     "jsonpointer==3.1.1",
     "jsonschema==4.26.0",
     "jsonschema-specifications==2025.9.1",
     "keyring==25.7.0",
-    "linkify-it-py==2.1.0",
-    "markdown-it-py==4.0.0",
     "markdownify==1.2.3",
-    "mcp==1.28.1",
-    "mdit-py-plugins==0.5.0",
-    "mdurl==0.1.2",
-    "mistralai==2.6.0",
-    "mistralai-vibe-local-harness==0.4.5",
+    "mcp==2.3.0",
+    "mcp-types==2.3.0",
+    "miniaudio==1.73",
+    "mistralai==3.5.0",
+    "mistralai-vibe-harness==0.1.22",
     "more-itertools==11.0.2",
-    "opentelemetry-api==1.39.1",
-    "opentelemetry-exporter-otlp-proto-common==1.39.1",
-    "opentelemetry-exporter-otlp-proto-http==1.39.1",
-    "opentelemetry-proto==1.39.1",
-    "opentelemetry-sdk==1.39.1",
-    "opentelemetry-semantic-conventions==0.60b1",
-    "packaging==26.2",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-exporter-http-transport==0.66b1",
+    "opentelemetry-exporter-otlp-common==0.66b1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-semantic-conventions==0.66b1",
+    "packaging==26.3",
     "pexpect==4.9.0",
-    "platformdirs==4.9.6",
     "protobuf==6.33.6",
     "ptyprocess==0.7.0",
-    "pyasn1==0.6.4",
+    "pyasn1==0.6.5",
     "pyasn1-modules==0.4.2",
     "pycparser==3.0 ; implementation_name != 'PyPy'",
-    "pydantic==2.13.4",
-    "pydantic-core==2.46.4",
+    "pydantic==2.14.3",
+    "pydantic-core==2.50.4",
     "pydantic-settings==2.14.2",
-    "pygments==2.20.0",
-    "pyjwt==2.13.0",
-    "pyperclip==1.11.0",
+    "pyjwt==2.15.1",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "python-multipart==0.0.32",
-    "pywin32==311 ; sys_platform == 'win32'",
+    "pywin32==312 ; sys_platform == 'win32'",
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
-    "pywinpty==3.0.5 ; sys_platform == 'win32'",
+    "pywinpty==3.1.2 ; sys_platform == 'win32'",
     "pyyaml==6.0.3",
     "referencing==0.37.0",
     "requests==2.34.2",
     "rfc8785==0.1.4",
-    "rich==15.0.0",
-    "rpds-py==0.30.0",
+    "rpds-py==2026.9.1",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
-    "sentry-sdk==2.64.0",
-    "setproctitle==1.3.7",
+    "sentry-sdk==2.73.0",
+    "setproctitle==1.3.8",
     "six==1.17.0",
     "smmap==5.0.3",
-    "sounddevice==0.5.5",
-    "soupsieve==2.8.4",
+    "socksio==1.0.0",
+    "soupsieve==4.0",
     "sse-starlette==3.4.1",
     "starlette==1.3.1",
-    "textual==8.2.8",
-    "textual-speedups==0.2.1",
+    "structlog==26.1.0",
+    "tenacity==9.2.1",
     "tomli-w==1.2.0",
     "tree-sitter==0.26.0",
     "tree-sitter-bash==0.25.1",
     "truststore==0.10.4",
-    "typing-extensions==4.15.0",
-    "typing-inspection==0.4.2",
-    "uc-micro-py==2.0.0",
-    "urllib3==2.7.0",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.5",
+    "urllib3==2.8.0",
+    "uuid-utils==1.2.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
-    "watchfiles==1.2.0",
+    "watchfiles==1.3.0",
     "websockets==16.0",
-    "zipp==3.23.1",
-    "zstandard==0.25.0",
 ]
 
 [project.urls]
@@ -136,51 +137,99 @@ Issues = "https://github.com/mistralai/mistral-vibe/issues"
 Documentation = "https://github.com/mistralai/mistral-vibe#readme"
 
 [build-system]
-requires = ["hatchling==1.31.0", "hatch-vcs==0.5.0", "editables==0.6"]
-build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
+requires = ["maturin==1.14.1"]
+build-backend = "maturin_backend"
+backend-path = ["build_backend"]
 
 [[tool.uv.index]]
 default = true
 name = "pypi"
 url = "https://pypi.org/simple"
 
-[tool.hatch.build.targets.wheel]
-include = ["vibe/"]
+# CI puts the private Gemfury index first, and Gemfury has Harness builds that
+# are not on PyPI. Pinning the index keeps every lock on PyPI releases, which
+# the public release needs. The release sync renames this index to `pypi`.
+[tool.uv.sources]
+mistralai-vibe-harness = { index = "pypi" }
+
+[tool.maturin]
+manifest-path = ".native-build/harness-core/Cargo.toml"
+module-name = "mistralai_vibe_local_harness._native"
+python-source = "."
+python-packages = ["vibe", "mistralai_vibe_local_harness"]
+include = [
+    { path = "vibe/_bin/*", format = "wheel" },
+    # The runtime is staged during the build and ignored by Git. Include it
+    # explicitly so Maturin does not filter its Python sources out.
+    { path = "mistralai_vibe_local_harness/*", format = "wheel" },
+    { path = "mistralai_vibe_local_harness/**/*", format = "wheel" },
+]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "vibe/cli-rust/**",
+]
+features = ["extension-module"]
 
 [project.scripts]
-vibe = "vibe.cli.entrypoint:main"
+vibe = "vibe.cli.launcher:main"
 vibe-acp = "vibe.acp.entrypoint:main"
 vibe-app-server = "vibe.app_server.stdio:main"
 
 [tool.uv]
+constraint-dependencies = [
+  "filelock>=4.2.1",
+  "setuptools>=84.1.0",
+  "virtualenv>=21.14.13",
+]
 exclude-newer = "2 days"
-exclude-newer-package = { mistralai-vibe-local-harness = false }
+exclude-newer-package = { "mistralai" = false }
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "build_backend/**/*.py" },
+    { file = "vibe/cli-rust/Cargo.toml" },
+    { file = "vibe/cli-rust/Cargo.lock" },
+    { file = "vibe/cli-rust/src/**/*.rs" },
+    { file = "vibe/cli-rust/build.rs" },
+    { file = "vibe/whats_new/*.md" },
+    { file = "harness/core/Cargo.toml" },
+    { file = "harness/core/Cargo.lock" },
+    { file = "harness/core/src/**/*.rs" },
+    { file = "harness/runtimes/python/python/mistralai_vibe_local_harness/**/*" },
+    # Selects which editable build the backend produces; see build_backend.
+    { env = "VIBE_EXTERNAL_HARNESS" },
+]
 index-strategy = "first-index"
 package = true
 required-version = ">=0.8.0"
-override-dependencies = [
-    # pytest-textual-snapshot exact-pins syrupy==4.8.0, which caps pytest<9.
-    # syrupy 4.8.0 runs fine on pytest 9 (generation, comparison and diffs all
-    # verified); the cap is conservative, so override it to clear GHSA-6w46-j5rx-g56g.
-    "pytest>=9.0.3",
-]
+
+[tool.uv.build-backend]
+# Read only by the builds the backend hands to uv_build: the sdist (the backend
+# appends the Harness sources) and an editable install with VIBE_EXTERNAL_HARNESS=1.
+# Wheels go through Maturin and ignore this table.
+module-name = "vibe"
+module-root = ""
+source-include = ["build_backend/**", "LICENSE", "rust-toolchain.toml"]
+source-exclude = ["vibe/_bin", "vibe/cli-rust/target"]
 
 [dependency-groups]
 dev = [
     "cryptography>=48.0.0",
+    "maturin==1.14.1",
     "pre-commit-uv>=4.3.0",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
     "pyright>=1.1.403",
-    "pytest>=8.3.5",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.2.0",
-    "pytest-textual-snapshot>=1.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
+    "pyte>=0.8.2",
+    # respx models its routes on HTTPX; Vibe's clients are HTTPX2 (see
+    # tests/stubs/respx_httpx2.py).
+    "httpx>=0.28.1,<1",
     "respx>=0.22.0",
+    "rich>=14.0.0",
     "ruff>=0.15.18",
     "tomlkit>=0.13.0",
     "twine>=5.0.0",
@@ -191,27 +240,28 @@ dev = [
 build = [
     "altgraph==0.17.5",
     "macholib==1.16.4 ; sys_platform == 'darwin'",
-    "packaging==26.2",
+    "packaging==26.3",
     "pefile==2024.8.26 ; sys_platform == 'win32'",
     "pyinstaller==6.20.0",
     "pyinstaller-hooks-contrib==2026.4",
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
-    "setuptools==83.0.0",
+    "setuptools==84.2.1",
 ]
 
 [tool.pyright]
 pythonVersion = "3.12"
+# Pydantic 2.14 types TypeAdapter and FieldInfo.annotation with PEP 747
+# TypeForm, which pyright accepts only behind this flag.
+enableExperimentalFeatures = true
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 
-include = ["vibe/**/*.py", "tests/**/*.py"]
-exclude = ["pyinstaller/"]
+include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py", "pyinstaller/unified_runtime.py"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff]
-include = ["vibe/**/*.py", "tests/**/*.py"]
-exclude = ["pyinstaller/"]
+include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py", "pyinstaller/unified_runtime.py"]
 line-length = 88
 target-version = "py312"
 preview = true
@@ -247,7 +297,7 @@ ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["vibe"]
+known-first-party = ["vibe", "mistralai_vibe_local_harness"]
 force-sort-within-sections = true
 split-on-trailing-comma = false
 combine-as-imports = true
@@ -269,10 +319,14 @@ max-nested-blocks = 5
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1"
+# client-e2e is a standalone harness with its own pytest.ini; the main suite must not collect it.
+addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1 --ignore=client-e2e"
 timeout = 10
 markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",
+    "unified_default: e2e test spawning the unflagged unified-default binary",
+    "both_paths: backend contract test run with the Session API switch off and on",
+    "one_path: backend contract test run with the Session API switch on only",
 ]
 filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork

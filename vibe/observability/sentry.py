@@ -1,40 +1,35 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from enum import StrEnum, auto
 import errno
+import os
 import platform
 import re
 from typing import TYPE_CHECKING, Any, cast
+import uuid
 
 from vibe import __version__
+from vibe.utils.secrets import redact
 
 if TYPE_CHECKING:
+    import asyncio
+
     from sentry_sdk.types import Event, Hint
 
-_CLI_SENTRY_DSN = None
+# Injected at release time by scripts/ci/inject-sentry-dsn.sh, for vibe-acp only.
 _ACP_SENTRY_DSN = None
 
+# The terminal UI hands its own DSN to the app server it spawns: one project per launch.
+CLI_CRASH_REPORT_DSN_ENV = "VIBE_CRASH_REPORT_DSN"
+_cli_dsn: str | None = None
 
-class SentryTarget(StrEnum):
-    CLI = auto()
-    ACP = auto()
+# Random per process and never persisted: alerts count affected launches, not events.
+_LAUNCH_ID = str(uuid.uuid4())
 
-    @property
-    def dsn(self) -> str | None:
-        match self:
-            case SentryTarget.CLI:
-                return _CLI_SENTRY_DSN
-            case SentryTarget.ACP:
-                return _ACP_SENTRY_DSN
-
-    @property
-    def server_name(self) -> str:
-        match self:
-            case SentryTarget.CLI:
-                return "vibe-cli"
-            case SentryTarget.ACP:
-                return "vibe-acp"
+# Set once init returns: mid-import, `sys.modules` holds a half-built SDK module.
+_started = False
+# The app server for the terminal clients reports exceptions only, never error logs.
+_cli = False
 
 
 # Benign exceptions to drop before reporting: clean Ctrl-C quit, and a broken
@@ -48,20 +43,6 @@ _FILTERED_EXCEPTIONS: tuple[type[BaseException], ...] = (
 _FILTERED_EXCEPTION_NAMES: frozenset[str] = frozenset({
     "RealtimeTranscriptionException"
 })
-
-# Mistral-owned host: BackendError against it stays reported (it flags real
-# API/inference faults). Errors from other endpoints are dropped — they are
-# usually the user's own provider config and can carry user data.
-_MISTRAL_ENDPOINT_HOST = "api.mistral.ai"
-
-
-def _is_third_party_backend_error(exc: BaseException) -> bool:
-    if type(exc).__name__ != "BackendError":
-        return False
-    endpoint = getattr(exc, "endpoint", "")
-    if not isinstance(endpoint, str):
-        return False
-    return _MISTRAL_ENDPOINT_HOST not in endpoint
 
 
 def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
@@ -119,19 +100,44 @@ def _is_benign_oserror(exc: OSError) -> bool:
     # EIO on stdio when the terminal/pty is already gone.
     if exc.errno == errno.EIO and exc.filename is None:
         return True
-    # Environmental filesystem faults, not Vibe bugs: disk full / permission denied.
-    return exc.errno in {errno.ENOSPC, errno.EACCES}
+    # Environmental filesystem faults: disk full, permission denied, read-only mount.
+    if exc.errno in {errno.ENOSPC, errno.EACCES, errno.EROFS}:
+        return True
+    # The user deleted the directory Vibe runs in, so every cwd lookup fails.
+    return (
+        isinstance(exc, FileNotFoundError) and exc.filename is None and _cwd_is_gone()
+    )
+
+
+def _cwd_is_gone() -> bool:
+    try:
+        os.getcwd()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _is_environmental(exc: BaseException) -> bool:
+    """The machine or the network broke (offline, DNS, proxy, TLS, timeout), not Vibe."""
+    if isinstance(exc, ConnectionError):
+        return True
+    if isinstance(exc, OSError) and _is_benign_oserror(exc):
+        return True
+    # Matched by name so the filter never imports the HTTP client.
+    return any(
+        cls.__name__ == "TransportError"
+        and cls.__module__.partition(".")[0] in {"httpx", "httpx2"}
+        for cls in type(exc).__mro__
+    )
 
 
 def _is_benign_exception(exc: BaseException) -> bool:
     if isinstance(exc, _FILTERED_EXCEPTIONS):
         return True
-    # Walk the cause/context chain: filtered types are often wrapped (e.g. a
-    # BackendError re-raised as a generic RuntimeError).
+    # Walk the cause/context chain: filtered types are often wrapped in a
+    # generic RuntimeError.
     if any(
-        type(e).__name__ in _FILTERED_EXCEPTION_NAMES
-        or _is_third_party_backend_error(e)
-        for e in _exception_chain(exc)
+        type(e).__name__ in _FILTERED_EXCEPTION_NAMES for e in _exception_chain(exc)
     ):
         return True
     # Clean exits (sys.exit(0) / sys.exit(None)) propagating through asyncio tasks.
@@ -156,7 +162,21 @@ def _scrub_pii(event: Event) -> None:
 
     event_dict.pop("breadcrumbs", None)
     for key, value in event_dict.items():
-        event_dict[key] = scrub_paths(value)
+        event_dict[key] = scrub_paths(_redact_secrets(value))
+
+
+def _redact_secrets(value: Any) -> Any:
+    match value:
+        case str():
+            return redact(value)
+        case dict():
+            return {key: _redact_secrets(item) for key, item in value.items()}
+        case list():
+            return [_redact_secrets(item) for item in value]
+        case tuple():
+            return tuple(_redact_secrets(item) for item in value)
+        case _:
+            return value
 
 
 def _before_send(event: Event, hint: Hint) -> Event | None:
@@ -174,27 +194,62 @@ def _before_send(event: Event, hint: Hint) -> Event | None:
     return event
 
 
-def init_sentry(
-    *,
-    enabled: bool,
-    headless: bool,
-    tags: Mapping[str, str],
-    target: SentryTarget = SentryTarget.CLI,
-) -> bool:
+def _before_send_cli(event: Event, hint: Hint) -> Event | None:
+    exc_info = hint.get("exc_info")
+    if exc_info is not None and any(
+        _is_environmental(e) for e in _exception_chain(exc_info[1])
+    ):
+        return None
+    if _before_send(event, hint) is None:
+        return None
+    user = cast(dict[str, Any], event).setdefault("user", {})
+    user.pop("ip_address", None)
+    user["id"] = _LAUNCH_ID
+    return event
+
+
+def claim_cli_crash_report_dsn() -> None:
+    """Takes the terminal UI's DSN out of the environment, so tools never inherit it."""
+    global _cli_dsn
+    _cli_dsn = os.environ.pop(CLI_CRASH_REPORT_DSN_ENV, None) or None
+
+
+def cli_crash_reporting_available() -> bool:
+    return _cli_dsn is not None
+
+
+def init_sentry(*, enabled: bool, headless: bool, tags: Mapping[str, str]) -> bool:
+    return _init(enabled=enabled, headless=headless, tags=tags, cli=False)
+
+
+def init_cli_sentry(*, enabled: bool, headless: bool, tags: Mapping[str, str]) -> bool:
+    return _init(enabled=enabled, headless=headless, tags=tags, cli=True)
+
+
+def _init(*, enabled: bool, headless: bool, tags: Mapping[str, str], cli: bool) -> bool:
+    global _started, _cli
     if not enabled:
+        _close_sentry()
+        return False
+    dsn = _cli_dsn if cli else _ACP_SENTRY_DSN or os.environ.get("SENTRY_DSN")
+    # The SDK installs its integrations even without a DSN; dev builds skip it.
+    if not dsn:
         return False
 
     import sentry_sdk
-    from sentry_sdk.integrations.asyncio import AsyncioIntegration
+
+    if sentry_sdk.is_initialized():
+        _started = True
+        return True
 
     sentry_sdk.init(
-        dsn=target.dsn,
+        dsn=dsn,
         release=f"vibe@{__version__}",
-        integrations=[AsyncioIntegration()],
+        integrations=_cli_integrations() if cli else _acp_integrations(),
         auto_enabling_integrations=False,
-        server_name=target.server_name,
+        server_name="vibe-app-server" if cli else "vibe-acp",
         include_local_variables=False,
-        before_send=_before_send,
+        before_send=_before_send_cli if cli else _before_send,
     )
     if not sentry_sdk.is_initialized():
         return False
@@ -204,9 +259,39 @@ def init_sentry(
         "os": platform.system().lower(),
         "arch": platform.machine().lower(),
     } | dict(tags)
+    # The global scope, not the context-local one: init may run in a worker thread.
+    scope = sentry_sdk.get_global_scope()
     for key, value in global_tags.items():
-        sentry_sdk.set_tag(key, value)
+        scope.set_tag(key, value)
+    _started = True
+    _cli = cli
     return True
+
+
+def _acp_integrations() -> list[Any]:
+    from sentry_sdk.integrations.asyncio import AsyncioIntegration
+
+    return [AsyncioIntegration()]
+
+
+def _cli_integrations() -> list[Any]:
+    from sentry_sdk.integrations.logging import LoggingIntegration
+
+    # Error logs are not crashes: only exceptions become Sentry events.
+    return [LoggingIntegration(level=None, event_level=None)]
+
+
+def _close_sentry() -> None:
+    global _started
+    # Never started means nothing to close: keep the disabled path import-free.
+    if not _started:
+        return
+    import sentry_sdk
+
+    _started = False
+    if sentry_sdk.is_initialized():
+        sentry_sdk.get_client().close()
+        sentry_sdk.get_global_scope().set_client(None)
 
 
 def capture_sentry_exception(
@@ -215,7 +300,10 @@ def capture_sentry_exception(
     fatal: bool,
     tags: dict[str, str] | None = None,
     extras: dict[str, Any] | None = None,
+    fingerprint: list[str] | None = None,
 ) -> None:
+    if not _started:
+        return
     import sentry_sdk
 
     if not sentry_sdk.is_initialized():
@@ -223,6 +311,8 @@ def capture_sentry_exception(
 
     with sentry_sdk.new_scope() as scope:
         scope.set_tag("fatal", "true" if fatal else "false")
+        if fingerprint is not None:
+            scope.fingerprint = fingerprint
         for key, value in (tags or {}).items():
             scope.set_tag(key, value)
         for key, value in (extras or {}).items():
@@ -230,4 +320,35 @@ def capture_sentry_exception(
         scope.capture_exception(error)
 
 
-__all__ = ["SentryTarget", "capture_sentry_exception", "init_sentry", "scrub_paths"]
+def capture_cli_exception(
+    error: BaseException, *, tags: dict[str, str], fingerprint: list[str] | None = None
+) -> None:
+    """Reports a failure the code logs and survives; vibe-acp gets it from the log."""
+    if _cli:
+        capture_sentry_exception(error, fatal=False, tags=tags, fingerprint=fingerprint)
+
+
+def report_unhandled_asyncio_errors(loop: asyncio.AbstractEventLoop) -> None:
+    """Reports only what asyncio found unhandled: an unawaited task, a failed callback."""
+
+    def handle(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        if isinstance(error := context.get("exception"), Exception):
+            capture_sentry_exception(
+                error, fatal=False, tags={"vibe_boundary": "asyncio"}
+            )
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handle)
+
+
+__all__ = [
+    "CLI_CRASH_REPORT_DSN_ENV",
+    "capture_cli_exception",
+    "capture_sentry_exception",
+    "claim_cli_crash_report_dsn",
+    "cli_crash_reporting_available",
+    "init_cli_sentry",
+    "init_sentry",
+    "report_unhandled_asyncio_errors",
+    "scrub_paths",
+]

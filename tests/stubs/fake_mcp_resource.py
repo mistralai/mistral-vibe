@@ -19,12 +19,13 @@ class FakeMCPResource:
         self.state = state if state is not None else MCPState()
         self.auth_url = auth_url
         self.tool_count = tool_count
-        # What the real resource recomputes and applies on refresh/toggle.
+        # What the real resource recomputes and applies on refresh/toggle/connect.
         self._mutated_state = mutated_state
         self.read_calls = 0
         self.auth_url_calls: list[str] = []
         self.refresh_calls: list[str] = []
         self.toggle_calls: list[tuple[str, str, bool, str | None]] = []
+        self.connect_calls: list[str] = []
 
     async def read(self) -> MCPState:
         self.read_calls += 1
@@ -38,6 +39,10 @@ class FakeMCPResource:
         self.refresh_calls.append(name)
         self._apply_mutation()
         return self.tool_count
+
+    async def connect_connector(self, name: str) -> MCPState:
+        self.connect_calls.append(name)
+        return self._apply_mutation()
 
     async def toggle(
         self,

@@ -5,9 +5,16 @@ from vibe.app_server._account import (
     AccountGatewayUnavailable,
     WhoAmIResult,
 )
+from vibe.core.platform_auth import (
+    PlatformCredentialProvider,
+    PlatformCredentialSnapshot,
+    PlatformCredentialTarget,
+)
 
 
 class FakeAccountGateway:
+    """Records ``(base_url, Authorization)``: what a real gateway would send."""
+
     def __init__(
         self,
         result: WhoAmIResult | None = None,
@@ -21,9 +28,19 @@ class FakeAccountGateway:
         self.calls: list[tuple[str, str]] = []
 
     async def read(
-        self, *, base_url: str, api_key: str, timeout: float | None = None
+        self,
+        *,
+        base_url: str,
+        credentials: PlatformCredentialProvider,
+        timeout: float | None = None,
     ) -> WhoAmIResult:
-        self.calls.append((base_url, api_key))
+        resolved = await credentials.resolve(PlatformCredentialTarget(base_url))
+        bearer = (
+            resolved.headers.get("Authorization", "").removeprefix("Bearer ")
+            if isinstance(resolved, PlatformCredentialSnapshot)
+            else ""
+        )
+        self.calls.append((base_url, bearer))
         if self.unauthorized:
             raise AccountGatewayUnauthorized()
         if self.unavailable:

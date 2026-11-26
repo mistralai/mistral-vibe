@@ -7,7 +7,7 @@ import types
 from typing import Any, Literal, TypedDict, cast
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
-import httpx
+import httpx2
 
 from vibe.observability.logging import logger
 from vibe.setup.auth.browser_sign_in_gateway import (
@@ -38,7 +38,14 @@ class ExchangePayload(TypedDict, total=False):
     api_key: str
 
 
+HTTP_FORBIDDEN = 403
 HTTP_GONE = 410
+API_KEYS_CREATE_UNAUTHORIZED_ERROR_CODE = 9_004
+WORKSPACE_NOT_ELIGIBLE_MESSAGE = (
+    "Your current workspace can't be used for Mistral Vibe. "
+    "Sign in again and select another workspace in the browser, "
+    "or contact your administrator."
+)
 
 
 class HttpBrowserSignInGateway(BrowserSignInGateway):
@@ -84,7 +91,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
                     "code_challenge_method": "S256",
                 },
             )
-        except httpx.HTTPError as err:
+        except httpx2.HTTPError as err:
             logger.warning(
                 "Browser sign-in start request failed for api_base_url=%s: %s",
                 self._api_base_url,
@@ -161,7 +168,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
         )
         try:
             response = await self._ensure_client().get(validated_poll_url)
-        except httpx.HTTPError as err:
+        except httpx2.HTTPError as err:
             raise BrowserSignInError(message, code=code) from err
 
         if response.status_code == HTTP_GONE:
@@ -195,7 +202,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
                 f"{self._api_base_url}/vibe/sign-in/{process_id}/exchange",
                 json={"exchange_token": exchange_token, "code_verifier": code_verifier},
             )
-        except httpx.HTTPError as err:
+        except httpx2.HTTPError as err:
             logger.warning(
                 "Browser sign-in exchange request failed for api_base_url=%s: %s",
                 self._api_base_url,
@@ -211,6 +218,8 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
                 self._api_base_url,
                 _build_safe_response_error_detail(response),
             )
+            if _is_workspace_api_key_creation_denied(response):
+                raise BrowserSignInError(WORKSPACE_NOT_ELIGIBLE_MESSAGE, code=code)
             raise BrowserSignInError(message, code=code)
 
         raw_payload = _response_json_or_raise(response, message=message, code=code)
@@ -306,7 +315,7 @@ def _build_start_payload_log_details(payload: Mapping[str, object]) -> tuple[str
 
 
 def _response_json_or_raise(
-    response: httpx.Response, *, message: str, code: BrowserSignInErrorCode
+    response: httpx2.Response, *, message: str, code: BrowserSignInErrorCode
 ) -> dict[str, Any]:
     try:
         payload = response.json()
@@ -319,7 +328,22 @@ def _response_json_or_raise(
     return dict(payload)
 
 
-def _build_safe_response_error_detail(response: httpx.Response) -> str:
+def _is_workspace_api_key_creation_denied(response: httpx2.Response) -> bool:
+    if response.status_code != HTTP_FORBIDDEN:
+        return False
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("error_code") == API_KEYS_CREATE_UNAUTHORIZED_ERROR_CODE
+    )
+
+
+def _build_safe_response_error_detail(response: httpx2.Response) -> str:
     try:
         payload = response.json()
     except ValueError:

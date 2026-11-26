@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import stat
 
 from dotenv import set_key, unset_key
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
-from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfigSchema
+from vibe.core.config import (
+    DEFAULT_PROVIDERS,
+    EnvValueOrigin,
+    ProviderConfig,
+    VibeConfigSchema,
+    forget_env_value_origin,
+    record_env_value_origin,
+)
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -16,11 +24,37 @@ from vibe.core.types import Backend
 from vibe.core.utils.concurrency import run_sync
 from vibe.observability.logging import logger
 from vibe.utils.keyring import delete_api_key_from_keyring, set_api_key_in_keyring
+from vibe.utils.platform import is_windows
+
+_GROUP_OTHER = 0o077
 
 
 def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+    # python-dotenv creates the file at the umask default, so pre-create it
+    # owner-only; a pre-existing permissive copy is tightened before the write
+    # (so it never briefly holds the new key world-readable) and again after.
+    GLOBAL_ENV_FILE.path.touch(mode=0o600, exist_ok=True)
+    _restrict_env_file_permissions()
     set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
+    _restrict_env_file_permissions()
+
+
+def _restrict_env_file_permissions() -> None:
+    """Keep the plaintext ``.env`` fallback owner-only (create-or-tighten 0600).
+
+    The directory itself is already covered by ``bootstrap_vibe_home``'s 0700;
+    this closes the file-mode gap python-dotenv's umask default leaves open.
+    """
+    if is_windows():
+        return
+    path = GLOBAL_ENV_FILE.path
+    try:
+        mode = stat.S_IMODE(os.lstat(path).st_mode)
+        if mode & _GROUP_OTHER:
+            os.chmod(path, mode & ~_GROUP_OTHER)
+    except OSError as err:
+        logger.warning("Could not restrict .env file permissions: %s", err)
 
 
 def _remove_api_key_from_env_file(env_key: str) -> None:
@@ -35,16 +69,9 @@ def _get_mistral_provider() -> ProviderConfig:
     )
 
 
-def _load_onboarding_provider() -> ProviderConfig:
-    from vibe.setup.onboarding.context import OnboardingContext
-
-    return OnboardingContext.load().provider
-
-
-def resolve_api_key_provider(provider: ProviderConfig | None = None) -> ProviderConfig:
-    resolved_provider = provider or _load_onboarding_provider()
-    if resolved_provider.api_key_env_var:
-        return resolved_provider
+def resolve_api_key_provider(provider: ProviderConfig) -> ProviderConfig:
+    if provider.api_key_env_var:
+        return provider
     return _get_mistral_provider()
 
 
@@ -193,6 +220,7 @@ def persist_api_key(
     *,
     launch_context: LaunchContext | None = None,
     custom_domain: bool = False,
+    orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
 ) -> str:
     env_key = provider.api_key_env_var
     if not env_key:
@@ -207,8 +235,13 @@ def persist_api_key(
         try:
             _save_api_key_to_env_file(env_key, api_key)
         except (OSError, ValueError) as err:
+            # Nothing persisted, so the value lives only in this process's
+            # environment; /status reports it as the process environment.
             return f"save_error:{err}"
+        else:
+            record_env_value_origin(env_key, api_key, EnvValueOrigin.VIBE_HOME_ENV_FILE)
     else:
+        record_env_value_origin(env_key, api_key, EnvValueOrigin.OS_KEYRING)
         # The key is safely stored in the keyring; drop any stale plaintext copy.
         try:
             _remove_api_key_from_env_file(env_key)
@@ -218,9 +251,10 @@ def persist_api_key(
             )
     if provider.backend == Backend.MISTRAL:
         try:
-            orchestrator = run_sync(build_default_orchestrator())
+            config_orchestrator = orchestrator or run_sync(build_default_orchestrator())
             telemetry = TelemetryClient(
-                config_getter=lambda: orchestrator.config, launch_context=launch_context
+                config_getter=lambda: config_orchestrator.config,
+                launch_context=launch_context,
             )
             telemetry.send_onboarding_api_key_added(custom_domain=custom_domain)
         except Exception:
@@ -247,5 +281,6 @@ def remove_api_key(provider: ProviderConfig) -> None:
 
     _remove_api_key_from_env_file(env_key)
     os.environ.pop(env_key, None)
+    forget_env_value_origin(env_key)
     if keyring_error is not None:
         raise keyring_error

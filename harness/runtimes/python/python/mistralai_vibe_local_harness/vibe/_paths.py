@@ -1,0 +1,36 @@
+"""Platform-aware path conversion for Vibe Runtime adapters."""
+
+from __future__ import annotations
+
+from nturl2path import url2pathname as windows_url2pathname
+import sys
+from urllib.parse import unquote, urlparse
+
+
+def is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+# The mode for directories only their user may open. On Windows, CPython turns
+# mkdir(mode=0o700) into an ACL for the token's default owner, which is
+# Administrators in an elevated process: the same user, unelevated, then cannot
+# open the directory. Any other mode inherits the user profile's ACL, which is
+# already private.
+PRIVATE_DIRECTORY_MODE = 0o777 if sys.platform == "win32" else 0o700
+
+
+def file_uri_to_path(uri: str) -> str:
+    """Convert a file URI into a path using the current platform's rules."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ValueError(f"Expected a file URI: {uri!r}")
+
+    encoded_path = parsed.path
+    if parsed.netloc and parsed.netloc != "localhost":
+        encoded_path = f"//{parsed.netloc}{encoded_path}"
+    if is_windows():
+        return windows_url2pathname(encoded_path)
+    return unquote(encoded_path)
+
+
+__all__ = ["file_uri_to_path"]

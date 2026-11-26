@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import os
 from pathlib import Path
 import tomllib
@@ -9,7 +10,13 @@ import keyring
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 import pytest
 
-from vibe.core.config import ProviderConfig
+from vibe.core.config import (
+    EnvValueOrigin,
+    ProviderConfig,
+    env_value_origin,
+    record_env_value_origin,
+)
+import vibe.core.config.vibe_schema as vibe_schema
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.types import Backend
 from vibe.setup.auth import api_key_persistence
@@ -19,6 +26,17 @@ from vibe.setup.auth.api_key_persistence import (
     remove_api_key,
 )
 from vibe.utils.api_keys import resolve_api_key
+
+
+@pytest.fixture(autouse=True)
+def _restore_env_value_origins() -> Iterator[None]:
+    """The origin record is process-global; a test that records a key must
+    not leave it behind for whichever test reads the record next.
+    """
+    snapshot = dict(vibe_schema._ENV_VALUE_ORIGINS)
+    yield
+    vibe_schema._ENV_VALUE_ORIGINS.clear()
+    vibe_schema._ENV_VALUE_ORIGINS.update(snapshot)
 
 
 def _provider(*, api_key_env_var: str = "CUSTOM_API_KEY") -> ProviderConfig:
@@ -156,6 +174,50 @@ def test_persist_provider_does_not_pin_field_defaults_into_mistral_entry(
     assert "project_id" not in mistral_entry
     assert "region" not in mistral_entry
     assert "extra_headers" not in mistral_entry
+    assert "preserve_api_base" not in mistral_entry
+
+
+@pytest.mark.parametrize(("setting", "expected"), [(None, None), (False, False)])
+def test_persist_provider_does_not_pin_the_gateway_tool_result_images(
+    config_dir: Path, setting: bool | None, expected: bool | None
+) -> None:
+    """A gateway provider's tool_result_images comes from its api_base when
+    unset: persisting it writes the setting only when it was set, an explicit
+    false included.
+    """
+    config_file = config_dir / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+    gateway = ProviderConfig(
+        name="internal-ai-gateway",
+        api_base="https://internal-ai-gateway.mistralai.com",
+        api_key_env_var="LITELLM_API_KEY",
+        tool_result_images=setting,
+    )
+
+    _ = persist_provider_to_config(gateway)
+
+    persisted = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    entry = next(
+        p for p in persisted["providers"] if p["name"] == "internal-ai-gateway"
+    )
+    assert entry.get("tool_result_images") is expected
+
+
+def test_persist_provider_round_trips_preserve_api_base(config_dir: Path) -> None:
+    """exclude_defaults=True would drop a False flag, so only True proves the
+    field survives the TOML round trip.
+    """
+    config_file = config_dir / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+
+    preserved = _mistral_provider().model_copy(
+        update={"api_base": "https://connector.acme:443/v1", "preserve_api_base": True}
+    )
+    _ = persist_provider_to_config(preserved)
+
+    persisted = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    mistral_entry = next(p for p in persisted["providers"] if p["name"] == "mistral")
+    assert mistral_entry["preserve_api_base"] is True
 
 
 def test_persist_provider_keeps_custom_browser_auth_urls(config_dir: Path) -> None:
@@ -407,3 +469,44 @@ def test_remove_surfaces_keyring_operation_error_but_still_clears_env(
 
     assert "CUSTOM_API_KEY" not in dotenv_values(GLOBAL_ENV_FILE.path)
     assert "CUSTOM_API_KEY" not in os.environ
+
+
+class TestEnvValueOriginRecord:
+    """``/status`` attributes an environment value to its real source, so
+    persistence must record where the value it mirrored came from.
+    """
+
+    def test_keyring_persist_records_keyring_origin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CUSTOM_API_KEY", "old-key")
+        monkeypatch.setattr(keyring, "set_password", lambda s, u, p: None)
+        monkeypatch.setattr(keyring, "delete_password", lambda s, u: None)
+        assert persist_api_key(_provider(), "new-key") == "completed"
+        assert env_value_origin("CUSTOM_API_KEY") is EnvValueOrigin.OS_KEYRING
+
+    def test_env_file_fallback_records_env_file_origin(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text("", encoding="utf-8")
+        monkeypatch.setenv("CUSTOM_API_KEY", "old-key")
+        monkeypatch.setattr(
+            api_key_persistence, "GLOBAL_ENV_FILE", type("G", (), {"path": env_file})()
+        )
+        monkeypatch.setattr(keyring, "set_password", _keyring_unavailable)
+        assert persist_api_key(_provider(), "new-key") == "completed"
+        assert env_value_origin("CUSTOM_API_KEY") is EnvValueOrigin.VIBE_HOME_ENV_FILE
+
+    def test_remove_forgets_the_origin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(keyring, "delete_password", lambda s, u: None)
+        monkeypatch.setenv("CUSTOM_API_KEY", "old-key")
+        record_env_value_origin("CUSTOM_API_KEY", "old-key", EnvValueOrigin.OS_KEYRING)
+
+        remove_api_key(_provider())
+
+        assert env_value_origin("CUSTOM_API_KEY") is None
+
+
+def _keyring_unavailable(service: str, username: str, password: str) -> None:
+    raise KeyringError("no backend")

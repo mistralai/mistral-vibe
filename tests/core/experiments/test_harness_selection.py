@@ -1,120 +1,109 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from vibe._experimental_harness import resolve_harness_selection
-from vibe.core.experiments.models import EvalResponse, FeatureDefinition, FeatureRule
+from vibe._experimental_harness import (
+    ExperimentalHarnessUnavailableError,
+    create_experimental_harness_host,
+    require_experimental_harness,
+)
 
 
-def _cached_response(variant: str | None) -> EvalResponse | None:
-    if variant is None:
-        return None
-    return EvalResponse(
-        features={
-            "vibe_cli_unified_harness_rollout": FeatureDefinition(
-                defaultValue="legacy", rules=[FeatureRule(force=variant)]
+class TestRequireExperimentalHarness:
+    def test_passes_when_the_runtime_loads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import vibe._experimental_harness as mod
+
+        monkeypatch.setattr(mod, "experimental_harness_available", lambda: True)
+        monkeypatch.setattr(
+            mod,
+            "create_experimental_harness_host",
+            lambda: SimpleNamespace(configure_hook_handlers=lambda _handlers: None),
+        )
+        require_experimental_harness()
+
+    def test_missing_runtime_raises_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import vibe._experimental_harness as mod
+
+        monkeypatch.setattr(mod, "experimental_harness_available", lambda: False)
+        with pytest.raises(ExperimentalHarnessUnavailableError) as excinfo:
+            require_experimental_harness()
+        message = str(excinfo.value)
+        assert "not installed" in message
+        assert "--legacy-harness" not in message
+        assert "uv tool upgrade mistral-vibe" in message
+
+    def test_incompatible_runtime_raises_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pinned harness whose Host lacks the builtin-hook registry must
+        abort the pre-serving probe: ACP cannot surface a mid-session
+        failure as a process abort, so the probe covers this case.
+        """
+        import vibe._experimental_harness as mod
+
+        monkeypatch.setattr(mod, "experimental_harness_available", lambda: True)
+        monkeypatch.setattr(
+            mod, "create_experimental_harness_host", lambda: SimpleNamespace()
+        )
+        with pytest.raises(ExperimentalHarnessUnavailableError) as excinfo:
+            require_experimental_harness()
+        message = str(excinfo.value)
+        assert "configure_hook_handlers" in message
+        assert "--legacy-harness" not in message
+
+
+class TestCreateExperimentalHarnessHost:
+    def test_import_failure_raises_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _missing_module(name: str) -> object:
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
+        monkeypatch.setattr("vibe._experimental_harness.import_module", _missing_module)
+        with pytest.raises(ExperimentalHarnessUnavailableError) as excinfo:
+            create_experimental_harness_host()
+        assert "could not be loaded" in str(excinfo.value)
+        assert "--legacy-harness" not in str(excinfo.value)
+
+    def test_incompatible_runtime_raises_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import types
+
+        def _old_runtime(name: str) -> object:
+            # A harness version without the create_harness_host factory.
+            return types.SimpleNamespace()
+
+        monkeypatch.setattr("vibe._experimental_harness.import_module", _old_runtime)
+        with pytest.raises(ExperimentalHarnessUnavailableError) as excinfo:
+            create_experimental_harness_host()
+        assert "AttributeError" in str(excinfo.value)
+
+    def test_initialization_failure_raises_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import types
+
+        def _failing_runtime(name: str) -> object:
+            module = types.SimpleNamespace(
+                create_harness_host=lambda: (_ for _ in ()).throw(
+                    RuntimeError("native extension incompatible")
+                )
             )
-        }
-    )
+            return module
 
-
-@pytest.fixture(autouse=True)
-def _harness_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The unified harness package is not installed in CI, so force
-    availability for tests that expect unified selection.
-    """
-    import vibe._experimental_harness as mod
-
-    monkeypatch.setattr(mod, "experimental_harness_available", lambda: True)
-
-
-def test_no_flags_no_cache_defaults_to_legacy() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=False, legacy_harness=False, cached_eval=None
-    )
-    assert selection.use_unified is False
-    assert selection.source == "default"
-
-
-def test_cache_with_unified_selects_unified() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=False,
-        legacy_harness=False,
-        cached_eval=_cached_response("unified"),
-    )
-    assert selection.use_unified is True
-    assert selection.source == "rollout"
-
-
-def test_cache_with_legacy_selects_legacy() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=False,
-        legacy_harness=False,
-        cached_eval=_cached_response("legacy"),
-    )
-    assert selection.use_unified is False
-    assert selection.source == "default"
-
-
-def test_legacy_harness_flag_wins_over_rollout_cache() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=False,
-        legacy_harness=True,
-        cached_eval=_cached_response("unified"),
-    )
-    assert selection.use_unified is False
-    assert selection.source == "flag-legacy"
-
-
-def test_experimental_harness_flag_wins_over_rollout_cache() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=True,
-        legacy_harness=False,
-        cached_eval=_cached_response("legacy"),
-    )
-    assert selection.use_unified is True
-    assert selection.source == "flag"
-
-
-def test_experimental_harness_flag_wins_over_no_cache() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=True, legacy_harness=False, cached_eval=None
-    )
-    assert selection.use_unified is True
-    assert selection.source == "flag"
-
-
-def test_legacy_harness_wins_over_experimental_harness() -> None:
-    selection = resolve_harness_selection(
-        experimental_harness=True, legacy_harness=True, cached_eval=None
-    )
-    assert selection.use_unified is False
-    assert selection.source == "flag-legacy"
-
-
-def test_cache_without_rollout_feature_returns_default() -> None:
-    cached = EvalResponse(
-        features={
-            "vibe_cli_system_prompt": FeatureDefinition(defaultValue="cli", rules=[])
-        }
-    )
-    selection = resolve_harness_selection(
-        experimental_harness=False, legacy_harness=False, cached_eval=cached
-    )
-    assert selection.use_unified is False
-    assert selection.source == "default"
-
-
-def test_rollout_unified_but_package_unavailable_falls_back_to_legacy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import vibe._experimental_harness as mod
-
-    monkeypatch.setattr(mod, "experimental_harness_available", lambda: False)
-    selection = resolve_harness_selection(
-        experimental_harness=False,
-        legacy_harness=False,
-        cached_eval=_cached_response("unified"),
-    )
-    assert selection.use_unified is False
-    assert selection.source == "default"
+        monkeypatch.setattr(
+            "vibe._experimental_harness.import_module", _failing_runtime
+        )
+        with pytest.raises(ExperimentalHarnessUnavailableError) as excinfo:
+            create_experimental_harness_host()
+        message = str(excinfo.value)
+        assert "initialization failed" in message
+        assert "native extension incompatible" in message
+        assert "--legacy-harness" not in message

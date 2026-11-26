@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import os
 from pathlib import Path
 import threading
 
-from vibe.core.config import load_dotenv_values
+import pytest
+
+from vibe.core.config import EnvValueOrigin, env_value_origin, load_dotenv_values
+import vibe.core.config.vibe_schema as vibe_schema
+
+
+@pytest.fixture(autouse=True)
+def _restore_env_value_origins() -> Iterator[None]:
+    """The origin record is process-global; a test that records a key must
+    not leave it behind for whichever test reads the record next.
+    """
+    snapshot = dict(vibe_schema._ENV_VALUE_ORIGINS)
+    yield
+    vibe_schema._ENV_VALUE_ORIGINS.clear()
+    vibe_schema._ENV_VALUE_ORIGINS.update(snapshot)
 
 
 def _write_env_file(path: Path, content: str) -> None:
@@ -91,3 +106,43 @@ def test_reads_from_fifo(tmp_path: Path) -> None:
 
     writer.join()
     assert environ["FIFO_KEY"] == "fifo-value"
+
+
+def test_injected_keys_record_only_process_environment_injections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record answers "did this environment value come from
+    $VIBE_HOME/.env or from the parent shell?", which only an injection into
+    the real process environment can answer.
+    """
+    env_path = tmp_path / ".env"
+    _write_env_file(env_path, "DOTENV_RECORD_PROBE=injected\n")
+    private: dict[str, str] = {}
+
+    load_dotenv_values(env_path=env_path, environ=private)
+
+    assert private == {"DOTENV_RECORD_PROBE": "injected"}
+    assert env_value_origin("DOTENV_RECORD_PROBE") is None
+
+    monkeypatch.delenv("DOTENV_RECORD_PROBE", raising=False)
+    load_dotenv_values(env_path=env_path)
+
+    assert os.environ["DOTENV_RECORD_PROBE"] == "injected"
+    assert env_value_origin("DOTENV_RECORD_PROBE") is EnvValueOrigin.VIBE_HOME_ENV_FILE
+
+
+def test_injected_keys_skip_a_value_the_shell_already_exported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key the parent shell exported keeps reporting as a
+    process-environment credential: the file value lost, so nothing was
+    injected.
+    """
+    env_path = tmp_path / ".env"
+    _write_env_file(env_path, "DOTENV_RECORD_SHELL=from-file\n")
+    monkeypatch.setenv("DOTENV_RECORD_SHELL", "from-shell")
+
+    load_dotenv_values(env_path=env_path)
+
+    assert os.environ["DOTENV_RECORD_SHELL"] == "from-shell"
+    assert env_value_origin("DOTENV_RECORD_SHELL") is None

@@ -22,7 +22,7 @@ class FakeConnectorRegistry(ConnectorRegistry):
         bootstrap_error: str | None = None,
         connector_errors: dict[str, str] | None = None,
     ) -> None:
-        super().__init__(api_key="fake-key")
+        super().__init__()
         self._fake_connectors = connectors or {}
         self._fake_auth_actions = auth_actions or {}
         self._build_cache()
@@ -42,11 +42,7 @@ class FakeConnectorRegistry(ConnectorRegistry):
             tool_map: dict[str, type[BaseTool]] = {}
             for remote in tools:
                 proxy_cls = create_connector_proxy_tool_class(
-                    connector_name=connector_name,
-                    connector_alias=alias,
-                    connector_id=connector_id,
-                    remote=remote,
-                    api_key="fake-key",
+                    connector_alias=alias, remote=remote
                 )
                 tool_map[proxy_cls.get_name()] = proxy_cls
             self._cache[connector_id] = tool_map
@@ -56,30 +52,15 @@ class FakeConnectorRegistry(ConnectorRegistry):
                 connector_name, ConnectorAuthAction.NONE
             )
 
-    def get_tools(self, *, force_refresh: bool = False) -> dict[str, type[BaseTool]]:
-        if self._cache is None:
-            self._build_cache()
-
-        result: dict[str, type[BaseTool]] = {}
-        if self._cache:
-            for tools in self._cache.values():
-                result.update(tools)
-        return result
-
-    async def get_tools_async(
-        self, *, force_refresh: bool = False
-    ) -> dict[str, type[BaseTool]]:
-        return self.get_tools(force_refresh=force_refresh)
+    def bootstrap_error(self) -> str | None:
+        """The catalog failure the fake catalog service raises, if any."""
+        return self._bootstrap_error
 
     async def get_auth_url(self, alias: str) -> str | None:
         """Return a fake auth URL for connectors that have no tools (not connected)."""
         if not self.is_connected(alias):
             return f"https://fake-auth.example.com/{alias}"
         return None
-
-    async def refresh_connector_async(self, alias: str) -> dict[str, type[BaseTool]]:
-        """No-op refresh for tests."""
-        return {}
 
     def catalog_entries(self) -> tuple[ConnectorCatalogEntry, ...]:
         """Return the catalog represented by this fake executor."""

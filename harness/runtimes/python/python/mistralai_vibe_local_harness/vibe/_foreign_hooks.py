@@ -1,0 +1,1384 @@
+"""Foreign-command hook executors for user-facing hooks.
+
+A *foreign* hook is a user command declared in ``hooks.toml``. This module builds
+the per-point handler that the Runtime registers: it assembles the point's JSON
+event, spawns the command in the session cwd (or the directory its
+:class:`HookProcess` names), enforces a timeout, and maps the command's stdout to
+the point's typed result.
+
+A handler **never raises for an execution failure**. Any spawn error, timeout,
+non-zero exit, or invalid JSON is mapped to the point's fail action, never to an
+exception — raising would surface as ``hook_pipeline_failed`` regardless of the
+point's policy. The fail action per point:
+
+* ``pre_tool`` — ``strict`` fails closed to *deny*, else open to *allow*.
+* ``post_tool`` — ``strict`` blanks the tool result, else passes it through.
+* ``pre_agent`` — ``strict`` fails closed to *block* the message, else open to
+  let it through unchanged.
+* ``post_agent`` — always *accepts* the turn (no blocking mode), so a broken
+  review hook can never wedge completion; ``strict`` is accepted for a uniform
+  builder API but does not change this.
+* ``pre_llm`` — ``strict`` fails closed to *skip* the model call (the turn ends),
+  else open to call the model.
+* ``post_llm`` — ``strict`` fails closed to *reject* the response (the turn ends,
+  its tools do not run, and nothing retries), else open to accept it.
+
+A turn hook (``pre_agent``, ``pre_llm``, ``post_llm``, ``post_agent``) may declare a
+``match`` over the agent whose turn it is: the agent configuration name, plus the
+``main`` alias for a root or fork session. A hook that does not match is filtered out by
+the executor before it runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
+import contextlib
+from dataclasses import dataclass, field
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Any, cast
+
+from mistralai_vibe_local_harness.protocol import (
+    RustAcceptCandidate,
+    RustCompletionHookAccept,
+    RustCompletionHookInput,
+    RustCompletionHookReject,
+    RustCompletionHookRetry,
+    RustContentBlock,
+    RustExternalToolCall,
+    RustHookContinue,
+    RustHookSkip,
+    RustJsonToolArguments,
+    RustModelToolCallPart,
+    RustPostAgentTurnHookResult,
+    RustPostLlmCallHookResult,
+    RustPostToolCallHookInput,
+    RustPostToolCallHookResult,
+    RustPostToolCallOutput,
+    RustPreAgentTurnContinue,
+    RustPreAgentTurnHookInput,
+    RustPreAgentTurnHookResult,
+    RustPreLlmCallHookResult,
+    RustPreToolCallContinue,
+    RustPreToolCallHookInput,
+    RustPreToolCallHookResult,
+    RustTextContentBlock,
+    RustToolFailureResult,
+    RustToolResult,
+)
+from mistralai_vibe_local_harness.session_protocol import JsonObject
+from mistralai_vibe_local_harness.vibe._hook_matcher import (
+    match_predicate,
+    model_called_tool_name,
+    qualified_tool_name,
+    selects_agent,
+    selects_tool,
+)
+from mistralai_vibe_local_harness.vibe._local_actions import (
+    AcceptOrRetryPostAgentHandler,
+    AcceptOrRetryPostLlmHandler,
+    AgentScopedHook,
+    AgentScopedPreLlmHook,
+    HookAgentIdentity,
+    HookContext,
+    HookNoticeData,
+    ToolScopedHook,
+)
+from mistralai_vibe_local_harness.vibe._processes._backend import TerminalBackendError
+from mistralai_vibe_local_harness.vibe._processes._windows import WindowsTerminalBackend
+from mistralai_vibe_local_harness.vibe._projection import (
+    HOOK_CONTEXT_META_KEY,
+    HOOK_ORIGINAL_TEXT_META_KEY,
+)
+from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._sandbox_helper import kill
+
+_DEFAULT_TIMEOUT_S = 60.0
+_HOOK_EVENT_NAME = "pre_tool"
+_POST_TOOL_EVENT_NAME = "post_tool"
+_POST_AGENT_EVENT_NAME = "post_agent"
+_PRE_AGENT_EVENT_NAME = "pre_agent"
+_DEFAULT_DENY_REASON = "Blocked by a pre_tool hook."
+_PRE_AGENT_DENY_REASON = "Blocked by a pre_agent hook."
+_PRE_AGENT_STRICT_FAILURE_REASON = (
+    "A strict pre_agent hook failed and blocked the message."
+)
+_STRICT_FAILURE_REASON = "A strict pre_tool hook failed and denied the call."
+_POST_TOOL_DENY_REASON = "The tool result was blocked by a post_tool hook."
+_POST_AGENT_DENY_REASON = "A post_agent hook asked the agent to revise its response."
+# How much of a rewritten prompt or added context a pre_agent hook line shows.
+_PREVIEW_CHARS = 80
+# An image described for a model without image input: see vibe.app_server._vision.
+_DESCRIBED_IMAGE_PREFIX = "<image alias="
+_DESCRIBED_IMAGE_SUFFIX = "</image>"
+_PRE_LLM_EVENT_NAME = "pre_llm"
+_POST_LLM_EVENT_NAME = "post_llm"
+_POST_LLM_DENY_REASON = "A post_llm hook asked the model to try again."
+_POST_LLM_STRICT_FAILURE_REASON = (
+    "A strict post_llm hook failed and rejected the response."
+)
+_PRE_LLM_STRICT_FAILURE_REASON = "A strict pre_llm hook failed and stopped the turn."
+
+__all__ = [
+    "HookProcess",
+    "HookProcessResolver",
+    "HostHookResult",
+    "build_post_agent_turn_handler",
+    "build_post_llm_call_handler",
+    "build_post_tool_call_handler",
+    "build_pre_agent_turn_handler",
+    "build_pre_llm_call_handler",
+    "build_pre_tool_call_handler",
+    "run_host_hook",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class HookProcess:
+    """Where a hook command runs and what it adds to the inherited environment.
+
+    ``cwd`` defaults to the session's workspace. A hook shipped by a plugin runs in the
+    plugin's own directory instead, with variables naming its files.
+    """
+
+    cwd: Path | None = None
+    env: Mapping[str, str] = field(default_factory=dict[str, str])
+
+
+# Picks the process for one run, from the session the hook runs in. A plugin hook needs
+# it: the plugin files and data directory it runs against belong to that session.
+type HookProcessResolver = Callable[[HookContext], HookProcess]
+
+_SESSION_HOOK_PROCESS = HookProcess()
+
+
+def _hook_process(
+    process: HookProcess | HookProcessResolver, context: HookContext
+) -> HookProcess:
+    return process if isinstance(process, HookProcess) else process(context)
+
+
+@dataclass(frozen=True, slots=True)
+class _HookNotice:
+    # A hook's ``hook_completed`` line. A passthrough run yields ``None`` instead, so no
+    # line is shown unless the hook changed something.
+    content: str
+    status: str
+
+
+async def _emit_completed(
+    context: HookContext,
+    *,
+    name: str,
+    scope: str,
+    tool_call_id: str | None,
+    notice: _HookNotice | None,
+) -> None:
+    if notice is None or context.emit_hook_notice is None:
+        return
+    await context.emit_hook_notice(
+        HookNoticeData(
+            kind="hook_completed",
+            scope=scope,
+            tool_call_id=tool_call_id,
+            hook_name=name,
+            status=notice.status,
+            content=notice.content,
+        )
+    )
+
+
+def _tool_scoped[I, R](
+    handler: Callable[[I, HookContext], Awaitable[R]], match: str | None
+) -> ToolScopedHook[I, R]:
+    predicate = match_predicate(match)
+    return ToolScopedHook(
+        run=handler, selects=lambda name: selects_tool(predicate, name)
+    )
+
+
+def _stdin_payload(
+    hook_input: RustPreToolCallHookInput, context: HookContext
+) -> dict[str, Any]:
+    tool_call = hook_input.tool_call
+    return {
+        **_base_payload(context),
+        "hook_event_name": _HOOK_EVENT_NAME,
+        "tool_name": qualified_tool_name(tool_call.call),
+        "tool_call_id": tool_call.call_id,
+        "tool_input": _author_tool_input(tool_call.call),
+    }
+
+
+class _HookCommandError(RuntimeError):
+    # Carries the legacy-style failure reason (stderr, stdout, timeout, exit code) so a
+    # fail-open run can surface it instead of vanishing.
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _execution_reason(error: Exception) -> str:
+    if isinstance(error, _HookCommandError):
+        return error.reason
+    return f"hook failed: {error}"
+
+
+def _renamed(arguments: JsonObject, source: str, target: str) -> JsonObject:
+    if source not in arguments:
+        return arguments
+    return {
+        target: arguments[source],
+        **{key: value for key, value in arguments.items() if key != source},
+    }
+
+
+# Runtime argument names to the ones the CLI's tools — and therefore hooks written
+# against the legacy runtime — use. Each translator renames keys on a copy of the full
+# argument set; it must not rebuild a subset, or hooks silently lose fields the Core
+# still executes (offset/limit on read_file, timeout_seconds on bash).
+_AUTHOR_ARGUMENTS: Mapping[str, Callable[[JsonObject], JsonObject]] = {
+    "file_system.read_file": lambda arguments: _renamed(arguments, "path", "file_path"),
+    "file_system.write_file": lambda arguments: _renamed(
+        arguments, "path", "file_path"
+    ),
+    "file_system.bash": lambda arguments: _renamed(
+        arguments, "timeout_seconds", "timeout"
+    ),
+}
+
+
+def _read_file_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "file_path" not in arguments or "path" in arguments:
+        return None
+    return _renamed(arguments, "file_path", "path")
+
+
+def _write_file_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "file_path" not in arguments or "path" in arguments:
+        return None
+    return _renamed(arguments, "file_path", "path")
+
+
+def _bash_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "timeout" not in arguments or "timeout_seconds" in arguments:
+        return None
+    return _renamed(arguments, "timeout", "timeout_seconds")
+
+
+# The reverse direction, for a pre_tool rewrite: a hook speaks the author-facing names
+# and the Core executes runtime names. ``None`` means the rewrite already looks
+# runtime-shaped and passes through untouched.
+_RUNTIME_ARGUMENTS: Mapping[str, Callable[[JsonObject], JsonObject | None]] = {
+    "file_system.read_file": _read_file_runtime_arguments,
+    "file_system.write_file": _write_file_runtime_arguments,
+    "file_system.bash": _bash_runtime_arguments,
+}
+
+
+def _author_tool_input(call: RustExternalToolCall) -> JsonObject:
+    translate = _AUTHOR_ARGUMENTS.get(qualified_tool_name(call))
+    if translate is None:
+        return dict(call.arguments)
+    return translate(dict(call.arguments))
+
+
+def _runtime_tool_input(
+    call: RustExternalToolCall, rewritten: JsonObject
+) -> JsonObject:
+    translate = _RUNTIME_ARGUMENTS.get(qualified_tool_name(call))
+    if translate is None:
+        return dict(rewritten)
+    return translate(dict(rewritten)) or dict(rewritten)
+
+
+def _base_payload(context: HookContext) -> dict[str, Any]:
+    # The legacy payload's shared session fields, emitted identically by all three
+    # builders so they cannot drift between points.
+    return {
+        "session_id": context.session_id,
+        # The session's storage root; the durable journal lives under it, which is
+        # what per-session audit and transcript-reading hooks key off.
+        "transcript_path": str(context.session_root) if context.session_root else "",
+        "cwd": str(context.config.workspace.cwd),
+        "parent_session_id": context.parent_session_id,
+    }
+
+
+def _system_message(parsed: dict[str, Any]) -> str | None:
+    message = parsed.get("system_message")
+    if isinstance(message, str) and message:
+        return message
+    return None
+
+
+def _text_reason(text: str) -> list[RustContentBlock]:
+    block: RustContentBlock = RustTextContentBlock(text=text)
+    return [block]
+
+
+def _continue(effective_arguments: JsonObject) -> RustPreToolCallHookResult:
+    return RustPreToolCallHookResult(
+        output=RustPreToolCallContinue(effective_arguments=dict(effective_arguments))
+    )
+
+
+def _skip(reason: str) -> RustPreToolCallHookResult:
+    return RustPreToolCallHookResult(output=RustHookSkip(reason=_text_reason(reason)))
+
+
+def _fail(
+    strict: bool,
+    original_arguments: JsonObject,
+    *,
+    tool_name: str,
+    failure_reason: str | None = None,
+) -> tuple[RustPreToolCallHookResult, _HookNotice | None]:
+    if strict:
+        return (
+            _skip(failure_reason or _STRICT_FAILURE_REASON),
+            _HookNotice(f"Denied tool {tool_name!r} (strict)", "error"),
+        )
+    return (
+        _continue(original_arguments),
+        _HookNotice(failure_reason or "hook failed", "warning"),
+    )
+
+
+def _interpret_stdout(  # noqa: PLR0911 - one early return per stdout shape
+    stdout: str,
+    original_arguments: JsonObject,
+    *,
+    strict: bool,
+    tool_name: str,
+    call: RustExternalToolCall,
+) -> tuple[RustPreToolCallHookResult, _HookNotice | None]:
+    """Map exit-0 stdout to a result + notice. Empty stdout allows; invalid JSON fails."""
+    text = stdout.strip()
+    if not text:
+        return _continue(original_arguments), None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        return _fail(
+            strict,
+            original_arguments,
+            tool_name=tool_name,
+            failure_reason=f"stdout did not match the hook response schema: {error}",
+        )
+    if not isinstance(parsed, dict):
+        return _fail(
+            strict,
+            original_arguments,
+            tool_name=tool_name,
+            failure_reason="stdout did not match the hook response schema: not an object",
+        )
+
+    if parsed.get("decision") == "deny":
+        reason = parsed.get("reason")
+        return (
+            _skip(str(reason) if reason else _DEFAULT_DENY_REASON),
+            _HookNotice(f"Denied tool {tool_name!r}", "error"),
+        )
+
+    system_message = _system_message(parsed)
+
+    # Allow (any non-"deny" decision, including absent/unknown), optionally with
+    # rewritten arguments via hook_specific_output.tool_input.
+    hook_output = parsed.get("hook_specific_output")
+    if isinstance(hook_output, dict):
+        rewritten = hook_output.get("tool_input")
+        if isinstance(rewritten, dict):
+            return (
+                _continue(_runtime_tool_input(call, rewritten)),
+                _HookNotice(
+                    system_message or f"Rewrote tool_input for {tool_name!r}", "warning"
+                ),
+            )
+    if system_message:
+        return _continue(original_arguments), _HookNotice(system_message, "ok")
+    return _continue(original_arguments), None
+
+
+_MAX_HOOK_OUTPUT_BYTES = 1_000_000
+
+
+async def _read_capped(reader: asyncio.StreamReader | None, limit: int) -> bytes:
+    # Keeps the first ``limit`` bytes but drains the rest: an unbounded ``communicate()``
+    # lets a flooding hook exhaust memory, while simply not reading blocks the child on a
+    # full pipe, where it would never reach the timeout.
+    if reader is None:
+        return b""
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := await reader.read(65536):
+        remaining = limit - size
+        if remaining > 0:
+            chunks.append(chunk[:remaining])
+            size += min(len(chunk), remaining)
+    return b"".join(chunks)
+
+
+async def _feed_stdin_and_wait(
+    process: asyncio.subprocess.Process, stdin: bytes
+) -> None:
+    writer = process.stdin
+    if writer is not None:
+        with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
+            writer.write(stdin)
+            await writer.drain()
+        with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
+            writer.close()
+    await process.wait()
+
+
+async def _run_command(
+    command: str,
+    config: LocalRuntimeAdapterConfig,
+    timeout_s: float,
+    stdin: bytes,
+    hook_process: HookProcess,
+) -> str:
+    """Spawn ``command`` with ``stdin``; return stdout text.
+
+    The command runs in ``hook_process.cwd``, or the session cwd when unset.
+
+    Raises on any failure (spawn error, timeout, non-zero exit); the caller maps that to
+    the point's fail action.
+
+    The command runs through a shell: a ``hooks.toml`` command is a shell line, and real
+    ones use pipes, ``&&``, redirects, globs and ``$VAR``. Splitting it into argv instead
+    would leave most of them exiting non-zero or -- worse -- exiting *zero* with the
+    metacharacters passed through as literal arguments, whose non-JSON stdout a
+    non-strict hook maps to allow-and-continue.
+
+    ``start_new_session`` puts the command in its own process group so a timeout tears
+    down the whole tree; a hook that spawns children would otherwise orphan them.
+    """
+    if not command.strip():
+        raise _HookCommandError("hook command is empty")
+    try:
+        process = await _spawn_hook_command(command, config, hook_process)
+    except (OSError, TerminalBackendError) as error:
+        raise _HookCommandError(f"failed to start: {error}") from None
+    try:
+        stdout_bytes, stderr_bytes, _ = await asyncio.wait_for(
+            asyncio.gather(
+                _read_capped(process.stdout, _MAX_HOOK_OUTPUT_BYTES),
+                _read_capped(process.stderr, _MAX_HOOK_OUTPUT_BYTES),
+                _feed_stdin_and_wait(process, stdin),
+            ),
+            timeout=timeout_s,
+        )
+    except TimeoutError:
+        raise _HookCommandError("timed out") from None
+    finally:
+        # Kill the process group on timeout, cancellation, or error so a hook never
+        # orphans a child. Also once the hook exited: what it left running in the
+        # background with `&` dies with it.
+        await kill(process)
+    if process.returncode != 0:
+        # Prefer stderr: stdout is reserved for the JSON response and is likely
+        # empty / garbage when the hook crashed.
+        reason = (
+            stderr_bytes.decode("utf-8", errors="replace").strip()
+            or stdout_bytes.decode("utf-8", errors="replace").strip()
+            or f"exited with code {process.returncode}"
+        )
+        raise _HookCommandError(reason)
+    return stdout_bytes.decode("utf-8", errors="replace")
+
+
+async def _spawn_hook_command(
+    command: str, config: LocalRuntimeAdapterConfig, hook_process: HookProcess
+) -> asyncio.subprocess.Process:
+    # On native Windows a hook runs in the session's shell, as the bash tool does;
+    # the platform shell there is cmd.exe, which runs neither POSIX nor PowerShell.
+    pipe = asyncio.subprocess.PIPE
+    cwd = str(hook_process.cwd or config.workspace.cwd)
+    # ``None`` inherits this process's environment unchanged, as hooks always have.
+    env = {**os.environ, **hook_process.env} if hook_process.env else None
+    match config.command_environment:
+        case "git_bash" | "powershell" if sys.platform == "win32":
+            backend = WindowsTerminalBackend(config.command_environment)
+            shell = backend.resolve_shell(config.shell, {**os.environ, **config.env})
+            return await asyncio.create_subprocess_exec(
+                *backend.command_argv(shell, command, interactive=False),
+                stdin=pipe,
+                stdout=pipe,
+                stderr=pipe,
+                cwd=cwd,
+                env=env,
+            )
+        case _:
+            return await asyncio.create_subprocess_shell(
+                command,
+                stdin=pipe,
+                stdout=pipe,
+                stderr=pipe,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class HostHookResult:
+    """What a hook the Host fires outside a turn printed, or why it failed."""
+
+    stdout: str = ""
+    failure: str | None = None
+
+
+async def run_host_hook(
+    command: str,
+    config: LocalRuntimeAdapterConfig,
+    payload: Mapping[str, Any],
+    *,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    process: HookProcess = _SESSION_HOOK_PROCESS,
+) -> HostHookResult:
+    """Run a hook the Host fires outside a turn, such as ``notification``.
+
+    Like the turn hooks, it never raises for an execution failure. Cancelling it
+    kills the command and its children.
+    """
+    try:
+        stdin = json.dumps(dict(payload)).encode("utf-8")
+        stdout = await _run_command(command, config, timeout_s, stdin, process)
+    except Exception as error:
+        return HostHookResult(failure=_execution_reason(error))
+    return HostHookResult(stdout=stdout)
+
+
+def build_pre_tool_call_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> ToolScopedHook[RustPreToolCallHookInput, RustPreToolCallHookResult]:
+    async def handler(
+        hook_input: RustPreToolCallHookInput, context: HookContext
+    ) -> RustPreToolCallHookResult:
+        original_arguments = dict(hook_input.tool_call.call.arguments)
+        # Notice lines use the leaf name (bash, not file_system.bash); the payload keeps
+        # the qualified name per the harness spec.
+        display_name = qualified_tool_name(hook_input.tool_call.call).rsplit(".", 1)[-1]
+        try:
+            payload = _stdin_payload(hook_input, context)
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            # Any execution failure maps to the point's fail action, never an exception.
+            result, notice = _fail(
+                strict,
+                original_arguments,
+                tool_name=display_name,
+                failure_reason=_execution_reason(error),
+            )
+        else:
+            result, notice = _interpret_stdout(
+                stdout,
+                original_arguments,
+                strict=strict,
+                tool_name=display_name,
+                call=hook_input.tool_call.call,
+            )
+        await _emit_completed(
+            context,
+            name=name,
+            scope="pre_tool",
+            tool_call_id=hook_input.tool_call.call_id,
+            notice=notice,
+        )
+        return result
+
+    return _tool_scoped(handler, match)
+
+
+# --- post_tool ---------------------------------------------------------------
+
+
+def _tool_result_text(result: RustToolResult) -> str:
+    # Falls back to rendering ``structured_content`` as ``key: value`` lines: a tool like
+    # bash carries its output only there, and a hook reading ``tool_output_text`` would
+    # otherwise see nothing.
+    text = "".join(
+        block.text
+        for block in result.content
+        if isinstance(block, RustTextContentBlock)
+    )
+    if text:
+        return text
+    structured = result.structured_content
+    if isinstance(structured, dict):
+        return "\n".join(f"{key}: {value}" for key, value in structured.items())
+    if structured is None:
+        return ""
+    return str(structured)
+
+
+def _post_tool_payload(
+    hook_input: RustPostToolCallHookInput, context: HookContext
+) -> dict[str, Any]:
+    tool_call = hook_input.tool_call
+    result = hook_input.tool_result
+    is_failure = isinstance(result, RustToolFailureResult)
+    return {
+        **_base_payload(context),
+        "hook_event_name": _POST_TOOL_EVENT_NAME,
+        "tool_name": qualified_tool_name(tool_call.call),
+        "tool_call_id": tool_call.call_id,
+        "tool_input": _author_tool_input(tool_call.call),
+        "tool_status": "failure" if is_failure else "success",
+        # A failed call's structured_content is partial/undefined; report None so a
+        # post_tool hook keys off tool_error/tool_output_text, not a leaked payload.
+        "tool_output": None if is_failure else result.structured_content,
+        # On failure, surface the error message rather than rendering the failed call's
+        # partial content/structured_content -- _tool_result_text
+        # would otherwise leak a bash-style result's structured stdout, or return an
+        # empty string that drops the error entirely.
+        "tool_output_text": (
+            result.error.message
+            if isinstance(result, RustToolFailureResult)
+            else _tool_result_text(result)
+        ),
+        "tool_error": result.error.message
+        if isinstance(result, RustToolFailureResult)
+        else None,
+        "duration_ms": hook_input.duration_ms,
+    }
+
+
+def _post_tool_fail(
+    strict: bool, result: RustToolResult, *, failure_reason: str | None = None
+) -> tuple[RustToolResult, _HookNotice | None]:
+    # ``strict`` blanks the model-visible result so a failed guard does not leak output it
+    # never got to inspect. Both fields are cleared: Core falls back to
+    # ``structured_content`` when ``content`` is empty (bash puts stdout only there), so
+    # clearing ``content`` alone would still leak it.
+    if strict:
+        return (
+            result.model_copy(update={"content": [], "structured_content": None}),
+            _HookNotice("Cleared tool result (strict)", "error"),
+        )
+    return result, _HookNotice(failure_reason or "hook failed", "warning")
+
+
+def _interpret_post_tool_stdout(  # noqa: PLR0911 - one early return per stdout shape
+    stdout: str, result: RustToolResult, *, strict: bool
+) -> tuple[RustToolResult, _HookNotice | None]:
+    """Map exit-0 stdout to the result the model sees + notice. Empty stdout is a no-op."""
+    text = stdout.strip()
+    if not text:
+        return result, None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        return _post_tool_fail(
+            strict,
+            result,
+            failure_reason=f"stdout did not match the hook response schema: {error}",
+        )
+    if not isinstance(parsed, dict):
+        return _post_tool_fail(
+            strict,
+            result,
+            failure_reason="stdout did not match the hook response schema: not an object",
+        )
+
+    extra = _additional_context(parsed)
+    system_message = _system_message(parsed)
+
+    if parsed.get("decision") == "deny":
+        # The tool already ran; a deny replaces the model-visible content with the reason
+        # rather than un-running the call. structured_content is cleared too: programmatic
+        # tool calling reads it and ignores content, so a bash-style result (stdout only in
+        # structured_content) would otherwise leak the un-redacted payload to the in-sandbox
+        # program despite the deny.
+        reason = parsed.get("reason")
+        reason_text = str(reason) if reason else _POST_TOOL_DENY_REASON
+        content = _text_reason(reason_text)
+        replaced_chars = len(reason_text)
+        if extra:
+            content = [*content, RustTextContentBlock(text=extra)]
+            replaced_chars += len(extra)
+        return (
+            result.model_copy(update={"content": content, "structured_content": None}),
+            _HookNotice(
+                system_message or f"Replaced tool result ({replaced_chars} chars)",
+                "warning",
+            ),
+        )
+
+    if extra:
+        # Core prefers non-empty content over structured_content. When a tool put its
+        # output only in structured_content (e.g. bash), materialize that text into content
+        # before appending the note, or the model would see the note and lose the output.
+        base = list(result.content)
+        if not base:
+            materialized = _tool_result_text(result)
+            if materialized:
+                base = [RustTextContentBlock(text=materialized)]
+        appended: list[RustContentBlock] = [*base, RustTextContentBlock(text=extra)]
+        return (
+            result.model_copy(update={"content": appended}),
+            _HookNotice(
+                system_message or f"Appended {len(extra)} chars to tool result",
+                "warning",
+            ),
+        )
+    if system_message:
+        return result, _HookNotice(system_message, "ok")
+    return result, None
+
+
+def _additional_context(parsed: dict[str, Any]) -> str | None:
+    hook_output = parsed.get("hook_specific_output")
+    if isinstance(hook_output, dict):
+        extra = hook_output.get("additional_context")
+        if isinstance(extra, str) and extra:
+            return extra
+    return None
+
+
+def build_post_tool_call_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> ToolScopedHook[RustPostToolCallHookInput, RustPostToolCallHookResult]:
+    async def handler(
+        hook_input: RustPostToolCallHookInput, context: HookContext
+    ) -> RustPostToolCallHookResult:
+        result = hook_input.tool_result
+        try:
+            payload = _post_tool_payload(hook_input, context)
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            # Any execution failure maps to the point's fail action, never an exception.
+            new_result, notice = _post_tool_fail(
+                strict, result, failure_reason=_execution_reason(error)
+            )
+        else:
+            new_result, notice = _interpret_post_tool_stdout(
+                stdout, result, strict=strict
+            )
+        await _emit_completed(
+            context,
+            name=name,
+            scope="post_tool",
+            tool_call_id=hook_input.tool_call.call_id,
+            notice=notice,
+        )
+        return RustPostToolCallHookResult(
+            output=RustPostToolCallOutput(tool_result=new_result)
+        )
+
+    return _tool_scoped(handler, match)
+
+
+# --- post_agent --------------------------------------------------------------
+
+
+def _accept() -> RustPostAgentTurnHookResult:
+    return RustPostAgentTurnHookResult(
+        output=RustCompletionHookAccept(acceptance=RustAcceptCandidate())
+    )
+
+
+def _retry(feedback: str) -> RustPostAgentTurnHookResult:
+    return RustPostAgentTurnHookResult(
+        output=RustCompletionHookRetry(feedback=_text_reason(feedback))
+    )
+
+
+def _response_text(hook_input: RustCompletionHookInput) -> str:
+    return "".join(
+        part.text
+        for part in hook_input.candidate.message.content
+        if isinstance(part, RustTextContentBlock)
+    )
+
+
+def _post_agent_payload(
+    hook_input: RustCompletionHookInput, context: HookContext
+) -> dict[str, Any]:
+    return {
+        **_turn_payload(context, _POST_AGENT_EVENT_NAME),
+        # The journal records the reply only once every post_agent hook accepts it,
+        # so the transcript cannot show it yet.
+        "response_text": _response_text(hook_input),
+    }
+
+
+def _agent_selector(match: str | None) -> Callable[[HookAgentIdentity], bool]:
+    return lambda agent: selects_agent(match, agent.name, main=agent.main)
+
+
+def _interpret_post_agent_stdout(
+    stdout: str,
+) -> tuple[RustPostAgentTurnHookResult, _HookNotice | None]:
+    """Map exit-0 stdout to accept/retry. Anything but an explicit deny accepts."""
+    text = stdout.strip()
+    if not text:
+        return _accept(), None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        return (
+            _accept(),
+            _HookNotice(
+                f"stdout did not match the hook response schema: {error}", "warning"
+            ),
+        )
+    if not isinstance(parsed, dict):
+        return (
+            _accept(),
+            _HookNotice(
+                "stdout did not match the hook response schema: not an object",
+                "warning",
+            ),
+        )
+    system_message = _system_message(parsed)
+    if parsed.get("decision") == "deny":
+        reason = parsed.get("reason")
+        return (
+            _retry(str(reason) if reason else _POST_AGENT_DENY_REASON),
+            _HookNotice(system_message or "Requested turn revision", "warning"),
+        )
+    if system_message:
+        return _accept(), _HookNotice(system_message, "ok")
+    return _accept(), None
+
+
+def build_post_agent_turn_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> AcceptOrRetryPostAgentHandler:
+    async def handler(
+        hook_input: RustCompletionHookInput, context: HookContext
+    ) -> RustPostAgentTurnHookResult:
+        try:
+            payload = _post_agent_payload(hook_input, context)
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            # A failed review hook always accepts the turn, but the reason still
+            # reaches the notice line so a broken hook is visible.
+            await _emit_completed(
+                context,
+                name=name,
+                scope="post_agent",
+                tool_call_id=None,
+                notice=_HookNotice(_execution_reason(error), "warning"),
+            )
+            return _accept()
+        result, notice = _interpret_post_agent_stdout(stdout)
+        await _emit_completed(
+            context, name=name, scope="post_agent", tool_call_id=None, notice=notice
+        )
+        return result
+
+    # A foreign hook's stdout can only accept or ask for a retry, never replace.
+    return AcceptOrRetryPostAgentHandler(
+        handler, selects=_agent_selector(match), name=name
+    )
+
+
+# --- pre_agent ---------------------------------------------------------------
+
+
+def _pre_agent_continue(
+    user_content: list[RustContentBlock],
+) -> RustPreAgentTurnHookResult:
+    return RustPreAgentTurnHookResult(
+        output=RustPreAgentTurnContinue(user_content=user_content)
+    )
+
+
+def _pre_agent_skip(reason: str) -> RustPreAgentTurnHookResult:
+    return RustPreAgentTurnHookResult(output=RustHookSkip(reason=_text_reason(reason)))
+
+
+def _typed_text_index(user_content: list[RustContentBlock]) -> int | None:
+    # The text the user typed is the message's first text block: attachments,
+    # mentioned files and invoked skills follow it, and a block a hook added is
+    # marked as such. An image the Host described for a model without image input
+    # is a text block too, in the image's place, so it is skipped by its shape.
+    return next(
+        (
+            index
+            for index, block in enumerate(user_content)
+            if isinstance(block, RustTextContentBlock)
+            and not (block.meta or {}).get(HOOK_CONTEXT_META_KEY)
+            and not _is_described_image(block.text)
+        ),
+        None,
+    )
+
+
+def _is_described_image(text: str) -> bool:
+    # The shape ``vibe.app_server._vision`` gives an image's description.
+    return text.startswith(_DESCRIBED_IMAGE_PREFIX) and text.endswith(
+        _DESCRIBED_IMAGE_SUFFIX
+    )
+
+
+def _typed_text(user_content: list[RustContentBlock]) -> str:
+    index = _typed_text_index(user_content)
+    if index is None:
+        return ""
+    return cast(RustTextContentBlock, user_content[index]).text
+
+
+def _pre_agent_payload(
+    hook_input: RustPreAgentTurnHookInput, context: HookContext
+) -> dict[str, Any]:
+    return {
+        **_turn_payload(context, _PRE_AGENT_EVENT_NAME),
+        "prompt": _typed_text(hook_input.user_content),
+    }
+
+
+def _rewritten_text_block(text: str, *, original: str) -> RustTextContentBlock:
+    return RustTextContentBlock.model_validate({
+        "type": "text",
+        "text": text,
+        "_meta": {HOOK_ORIGINAL_TEXT_META_KEY: original},
+    })
+
+
+def _hook_text_block(text: str) -> RustTextContentBlock:
+    return RustTextContentBlock.model_validate({
+        "type": "text",
+        "text": text,
+        "_meta": {HOOK_CONTEXT_META_KEY: True},
+    })
+
+
+def _preview(text: str) -> str:
+    """``text`` on one line, quoted, cut to :data:`_PREVIEW_CHARS`.
+
+    The transcript keeps what the user typed, so the hook line is where they see what
+    the model got instead; a preview keeps a long prompt or context from flooding it.
+    """
+    flat = " ".join(text.split())
+    if len(flat) > _PREVIEW_CHARS:
+        flat = flat[: _PREVIEW_CHARS - 1].rstrip() + "…"
+    return f'"{flat}"'
+
+
+def _with_prompt(
+    user_content: list[RustContentBlock], prompt: str
+) -> list[RustContentBlock]:
+    """``user_content`` with the typed text replaced by ``prompt``.
+
+    The block remembers the text the user typed, so public history keeps showing
+    it; after several rewrites it still remembers the user's own text.
+    """
+    index = _typed_text_index(user_content)
+    if index is None:
+        # The user typed no text (attachments only): the prompt becomes the typed
+        # text, remembered as empty, so later hooks read it and the display shows
+        # nothing in its place. An empty prompt has nothing to remove.
+        if not prompt:
+            return user_content
+        return [_rewritten_text_block(prompt, original=""), *user_content]
+    block = cast(RustTextContentBlock, user_content[index])
+    if block.text == prompt:
+        return user_content
+    meta = dict(block.meta or {})
+    meta.setdefault(HOOK_ORIGINAL_TEXT_META_KEY, block.text)
+    rewritten = block.model_copy(update={"text": prompt, "meta": meta})
+    return [*user_content[:index], rewritten, *user_content[index + 1 :]]
+
+
+def _pre_agent_fail(
+    strict: bool, user_content: list[RustContentBlock], *, failure_reason: str
+) -> tuple[RustPreAgentTurnHookResult, _HookNotice]:
+    if strict:
+        return (
+            _pre_agent_skip(_PRE_AGENT_STRICT_FAILURE_REASON),
+            _HookNotice(f"Blocked the message (strict): {failure_reason}", "error"),
+        )
+    return _pre_agent_continue(user_content), _HookNotice(failure_reason, "warning")
+
+
+def _interpret_pre_agent_stdout(  # noqa: PLR0911 - one early return per stdout shape
+    stdout: str, user_content: list[RustContentBlock], *, strict: bool
+) -> tuple[RustPreAgentTurnHookResult, _HookNotice | None]:
+    """Map exit-0 stdout to a result + notice. Empty stdout lets the message through."""
+    text = stdout.strip()
+    if not text:
+        return _pre_agent_continue(user_content), None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        return _pre_agent_fail(
+            strict,
+            user_content,
+            failure_reason=f"stdout did not match the hook response schema: {error}",
+        )
+    if not isinstance(parsed, dict):
+        return _pre_agent_fail(
+            strict,
+            user_content,
+            failure_reason="stdout did not match the hook response schema: not an object",
+        )
+
+    system_message = _system_message(parsed)
+    if parsed.get("decision") == "deny":
+        reason = parsed.get("reason")
+        reason_text = str(reason) if reason else None
+        # Clients render the hook line, not the skipped turn's reason: the line
+        # carries it, as it does a strict failure's.
+        return (
+            _pre_agent_skip(reason_text or _PRE_AGENT_DENY_REASON),
+            _HookNotice(
+                system_message
+                or (
+                    f"Blocked the message: {reason_text}"
+                    if reason_text
+                    else "Blocked the message"
+                ),
+                "error",
+            ),
+        )
+
+    # The rewrite applies first, then the context is added after the message.
+    content = user_content
+    changes: list[str] = []
+    hook_output = parsed.get("hook_specific_output")
+    prompt = hook_output.get("prompt") if isinstance(hook_output, dict) else None
+    # An empty prompt is a rewrite too: it removes the typed text, so a hook that
+    # strips the message must not let it through.
+    if isinstance(prompt, str):
+        rewritten = _with_prompt(content, prompt)
+        if rewritten is not content:
+            content = rewritten
+            changes.append(
+                f"Rewrote your message to: {_preview(prompt)}"
+                if prompt
+                else "Removed the text of your message"
+            )
+    extra = _additional_context(parsed)
+    if extra:
+        content = [*content, _hook_text_block(extra)]
+        label = "added context" if changes else "Added context for the model"
+        changes.append(f"{label}: {_preview(extra)}")
+    if changes:
+        return (
+            _pre_agent_continue(content),
+            _HookNotice(system_message or "; ".join(changes), "warning"),
+        )
+    if system_message:
+        return _pre_agent_continue(content), _HookNotice(system_message, "ok")
+    return _pre_agent_continue(content), None
+
+
+def build_pre_agent_turn_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> AgentScopedHook[RustPreAgentTurnHookInput, RustPreAgentTurnHookResult]:
+    async def handler(
+        hook_input: RustPreAgentTurnHookInput, context: HookContext
+    ) -> RustPreAgentTurnHookResult:
+        user_content = list(hook_input.user_content)
+        try:
+            payload = _pre_agent_payload(hook_input, context)
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            # Any execution failure maps to the point's fail action, never an
+            # exception: a raised one would fail the turn whatever ``strict`` says.
+            result, notice = _pre_agent_fail(
+                strict, user_content, failure_reason=_execution_reason(error)
+            )
+        else:
+            result, notice = _interpret_pre_agent_stdout(
+                stdout, user_content, strict=strict
+            )
+        await _emit_completed(
+            context, name=name, scope="pre_agent", tool_call_id=None, notice=notice
+        )
+        return result
+
+    return AgentScopedHook(run=handler, selects=_agent_selector(match))
+
+
+# --- pre_llm / post_llm --------------------------------------------------------
+
+
+def _turn_payload(context: HookContext, event: str) -> dict[str, Any]:
+    return {
+        **_base_payload(context),
+        "hook_event_name": event,
+        # The agent configuration whose turn it is; never the ``main`` alias.
+        "agent_name": context.agent.name if context.agent is not None else None,
+        "turn_id": context.turn_id,
+    }
+
+
+def _parsed_stdout(stdout: str) -> dict[str, Any] | str | None:
+    """The hook's JSON object, ``None`` for empty stdout, or why it is invalid."""
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        return f"stdout did not match the hook response schema: {error}"
+    if not isinstance(parsed, dict):
+        return "stdout did not match the hook response schema: not an object"
+    return cast(dict[str, Any], parsed)
+
+
+def _pre_llm_skip(reason: str) -> RustPreLlmCallHookResult:
+    return RustPreLlmCallHookResult(output=RustHookSkip(reason=_text_reason(reason)))
+
+
+_PRE_LLM_CONTINUE = RustPreLlmCallHookResult(output=RustHookContinue())
+
+
+def _interpret_pre_llm(
+    stdout: str | None, failure: str | None, *, strict: bool
+) -> tuple[RustPreLlmCallHookResult, _HookNotice | None]:
+    if failure is None and stdout is not None:
+        parsed = _parsed_stdout(stdout)
+        if parsed is None:
+            return _PRE_LLM_CONTINUE, None
+        if isinstance(parsed, str):
+            failure = parsed
+        else:
+            system_message = _system_message(parsed)
+            if parsed.get("decision") == "deny":
+                reason = parsed.get("reason")
+                # The turn ends with the reason as its answer; the notice shows
+                # it in the transcript too.
+                text = str(reason) if reason else "Blocked by a pre_llm hook."
+                return _pre_llm_skip(text), _HookNotice(
+                    system_message or f"Stopped the turn: {text}", "error"
+                )
+            if system_message:
+                return _PRE_LLM_CONTINUE, _HookNotice(system_message, "ok")
+            return _PRE_LLM_CONTINUE, None
+    reason = failure or "hook failed"
+    if strict:
+        # The skip reason is the turn's answer: it says a hook failed rather than
+        # being the bare failure text (an exit code, or a whole traceback).
+        return _pre_llm_skip(f"{_PRE_LLM_STRICT_FAILURE_REASON} {reason}"), _HookNotice(
+            f"Stopped the turn (strict): {reason}", "error"
+        )
+    return _PRE_LLM_CONTINUE, _HookNotice(reason, "warning")
+
+
+def build_pre_llm_call_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> AgentScopedPreLlmHook:
+    """A pre_llm hook: before each model call. ``deny`` ends the turn unanswered."""
+
+    async def handler(context: HookContext) -> RustPreLlmCallHookResult:
+        stdout: str | None = None
+        failure: str | None = None
+        try:
+            # The alias the user knows; a route that has none (a subagent's own
+            # model) by its model name.
+            model = (
+                context.config.active_model_alias or context.config.active_model.model
+            )
+            payload = {**_turn_payload(context, _PRE_LLM_EVENT_NAME), "model": model}
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            failure = _execution_reason(error)
+        result, notice = _interpret_pre_llm(stdout, failure, strict=strict)
+        await _emit_completed(
+            context, name=name, scope="pre_llm", tool_call_id=None, notice=notice
+        )
+        return result
+
+    return AgentScopedPreLlmHook(handler, selects=_agent_selector(match))
+
+
+def _tool_call_payload(part: RustModelToolCallPart) -> dict[str, Any]:
+    tool_name = model_called_tool_name(part.name)
+    entry: dict[str, Any] = {"tool_name": tool_name, "tool_call_id": part.id}
+    arguments = part.arguments
+    if isinstance(arguments, RustJsonToolArguments) and isinstance(
+        arguments.value, dict
+    ):
+        value = dict(arguments.value)
+        translate = _AUTHOR_ARGUMENTS.get(tool_name)
+        entry["tool_input"] = translate(value) if translate is not None else value
+    else:
+        # The model wrote arguments that are not a JSON object: pass them as text.
+        entry["tool_input"] = None
+        entry["tool_input_raw"] = arguments.raw
+    return entry
+
+
+def _post_llm_payload(
+    hook_input: RustCompletionHookInput, context: HookContext
+) -> dict[str, Any]:
+    candidate = hook_input.candidate
+    parts = candidate.message.content
+    usage = candidate.usage
+    return {
+        **_turn_payload(context, _POST_LLM_EVENT_NAME),
+        "response_text": _response_text(hook_input),
+        "tool_calls": [
+            _tool_call_payload(part)
+            for part in parts
+            if isinstance(part, RustModelToolCallPart)
+        ],
+        "finish_reason": candidate.finish_reason,
+        "usage": usage.model_dump(mode="json") if usage is not None else None,
+    }
+
+
+def _post_llm_accept() -> RustPostLlmCallHookResult:
+    return RustPostLlmCallHookResult(
+        output=RustCompletionHookAccept(acceptance=RustAcceptCandidate())
+    )
+
+
+def _interpret_post_llm(
+    stdout: str | None, failure: str | None, *, strict: bool
+) -> tuple[RustPostLlmCallHookResult, _HookNotice | None]:
+    if failure is None and stdout is not None:
+        parsed = _parsed_stdout(stdout)
+        if parsed is None:
+            return _post_llm_accept(), None
+        if isinstance(parsed, str):
+            failure = parsed
+        else:
+            system_message = _system_message(parsed)
+            if parsed.get("decision") == "deny":
+                reason = parsed.get("reason")
+                return (
+                    RustPostLlmCallHookResult(
+                        output=RustCompletionHookRetry(
+                            feedback=_text_reason(
+                                str(reason) if reason else _POST_LLM_DENY_REASON
+                            )
+                        )
+                    ),
+                    _HookNotice(
+                        system_message or "Asked the model to try again", "warning"
+                    ),
+                )
+            if system_message:
+                return _post_llm_accept(), _HookNotice(system_message, "ok")
+            return _post_llm_accept(), None
+    reason = failure or "hook failed"
+    if strict:
+        # Rejecting, not retrying: a broken hook must not loop the turn.
+        return (
+            RustPostLlmCallHookResult(
+                output=RustCompletionHookReject(
+                    reason=_text_reason(f"{_POST_LLM_STRICT_FAILURE_REASON} {reason}")
+                )
+            ),
+            _HookNotice(f"Rejected the response (strict): {reason}", "error"),
+        )
+    return _post_llm_accept(), _HookNotice(reason, "warning")
+
+
+def build_post_llm_call_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> AcceptOrRetryPostLlmHandler:
+    """A post_llm hook: after each model response, before Vibe acts on it.
+
+    ``deny`` asks the model to try again with the reason as feedback.
+    """
+
+    async def handler(
+        hook_input: RustCompletionHookInput, context: HookContext
+    ) -> RustPostLlmCallHookResult:
+        stdout: str | None = None
+        failure: str | None = None
+        try:
+            payload = _post_llm_payload(hook_input, context)
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            failure = _execution_reason(error)
+        result, notice = _interpret_post_llm(stdout, failure, strict=strict)
+        await _emit_completed(
+            context, name=name, scope="post_llm", tool_call_id=None, notice=notice
+        )
+        return result
+
+    # A foreign hook's stdout never replaces the response, so it streams.
+    return AcceptOrRetryPostLlmHandler(
+        handler, selects=_agent_selector(match), name=name
+    )

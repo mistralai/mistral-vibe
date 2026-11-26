@@ -1,0 +1,17 @@
+[
+ {
+  "method": "config/proxy/read",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/proxy/write",
+  "params": {
+   "changes": {
+    "HTTP_PROXY": "http://typed:3128"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

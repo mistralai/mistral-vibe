@@ -1,26 +1,23 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
-from contextlib import suppress
 from io import BytesIO
 import json
-import socket
+import os
+from pathlib import Path
+import sys
 from threading import Event
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.conftest import build_test_agent_loop
-from tests.stubs.app_server import build_test_app_server
+from tests.stubs.process_services import fake_process_services
 from vibe.app_server import stdio
-from vibe.app_server._legacy_composition import create_legacy_app_server
-from vibe.app_server._runtime import HarnessServer, RootOpenRequest
-from vibe.app_server.client import AppServerClient
-from vibe.app_server.events import HistoryEntryAdded
-from vibe.app_server.models import PublicMessageEntry
-from vibe.app_server.protocol import ClientCapabilities, ClientInfo
-from vibe.app_server.session import AppServerSession
+from vibe.app_server._agent_socket import AgentSocketMount
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._runtime import HarnessProcess, HarnessServer
 from vibe.app_server.transport import (
     InvalidJsonRpcMessage,
     MemoryJsonRpcTransport,
@@ -59,13 +56,165 @@ class CountingWriter(BytesIO):
         super().flush()
 
 
+def _stub_stdio_main(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    served: list[object] = []
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    monkeypatch.setattr(
+        stdio.asyncio,
+        "run",
+        lambda coroutine: served.append(coroutine) or coroutine.close(),
+    )
+    monkeypatch.setattr(
+        stdio,
+        "parse_arguments",
+        lambda _argv: argparse.Namespace(
+            plugin_mcp=False,
+            experimental_harness=False,
+            legacy_harness=False,
+            multiplex=False,
+            additional_builtin_plugin_roots=[],
+            agent_socket=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "vibe.core.config.harness_files.init_harness_files_manager", lambda *_: None
+    )
+    monkeypatch.setattr("vibe.observability.logging.init_file_logging", lambda _: None)
+    monkeypatch.setattr(stdio, "_neutralize_stdout", lambda: None)
+    monkeypatch.setattr("setproctitle.setproctitle", lambda _: None)
+    monkeypatch.setattr("vibe.core.config.load_dotenv_values", lambda: None)
+    monkeypatch.setattr(
+        "vibe.core.utils.windows_asyncio.silence_proactor_transport_teardown_warnings",
+        lambda: None,
+    )
+    return served
+
+
+def test_stdio_main_names_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    titles: list[str] = []
+    _stub_stdio_main(monkeypatch)
+    monkeypatch.setattr("setproctitle.setproctitle", titles.append)
+
+    stdio.main()
+
+    assert titles == ["vibe-app-server"]
+
+
+def test_stdio_main_starts_when_naming_the_process_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(_: str) -> None:
+        raise OSError("cannot rename")
+
+    served = _stub_stdio_main(monkeypatch)
+    monkeypatch.setattr("setproctitle.setproctitle", fail)
+
+    stdio.main()
+
+    assert len(served) == 1
+
+
+def test_stdio_main_preserves_the_clients_shell_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "/user/bin")
+    _stub_stdio_main(monkeypatch)
+    stdio.main()
+    assert os.environ["PATH"] == "/user/bin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("left_behind", [True, False])
+async def test_serving_finishes_worktree_reaps_an_earlier_process_left(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path, left_behind: bool
+) -> None:
+    """A reap left by a process that exited mid-cleanup is picked up at
+    startup; a process with no managed worktree starts no worker for it, even
+    once the claims' lock files exist.
+    """
+    trash = config_dir / "worktrees" / ".trash"
+    trash.mkdir(parents=True)
+    claims = config_dir / "worktrees" / ".claims"
+    claims.mkdir()
+    (claims / ".prune").touch()
+    (claims / ".registry").touch()
+    if left_behind:
+        (trash / "interrupted").mkdir()
+    services = fake_process_services()
+    sweeps: list[object] = []
+    monkeypatch.setattr(services.worktrees, "sweep", lambda **kw: sweeps.append(kw))
+    monkeypatch.setattr(ProcessServices, "create", classmethod(lambda _cls: services))
+    monkeypatch.setattr(stdio, "_serve_with", AsyncMock())
+
+    await stdio._serve(
+        cast(Any, None),
+        multiplex=True,
+        additional_builtin_plugin_roots=(),
+        agent_socket=None,
+    )
+
+    assert len(sweeps) == (1 if left_behind else 0)
+
+
+@pytest.mark.parametrize("plugin_mcp", [False, True])
+@pytest.mark.parametrize("serving_failed", [False, True])
+def test_stdio_main_neutralizes_stdout_after_serving(
+    monkeypatch: pytest.MonkeyPatch, plugin_mcp: bool, serving_failed: bool
+) -> None:
+    neutralized = False
+
+    def run(coroutine: Any) -> None:
+        coroutine.close()
+        if serving_failed:
+            raise OSError("stdio disconnected")
+
+    def neutralize_stdout() -> None:
+        nonlocal neutralized
+        neutralized = True
+
+    _stub_stdio_main(monkeypatch)
+    monkeypatch.setattr(
+        stdio,
+        "parse_arguments",
+        lambda _argv: argparse.Namespace(
+            plugin_mcp=plugin_mcp,
+            multiplex=False,
+            additional_builtin_plugin_roots=[],
+            agent_socket=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "vibe.core.config.harness_files.init_harness_files_manager", lambda *_: None
+    )
+    monkeypatch.setattr("vibe.observability.logging.init_file_logging", lambda _: None)
+    monkeypatch.setattr(stdio.asyncio, "run", run)
+    monkeypatch.setattr(stdio, "_neutralize_stdout", neutralize_stdout)
+    monkeypatch.setattr("vibe.core.config.load_dotenv_values", lambda: None)
+    monkeypatch.setattr(
+        "vibe.core.utils.windows_asyncio.silence_proactor_transport_teardown_warnings",
+        lambda: None,
+    )
+
+    if serving_failed:
+        with pytest.raises(OSError, match="stdio disconnected"):
+            stdio.main()
+    else:
+        stdio.main()
+
+    assert neutralized
+
+
 @pytest.mark.asyncio
 async def test_stdio_server_creates_the_harness_behind_its_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = AsyncMock(spec=HarnessServer)
     factory = AsyncMock(return_value=harness)
-    monkeypatch.setattr(stdio, "create_harness_server", factory)
+    monkeypatch.setattr("vibe.app_server._runtime.create_harness_server", factory)
+    warmed: list[HarnessProcess] = []
+    monkeypatch.setattr(
+        HarnessProcess, "start_connector_warm_up", lambda self: warmed.append(self)
+    )
 
     await stdio.serve_stdio(reader=BytesIO(), writer=BytesIO())
 
@@ -74,34 +223,66 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
     assert call is not None
     args, kwargs = call
     assert isinstance(args[0], StdioJsonRpcTransport)
-    assert kwargs == {
-        "transport_kind": "stdio",
-        "experimental_harness": False,
-        "legacy_harness": False,
-    }
+    assert kwargs == {"transport_kind": "stdio", "process": warmed[0]}
     harness.serve.assert_awaited_once_with()
 
 
+def test_stdio_arguments_take_the_hidden_agent_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["vibe-app-server", "--agent-socket", "/tmp/agent.sock"]
+    )
+
+    arguments = stdio.parse_arguments()
+
+    assert arguments.agent_socket == Path("/tmp/agent.sock")
+    assert arguments.multiplex is False
+
+
 @pytest.mark.asyncio
-async def test_stdio_server_forwards_experimental_harness_selection(
+async def test_stdio_server_with_an_agent_socket_mounts_it_in_its_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = AsyncMock(spec=HarnessServer)
     factory = AsyncMock(return_value=harness)
-    monkeypatch.setattr(stdio, "create_harness_server", factory)
+    monkeypatch.setattr("vibe.app_server._runtime.create_harness_server", factory)
+    built: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "vibe.app_server._runtime.HarnessProcess", lambda **kwargs: built.append(kwargs)
+    )
+    mount = AgentSocketMount(Path("/tmp/agent.sock"))
 
-    await stdio.serve_stdio(
-        reader=BytesIO(), writer=BytesIO(), experimental_harness=True
+    await stdio.serve_stdio(reader=BytesIO(), writer=BytesIO(), agent_socket=mount)
+
+    ((kwargs),) = built
+    assert kwargs["agent_socket"] is mount
+    assert kwargs["additional_builtin_plugin_roots"] == ()
+    assert isinstance(kwargs["services"], ProcessServices)
+    harness.serve.assert_awaited_once_with()
+
+
+def test_stdio_arguments_collect_every_builtin_plugin_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vibe-app-server",
+            "--additional-builtin-plugin-root",
+            "/bundle/plugins",
+            "--additional-builtin-plugin-root",
+            "/bundle/more-plugins",
+        ],
     )
 
-    call = factory.await_args
-    assert call is not None
-    _, kwargs = call
-    assert kwargs == {
-        "transport_kind": "stdio",
-        "experimental_harness": True,
-        "legacy_harness": False,
-    }
+    arguments = stdio.parse_arguments()
+
+    assert arguments.additional_builtin_plugin_roots == [
+        Path("/bundle/plugins"),
+        Path("/bundle/more-plugins"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -192,6 +373,30 @@ async def test_stdio_transport_bounds_pending_output() -> None:
     assert messages == [{"id": 1}, {"id": 2}, {"id": 3}]
 
 
+@pytest.mark.asyncio
+async def test_stdio_transport_batches_messages_queued_behind_a_write() -> None:
+    writer = BlockingWriter()
+    transport = StdioJsonRpcTransport(BytesIO(), writer, outbox_size=8)
+    writes: list[bytes] = []
+    write = writer.write
+
+    def record(data: bytes) -> int:
+        writes.append(data)
+        return write(data)
+
+    writer.write = record  # type: ignore[method-assign]
+    await transport.send({"id": 1})
+    assert await asyncio.to_thread(writer.started.wait, 1)
+    for index in range(2, 6):
+        await transport.send({"id": index})
+    writer.release.set()
+    await asyncio.wait_for(transport.close(), timeout=1)
+
+    assert [len(data.splitlines()) for data in writes] == [1, 4]
+    messages = [json.loads(line) for line in writer.output.getvalue().splitlines()]
+    assert messages == [{"id": index} for index in range(1, 6)]
+
+
 def test_stdio_transport_rejects_unbounded_outbox() -> None:
     with pytest.raises(ValueError, match="outbox_size must be positive"):
         StdioJsonRpcTransport(BytesIO(), BytesIO(), outbox_size=0)
@@ -246,216 +451,3 @@ async def test_stdio_transport_close_is_idempotent() -> None:
 
     assert writer.flush_count == 1
     assert [json.loads(line) for line in writer.getvalue().splitlines()] == [{"id": 1}]
-
-
-@pytest.mark.asyncio
-async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
-    agent_loop = build_test_agent_loop()
-    client_socket, server_socket = socket.socketpair()
-    client_reader = client_socket.makefile("rb")
-    client_writer = client_socket.makefile("wb")
-    server_reader = server_socket.makefile("rb")
-    server_writer = server_socket.makefile("wb")
-
-    async def open_root(_request: RootOpenRequest):
-        return agent_loop
-
-    input_messages = [
-        {
-            "jsonrpc": "2.0",
-            "id": "initialize",
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "test", "version": "1"},
-                "capabilities": {"callbackKinds": ["approval", "user_input"]},
-            },
-        },
-        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
-        {
-            "jsonrpc": "2.0",
-            "id": "start",
-            "method": "session/start",
-            "params": {"agentConfig": {"cwd": str(agent_loop.cwd)}},
-        },
-        {
-            "jsonrpc": "2.0",
-            "id": "read",
-            "method": "session/read",
-            "params": {"sessionId": agent_loop.session_id},
-        },
-    ]
-    server = create_legacy_app_server(
-        StdioJsonRpcTransport(server_reader, server_writer),
-        open_root=open_root,
-        transport_kind="stdio",
-    )
-    serve_task = asyncio.create_task(server.serve())
-
-    async def send(message: dict[str, object]) -> None:
-        await asyncio.to_thread(
-            client_writer.write, json.dumps(message).encode() + b"\n"
-        )
-        await asyncio.to_thread(client_writer.flush)
-
-    async def receive() -> dict[str, Any]:
-        raw = await asyncio.wait_for(
-            asyncio.to_thread(client_reader.readline), timeout=2
-        )
-        return json.loads(raw)
-
-    try:
-        await send(input_messages[0])
-        responses = [await receive()]
-        await send(input_messages[1])
-        await send(input_messages[2])
-        responses.append(await receive())
-        await send(input_messages[3])
-        responses.append(await receive())
-        client_socket.shutdown(socket.SHUT_WR)
-        await asyncio.wait_for(serve_task, timeout=2)
-    finally:
-        if not serve_task.done():
-            serve_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await serve_task
-        for sock in (client_socket, server_socket):
-            with suppress(OSError):
-                sock.shutdown(socket.SHUT_RDWR)
-        for stream in (client_reader, client_writer, server_reader, server_writer):
-            stream.close()
-        client_socket.close()
-        server_socket.close()
-
-    assert responses[0]["result"] == {
-        "serverInfo": {
-            "name": "vibe-app-server",
-            "version": responses[0]["result"]["serverInfo"]["version"],
-        }
-    }
-    assert responses[1]["result"]["state"]["session"]["id"] == (agent_loop.session_id)
-    assert responses[2]["result"]["state"]["session"]["id"] == (agent_loop.session_id)
-
-
-@pytest.mark.asyncio
-async def test_app_server_session_round_trips_a_turn_over_stdio() -> None:
-    client_socket, server_socket = socket.socketpair()
-    client_reader = client_socket.makefile("rb")
-    client_writer = client_socket.makefile("wb")
-    server_reader = server_socket.makefile("rb")
-    server_writer = server_socket.makefile("wb")
-    agent_loop = build_test_agent_loop()
-    client_transport = StdioJsonRpcTransport(client_reader, client_writer)
-    server_transport = StdioJsonRpcTransport(server_reader, server_writer)
-    server = build_test_app_server(agent_loop, server_transport)
-    session = await AppServerSession.start(
-        AppServerClient(client_transport, run_peer=server.serve),
-        client_info=ClientInfo(name="stdio-test", version="1"),
-        capabilities=ClientCapabilities(callback_kinds=["approval", "user_input"]),
-    )
-
-    try:
-        events = [event async for event in session.act("hello")]
-        messages = [
-            event.entry
-            for event in events
-            if isinstance(event, HistoryEntryAdded)
-            and isinstance(event.entry, PublicMessageEntry)
-        ]
-        assert [(message.role, message.text) for message in messages] == [
-            ("user", "hello")
-        ]
-    finally:
-        await session.close()
-        for sock in (client_socket, server_socket):
-            with suppress(OSError):
-                sock.shutdown(socket.SHUT_RDWR)
-        for stream in (client_reader, client_writer, server_reader, server_writer):
-            stream.close()
-        client_socket.close()
-        server_socket.close()
-
-
-@pytest.mark.asyncio
-async def test_stdio_session_start_maps_agent_config_workdir_to_runtime_cwd() -> None:
-    agent_loop = build_test_agent_loop()
-    captured: list[RootOpenRequest] = []
-
-    async def open_root(request: RootOpenRequest):
-        captured.append(request)
-        return agent_loop
-
-    input_messages = [
-        {
-            "jsonrpc": "2.0",
-            "id": "initialize",
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "stdio-client",
-                    "version": "1",
-                    "entrypoint": "programmatic",
-                    "terminalEmulator": "ghostty",
-                },
-                "capabilities": {"clientTools": ["terminal"]},
-            },
-        },
-        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
-        {
-            "jsonrpc": "2.0",
-            "id": "start",
-            "method": "session/start",
-            "params": {
-                "agentConfig": {
-                    "workdir": "/workspace",
-                    "workspaceRoots": ["/other"],
-                    "agent": "plan",
-                    "autoApprove": True,
-                    "enabledTools": ["read_file"],
-                    "disabledTools": ["bash"],
-                    "maxTurns": 3,
-                    "maxPrice": 2.5,
-                    "maxSessionTokens": 1000,
-                    "headless": True,
-                    "trustWorkspace": True,
-                    "mcpServers": [],
-                }
-            },
-        },
-    ]
-    reader = BytesIO(
-        b"".join(json.dumps(message).encode() + b"\n" for message in input_messages)
-    )
-
-    await create_legacy_app_server(
-        StdioJsonRpcTransport(reader, BytesIO()),
-        open_root=open_root,
-        transport_kind="stdio",
-    ).serve()
-
-    assert len(captured) == 1
-    request = captured[0]
-    assert request.client_capabilities.client_tools == ["terminal"]
-    options = request.options
-    assert options.model_dump(
-        by_alias=False,
-        exclude={"completion", "sandbox", "instructions", "tools", "hooks"},
-    ) == {
-        "workdir": "/workspace",
-        "cwd": "/workspace",
-        "workspace_roots": ["/other"],
-        "worktree": None,
-        "agent": "plan",
-        "auto_approve": True,
-        "enabled_tools": ["read_file"],
-        "disabled_tools": ["bash"],
-        "max_turns": 3,
-        "max_price": 2.5,
-        "max_session_tokens": 1000,
-        "headless": True,
-        "trust_workspace": True,
-        "mcp_servers": [],
-    }
-    assert request.client_info.entrypoint == "programmatic"
-    assert request.client_info.terminal_emulator == "ghostty"
-    assert request.session_id is None
-    assert request.continue_latest is False

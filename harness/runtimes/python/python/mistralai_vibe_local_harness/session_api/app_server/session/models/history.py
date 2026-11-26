@@ -1,0 +1,450 @@
+"""Retained public history entries for one Session."""
+
+from typing import Annotated, Any, Literal, Self, get_args
+
+from pydantic import (
+    ConfigDict,
+    Discriminator,
+    Field,
+    JsonValue,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    Tag,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+
+from ....agent_messages import AgentMessageMetadata, AgentResultInput
+from ....session_values import EXPERIMENTAL
+from .base import JsonSchema, SessionModel, read_unknown_variant, write_unknown_variant
+from .common import (
+    AbsolutePath,
+    EncryptedValue,
+    GenerationStatus,
+    HistoryEntryId,
+    MessageRole,
+    ProtocolError,
+    ToolCallId,
+    ToolKind,
+    TurnId,
+    UnixMs,
+    UnknownValue,
+    Uri,
+)
+from .content import ContentBlock, TextContentBlock, refuse_unsupported_blocks
+
+type FileChangeStatus = Literal["proposed", "approved", "denied", "applied", "failed"]
+type NoticeLevel = Literal["info", "warning", "error"]
+type NoticeKind = Literal["tool_discovery", "operation_progress"]
+type CheckpointKind = Literal["compaction", "rollback", "resume", "custom", "model_change"]
+type HistoryEntryType = Annotated[
+    Literal[
+        "message",
+        "reasoning",
+        "plan",
+        "tool_call",
+        "tool_result",
+        "file_change",
+        "resource",
+        "checkpoint",
+        "error",
+        "notice",
+    ],
+    Field(json_schema_extra=EXPERIMENTAL),
+]
+"""The ``type`` of a history entry that is not encrypted. ``EncryptedHistoryEntry.entry_type`` takes
+one of these values. This alias is experimental."""
+
+
+class HistoryImportMessage(SessionModel):
+    type: Literal["message"] = "message"
+    role: MessageRole
+    """``"system"``, ``"user"`` or ``"assistant"``."""
+    content: list[ContentBlock] = Field(default_factory=list)
+    """The message's content blocks. A system message takes text blocks only, and an assistant
+    message takes no embedded resource."""
+
+    @field_validator("content")
+    @classmethod
+    def _refuse_unsupported_blocks(cls, content: list[ContentBlock]) -> list[ContentBlock]:
+        # Imported history is replayed to the model, which can only take blocks a Turn can run.
+        return refuse_unsupported_blocks(content)
+
+
+class HistoryImportReasoning(SessionModel):
+    type: Literal["reasoning"] = "reasoning"
+    text: str
+    """The model's reasoning."""
+
+
+class HistoryImportToolCall(SessionModel):
+    type: Literal["tool_call"] = "tool_call"
+    tool_call_id: ToolCallId
+    """The ID of the call: its result carries the same ID."""
+    tool_kind: ToolKind = "local"
+    """Where the tool comes from, such as ``"local"`` or ``"mcp"``."""
+    name: str
+    """The name of the tool the model called."""
+    arguments: JsonValue = None
+    """The arguments the model passed."""
+
+
+class HistoryImportToolResult(SessionModel):
+    type: Literal["tool_result"] = "tool_result"
+    tool_call_id: ToolCallId
+    """The ID of the call this is the result of."""
+    name: str | None = None
+    """The name of the tool, or ``None``."""
+    result: JsonValue = None
+    """The tool's result, for a call that succeeded."""
+    error: ProtocolError | None = None
+    """For a failed call, its error, such as ``{"message": "..."}``, in place of ``result``: an
+    entry with both is refused."""
+    annotations: dict[str, JsonValue] = Field(default_factory=dict)
+    """Metadata kept with the result."""
+
+    @model_validator(mode="after")
+    def validate_result(self) -> Self:
+        if self.error is not None and self.result is not None:
+            raise ValueError("Imported tool results cannot contain both result and error")
+        return self
+
+
+class HistoryImportSnapshot(SessionModel):
+    type: Literal["snapshot"] = "snapshot"
+    task_name: str
+    """The task the snapshot is of. The checkpoint's message is ``task_name:snapshot_type``."""
+    snapshot_type: str
+    """The kind of snapshot."""
+    value: JsonValue = None
+    """The snapshot's data, kept as the checkpoint's details. The model does not read it."""
+
+
+type HistoryImportEntry = Annotated[
+    HistoryImportMessage
+    | HistoryImportReasoning
+    | HistoryImportToolCall
+    | HistoryImportToolResult
+    | HistoryImportSnapshot,
+    Field(discriminator="type"),
+]
+"""An entry of a history that seeds a new Session: a message, reasoning, a tool call, a tool result
+or a snapshot."""
+
+
+class HistoryEntryMetadata(SessionModel):
+    """Fields that every retained public history entry has, encrypted or not."""
+
+    id: HistoryEntryId
+    index: Annotated[int, Field(ge=0)]
+    turn_id: TurnId | None = None
+    generation_status: GenerationStatus | UnknownValue
+    created_at: UnixMs
+    updated_at: UnixMs
+
+
+class HistoryEntryBase(HistoryEntryMetadata):
+    """Fields shared by every retained public history entry that is not encrypted."""
+
+    annotations: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class MessageHistoryEntry(HistoryEntryBase):
+    type: Literal["message"] = "message"
+    role: MessageRole
+    content: list[ContentBlock] = Field(default_factory=list)
+
+
+class AgentContextMessage(AgentMessageMetadata):
+    """An admitted agent input, independent of its public history position."""
+
+    content: Annotated[list[TextContentBlock], Field(min_length=1)]
+
+
+class AgentContextMessageHistoryEntry(HistoryEntryBase, AgentContextMessage):
+    type: Literal["message"] = "message"
+    role: Literal["context"] = "context"
+
+
+class AgentResultContextMessageHistoryEntry(HistoryEntryBase, AgentResultInput):
+    type: Literal["message"] = "message"
+    role: Literal["context"] = "context"
+
+
+class CapabilityContextMessageHistoryEntry(HistoryEntryBase):
+    """What the model was told about a tool source: that it failed, or that it is back.
+
+    The model gets it just before the input of a Turn start or a steer; history records it
+    after that input. A failure also reaches the user as a notice, whose `details` name the
+    source; a recovery is told only here.
+    """
+
+    type: Literal["message"] = "message"
+    role: Literal["context"] = "context"
+    kind: Literal["capability_source"] = "capability_source"
+    source_id: Annotated[str, Field(min_length=1)]
+    content: Annotated[list[ContentBlock], Field(min_length=1)]
+
+
+class InputContextMessageHistoryEntry(HistoryEntryBase):
+    """A context message sent with a user message: what the model was told with it.
+
+    The model gets it just before the user message of a Turn start or a steer; history
+    records it after that message. The user does not see it as their own message.
+    """
+
+    type: Literal["message"] = "message"
+    role: Literal["context"] = "context"
+    kind: Literal["input"] = "input"
+    content: Annotated[list[ContentBlock], Field(min_length=1)]
+
+
+class UnknownMessageHistoryEntry(HistoryEntryBase):
+    """A message entry whose role, or context kind, was added after your SDK version.
+
+    A reader keeps the entry's position and role so that one new variant does not fail the
+    whole history or event. It also keeps the rest of the entry's fields as they came, so
+    later patches to the entry still apply. Known roles and kinds still validate strictly.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["message"] = "message"
+    role: str
+    kind: str | None = None
+
+
+_MESSAGE_ROLES: frozenset[str] = frozenset(get_args(MessageRole.__value__))
+_CONTEXT_KINDS: dict[str, str] = {
+    "task": "context",
+    "message": "context",
+    "result": "context_result",
+    "capability_source": "capability_context",
+    "input": "input_context",
+}
+
+
+def _message_variant(value: object) -> str:
+    if isinstance(value, dict):
+        role, kind = value.get("role"), value.get("kind")
+    else:
+        role, kind = getattr(value, "role", None), getattr(value, "kind", None)
+    if role in _MESSAGE_ROLES:
+        return "role"
+    # A missing or non-string role is malformed, not unknown: let the strict model reject it.
+    if not isinstance(role, str):
+        return "role"
+    if role == "context" and isinstance(kind, str):
+        return _CONTEXT_KINDS.get(kind, "unknown")
+    return "unknown"
+
+
+type MessageHistoryEntryVariant = Annotated[
+    Annotated[MessageHistoryEntry, Tag("role")]
+    | Annotated[AgentContextMessageHistoryEntry, Tag("context")]
+    | Annotated[AgentResultContextMessageHistoryEntry, Tag("context_result")]
+    | Annotated[CapabilityContextMessageHistoryEntry, Tag("capability_context")]
+    | Annotated[InputContextMessageHistoryEntry, Tag("input_context")]
+    | Annotated[UnknownMessageHistoryEntry, Tag("unknown")],
+    Discriminator(_message_variant),
+]
+
+
+class ReasoningHistoryEntry(HistoryEntryBase):
+    type: Literal["reasoning"] = "reasoning"
+    summary: list[str] = Field(default_factory=list)
+    text: str = ""
+
+
+class PlanItem(SessionModel):
+    id: str
+    text: str
+    status: Literal["pending", "generating", "complete"] | UnknownValue
+
+
+class PlanHistoryEntry(HistoryEntryBase):
+    type: Literal["plan"] = "plan"
+    items: list[PlanItem] = Field(default_factory=list)
+    text: str | None = None
+
+
+class ToolCallHistoryEntry(HistoryEntryBase):
+    type: Literal["tool_call"] = "tool_call"
+    tool_call_id: ToolCallId
+    tool_kind: ToolKind | UnknownValue
+    name: str
+    arguments: JsonValue = None
+    input_schema: JsonSchema | None = None
+    output_schema: JsonSchema | None = None
+
+
+class ToolResultHistoryEntry(HistoryEntryBase):
+    type: Literal["tool_result"] = "tool_result"
+    tool_call_id: ToolCallId
+    name: str | None = None
+    result: JsonValue = Field(
+        default=None,
+        description=(
+            "The tool's result. While the entry is generating, the latest partial result the "
+            "tool reported, if any: each one replaces the previous one, and the completed entry "
+            "carries the final result. The model reads only the final result."
+        ),
+    )
+    error: ProtocolError | None = None
+    duration_ms: Annotated[int | None, Field(ge=0)] = None
+    content: list[ContentBlock] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The tool's content blocks when `result` does not hold them: the result has "
+            "structured output, or the call failed."
+        ),
+    )
+    meta: dict[str, JsonValue] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Result-level host metadata, MCP `_meta`. Never shown to the model.",
+    )
+
+
+class FileChange(SessionModel):
+    path: AbsolutePath
+    kind: Literal["create", "modify", "delete", "rename"] | UnknownValue
+    old_path: AbsolutePath | None = None
+    diff: str | None = None
+
+
+class FileChangeHistoryEntry(HistoryEntryBase):
+    type: Literal["file_change"] = "file_change"
+    changes: list[FileChange] = Field(default_factory=list)
+    status: FileChangeStatus | UnknownValue
+
+
+class ResourceHistoryEntry(HistoryEntryBase):
+    type: Literal["resource"] = "resource"
+    uri: Uri
+    title: str | None = None
+    media_type: str | None = None
+
+
+class CheckpointHistoryEntry(HistoryEntryBase):
+    """A marker in the history that is not conversation content.
+
+    A ``model_change`` checkpoint has ``details`` ``{"model": <the new model>}``.
+    """
+
+    type: Literal["checkpoint"] = "checkpoint"
+    checkpoint_kind: CheckpointKind | UnknownValue
+    message: str | None = None
+    details: JsonValue = None
+
+
+class ErrorHistoryEntry(HistoryEntryBase):
+    type: Literal["error"] = "error"
+    error: ProtocolError
+
+
+class NoticeHistoryEntry(HistoryEntryBase):
+    type: Literal["notice"] = "notice"
+    level: NoticeLevel | UnknownValue
+    notice_kind: NoticeKind | UnknownValue | None = None
+    message: str
+    details: JsonValue = None
+
+
+class EncryptedHistoryEntry(HistoryEntryMetadata):
+    """A history entry of an encrypted Session, with its content sealed.
+
+    The worker writes it instead of the entry. ``encrypted`` holds the whole entry as JSON, except
+    ``index``, which the control plane assigns. A few fields stay in plain text so that the control
+    plane can order, filter and route entries: the id, ``index``, ``turn_id``,
+    ``generation_status`` and timestamps, the entry's ``type`` as ``entry_type``, and its ``role``,
+    ``tool_call_id`` and tool ``name`` when it has them. Every other field, ``annotations``
+    included, is only in ``encrypted``.
+
+    The plain-text fields repeat the sealed ones. The control plane updates ``index``,
+    ``generation_status`` and ``updated_at``, so a client reads these three from the plain text.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    type: Literal["encrypted"] = "encrypted"
+    entry_type: HistoryEntryType | UnknownValue
+    """The ``type`` of the sealed entry."""
+    role: MessageRole | Literal["context"] | UnknownValue | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """The ``role`` of a sealed message entry."""
+    tool_call_id: ToolCallId | None = Field(default=None, exclude_if=lambda value: value is None)
+    """The ``tool_call_id`` of a sealed tool call or tool result entry."""
+    name: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """The tool ``name`` of a sealed tool call or tool result entry."""
+    encrypted: EncryptedValue
+
+
+class UnknownHistoryEntry(HistoryEntryBase):
+    """A history entry of a type added after your SDK version.
+
+    Such an entry is kept, so that it does not fail a whole history page or drop the event
+    that carries it. Its type is saved in ``original_type`` and its other fields are kept as
+    they came, so later patches to it still apply. Its own ``type`` is ``unknown``, so a
+    ``match`` on ``type`` still works for the known entries. Serialized, it has its own
+    ``type`` and no ``original_type``; its own fields are as they came, the fields every
+    entry shares as this reader models them. Entries of a known type are validated as
+    before.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["unknown"] = "unknown"
+    original_type: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_wire_entry(cls, value: object) -> object:
+        return read_unknown_variant(value)
+
+    @model_serializer(mode="wrap")
+    def write_wire_entry(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        return write_unknown_variant(handler(self), self.original_type, self.model_extra, info)
+
+
+def _history_entry_variant(value: object) -> str | None:
+    entry_type = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+    # A missing or non-string type is malformed, not unknown: no variant accepts it.
+    if not isinstance(entry_type, str):
+        return None
+    return entry_type if entry_type in _HISTORY_ENTRY_TYPES else "unknown"
+
+
+type HistoryEntry = Annotated[
+    Annotated[MessageHistoryEntryVariant, Tag("message")]
+    | Annotated[ReasoningHistoryEntry, Tag("reasoning")]
+    | Annotated[PlanHistoryEntry, Tag("plan")]
+    | Annotated[ToolCallHistoryEntry, Tag("tool_call")]
+    | Annotated[ToolResultHistoryEntry, Tag("tool_result")]
+    | Annotated[FileChangeHistoryEntry, Tag("file_change")]
+    | Annotated[ResourceHistoryEntry, Tag("resource")]
+    | Annotated[CheckpointHistoryEntry, Tag("checkpoint")]
+    | Annotated[ErrorHistoryEntry, Tag("error")]
+    | Annotated[NoticeHistoryEntry, Tag("notice")]
+    | Annotated[EncryptedHistoryEntry, Tag("encrypted")]
+    | Annotated[UnknownHistoryEntry, Tag("unknown")],
+    Discriminator(_history_entry_variant),
+]
+
+# The tags of the union's variants, so a new entry type is known once it joins the union.
+_HISTORY_ENTRY_TYPES: frozenset[str] = frozenset(
+    metadata.tag
+    for variant in get_args(get_args(HistoryEntry.__value__)[0])
+    for metadata in variant.__metadata__
+    if isinstance(metadata, Tag) and metadata.tag != "unknown"
+)
+
+HistoryEntryAdapter: TypeAdapter[HistoryEntry] = TypeAdapter(HistoryEntry)

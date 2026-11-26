@@ -1,0 +1,5 @@
+[profile.default]
+# Fail a hung test fast instead of burning the CI job's time budget. No
+# retries: per-test process isolation already removes shared-state flakes,
+# and a retry would mask real ones.
+slow-timeout = { period = "60s", grace-period = "10s", terminate-after = 2 }

@@ -9,10 +9,9 @@ Use this when the user asks you to create, update, or delete a Vibe skill.
 
 ## Gathering requirements
 
-When creating a new skill, ask the user for the details you are missing. **Ask
-one question at a time and wait for the answer before asking the next.** Never
-send multiple questions in a single message — it is bewildering. Gather, in
-order:
+When creating a new skill, ask the user for every detail you are missing **in a
+single turn**, and ask a follow-up only when an answer opens a new decision.
+Cover:
 
 1. Name — a slug (lowercase, hyphens), e.g. `run-migrations` or
    `format-changelog`.
@@ -20,10 +19,12 @@ order:
    the model sees.
 3. Instructions — what should the skill actually tell the model to do? Steps,
    conventions, commands, gotchas.
+4. Scope — project or global, when it is not obvious.
 
-Skip any question the user has already answered. Once you have all three,
-confirm the scope (project vs global) if it is not obvious, then write the
-skill.
+Skip any question the user has already answered. When only the scope is
+missing and the `ask_user_question` tool is available, ask it there as a
+choice; otherwise ask everything, scope included, in one plain-text message.
+Once every detail is settled, write the skill.
 
 ## What a skill is
 
@@ -41,12 +42,14 @@ selected.
 4. `~/.vibe/skills/` — user global
 5. `~/.agents/skills/` — user global
 
-Precedence: built-in skills are seeded first and their names are **reserved** —
-a user skill whose name collides with a built-in is silently skipped at load
-time and never appears. Among the paths above, the first directory to define a
-given name wins; later duplicates are skipped. Built-in skills are read-only.
-Registry skills are materialized under `VIBE_HOME` and should not be
-hand-edited.
+Precedence: built-in skills are named `vibe:<name>`, so a skill you write never
+collides with one and keeps its own name. Among the paths above, the first
+directory to define a given name wins; later duplicates are skipped. Built-in
+skills are read-only. Registry skills are materialized under `VIBE_HOME` and
+should not be hand-edited.
+With `experimental_enable_registry_skills`, the nearest scope wins instead: the
+project's skills, files then registry pins, come before global ones, files then
+pins.
 
 Choose the scope before writing: use `.vibe/skills/<name>/` for a skill scoped
 to this project, or `~/.vibe/skills/<name>/` for one available everywhere. Ask
@@ -107,7 +110,7 @@ them with `read_file` on demand.
 ## Applying changes
 
 Writing under a skills directory goes through the normal `write_file` / `edit`
-permission prompts — there is no separate proposal step. After changes, tell the
-user they can run `/reload` to pick up the new or edited skill without
-restarting. Keep the final summary brief; do not paste full file contents unless
+permission prompts — there is no separate proposal step. A running session
+picks up the new or edited skill on its own; if it does not (sandboxed session,
+or `file_watcher_for_autocomplete` off), tell the user to run `/reload`. Keep the final summary brief; do not paste full file contents unless
 the user asks.

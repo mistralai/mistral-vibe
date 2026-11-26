@@ -1,51 +1,103 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from enum import StrEnum, auto
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
+import tempfile
 import threading
-from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import JsonValue, ValidationError
+from pydantic import ValidationError
 
 from vibe import __version__
 from vibe._experimental_harness import (
-    ExperimentalHarnessUnavailableError,
     create_experimental_harness_host,
+    runtime_startup_error,
 )
+from vibe.app_server._admin_config import (
+    OrgConfigAttempt,
+    OrgConfigReport,
+    OrgConfigSource,
+)
+from vibe.app_server._agent_types import (
+    AgentToolCatalogue,
+    AgentTypeSource,
+    agent_file_issues,
+    resolve_agent_types,
+    workspace_agent_rejections,
+    workspace_agent_types,
+)
+from vibe.app_server._cached_layers import (
+    OIDC_TENANT_UNRESOLVED,
+    apply_cached_layers,
+    oidc_tenant_unresolved,
+    org_config_key,
+)
+from vibe.app_server._client_provided_tools import (
+    ClientToolCall,
+    ClientToolDeclarationError,
+    ClientToolDefinition,
+    ClientToolError,
+    ClientToolExecutor,
+    ClientToolResult,
+    ClientToolRunner,
+    ClientTools,
+)
+from vibe.app_server._connection_credentials import ConnectionCredentials
+from vibe.app_server._connection_protocol import AgentPlugin, ClientToolDefinitionParams
+from vibe.app_server._credential_selection import DesktopCredentialUnavailable
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._host_hooks import (
+    SESSION_START_CONTEXT_BINDING_ID,
+    HostHook,
+    HostHooks,
+    SessionHooks,
+    SessionStartContexts,
+    session_start_context_binding,
+    session_start_context_handler,
+)
+from vibe.app_server._ignored_tool_settings import ignored_tool_settings
+from vibe.app_server._imports import build_local_imports_service
+from vibe.app_server._launch_context import client_launch_context
+from vibe.app_server._legacy_import import LegacySessionStore
 from vibe.app_server._projection import (
     project_config_view,
+    project_selection,
     project_skill_summaries,
-    project_unified_agent_summaries,
 )
+from vibe.app_server._provided_tools import enter_worktree_offered, vibe_tool_groups
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._session_backend_services import SessionBackendServices
-from vibe.app_server._session_model import (
-    active_model_is_pinned,
-    clear_session_active_model_override,
-    config_active_model,
-    set_session_active_model_override,
+from vibe.app_server._session_config_cache import (
+    BuiltSessionConfig,
+    SessionConfigCache,
+    SessionConfigKey,
 )
-from vibe.app_server._skills import discover_session_skills
+from vibe.app_server._session_model import active_model_is_pinned
+from vibe.app_server._session_spawn import spawn_models
+from vibe.app_server._skills import discover_session_skills, host_skills
+from vibe.app_server._surface_instructions import (
+    ClientSurface,
+    client_surface,
+    with_surface_instructions,
+)
+from vibe.app_server._worktree_session import session_harness_files
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.client_tools import ClientToolHandler
-from vibe.app_server.connector_catalog import (
-    ConnectorCatalogError,
-    ConnectorCatalogService,
-)
+from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.models import (
     AgentStatsSnapshot,
     ConfigIssue,
     ConnectorCounts,
     MCPState,
+    PublicChildModel,
     ToolSummary,
 )
 from vibe.app_server.protocol import (
@@ -58,66 +110,82 @@ from vibe.app_server.protocol import (
     SessionOptions,
     TransportKind,
 )
+from vibe.app_server.run_export import HeadlessUsageError, RunOutcome
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
-from vibe.core.agent_loop import AgentLoop, AgentRuntimePolicy
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import AgentProfile, ApprovalPolicyName
+from vibe.core.agents.registry import agent_refused_tools, apply_profile_overrides
 from vibe.core.config import (
+    DefaultConfigLayer,
+    GrowthbookLayer,
     MCPHttp,
     MCPServer,
     MCPStaticAuth,
     MCPStdio,
     MCPStreamableHttp,
-    MissingAPIKeyError,
+    ModelConfig,
     SessionLoggingConfig,
+    UtilityFeature,
     VibeConfigSchema,
     build_default_orchestrator,
-    resolve_api_key,
 )
+from vibe.core.config.admin_config import AdminConfigApplyResult, AdminConfigOutcome
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.config.layers.growthbook import GrowthbookLayer
-from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.layers.admin import enforced_keys
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.experiments.cache import load_cached_eval_response
-from vibe.core.experiments.client import RemoteEvalClient
-from vibe.core.experiments.manager import (
-    ExperimentManager,
-    config_variants_from_response,
-)
-from vibe.core.experiments.models import EvalResponse
+from vibe.core.config.shell_timeouts import shell_max_timeout, shell_timeout_seconds
+from vibe.core.git.worktree import ManagedWorktree
 from vibe.core.hooks.config import load_hooks_file, load_hooks_from_fs
-from vibe.core.hooks.models import HookConfigResult
-from vibe.core.paths import VIBE_HOME, WORKTREES_DIR, dedup_paths
-from vibe.core.session import last_session_pointer
-from vibe.core.session.session_id import extract_suffix, generate_session_id
-from vibe.core.session.session_index import warm_session_index
-from vibe.core.session.session_interop import (
-    InvalidLegacyInteropSourceError,
-    export_legacy_committed_history,
-    import_unified_committed_history,
-    resolve_legacy_session_reference,
+from vibe.core.hooks.models import (
+    HOST_HOOK_TYPES,
+    HookConfig,
+    HookConfigResult,
+    HookProtocol,
+    HookSource,
+    HookType,
+    RuntimeHookDefinition,
 )
-from vibe.core.session.session_lease import SessionLease
-from vibe.core.session.session_loader import SessionLoader
-from vibe.core.session.session_logger import SessionLogger
-from vibe.core.skills.models import SkillInfo
-from vibe.core.system_prompt import get_agents_md_section
-from vibe.core.telemetry.build_metadata import build_launch_context
+from vibe.core.llm.utility_completion import (
+    ensure_utility_models_probed,
+    select_utility_model,
+)
+from vibe.core.llm.utility_credentials import UtilityCredentials
+from vibe.core.paths import VIBE_HOME
+from vibe.core.platform_auth import CachedPrincipal
+from vibe.core.prompts import UtilityPrompt
+from vibe.core.session.session_permissions import start_restrict_session_log_permissions
+from vibe.core.skills.models import SkillInfo, SkillScope
+from vibe.core.system_prompt import (
+    ProjectContextProvider,
+    get_agents_md_section,
+    get_commit_signature_section,
+    git_bash_form,
+)
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.models import ToolPermission
 from vibe.core.tools.permissions import PermissionStore
-from vibe.core.tracing import setup_tracing
-from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
+from vibe.core.types import Backend
 from vibe.core.utils import get_windows_bash_path, is_windows
 from vibe.core.utils.matching import name_matches
-from vibe.observability.logging import logger, set_config_log_level
+from vibe.core.utils.shell import VIBE_SESSION_ENV
+from vibe.observability.logging import logger
 from vibe.utils import AgentEntrypoint
-from vibe.utils.cache_store import FileSystemCacheStore
-from vibe.utils.http import get_server_url_from_api_base
+from vibe.utils.http import (
+    configure_ssl_context,
+    get_server_url_from_api_base,
+    with_user_agent,
+)
+from vibe.utils.paths import is_dangerous_directory
 
 _SHORT_SESSION_ID_LENGTH = 8
-_PUBLIC_MISTRAL_API_ORIGIN = ("https", "api.mistral.ai", 443)
+# A tool result past about 16,000 characters is saved to a file, and the model
+# gets its first and last 4,000 or so with the file's path. The Harness Core
+# counts about four characters a token. The gap between the two keeps a result
+# just over the threshold from being saved for little gain.
+_LARGE_OUTPUT_MAX_TOKENS = 4_000
+_LARGE_OUTPUT_VISIBLE_TOKENS = 2_000
 type _CommandEnvironmentMode = Literal["unix", "git_bash", "powershell"]
 
 
@@ -129,36 +197,334 @@ def _command_environment_mode() -> _CommandEnvironmentMode:
     return "powershell"
 
 
-def _is_public_mistral_api(api_base: str) -> bool:
-    parsed = urlsplit(api_base)
-    try:
-        port = parsed.port
-    except ValueError:
-        return False
-    effective_port = 443 if port is None and parsed.scheme.lower() == "https" else port
-    origin = (parsed.scheme.lower(), (parsed.hostname or "").lower(), effective_port)
-    return origin == _PUBLIC_MISTRAL_API_ORIGIN
+def _command_tool_name(mode: _CommandEnvironmentMode) -> str:
+    """The Vibe tool whose settings configure the command environment's tool."""
+    return "bash" if mode == "unix" else mode
 
 
-def _build_unified_system_instructions(
-    config: VibeConfigSchema, harness_files: HarnessFilesManager
+def _bash_timeout(
+    tool_name: str, overrides: Mapping[str, object] | None
+) -> RustBashTimeoutSettings:
+    """The command tool's default and maximum timeouts, in seconds, for Core.
+
+    Both as the user set them in the configuration (or the agent profile), or
+    Vibe's own when neither is set; the native tool's defaults do not apply.
+    Each is read as the config schema reads it at load, exactly, so Core gets
+    the number in the config. A default set alone within Vibe's own maximum
+    runs under that maximum; other partial pairs are config errors at load.
+    """
+    from mistralai_vibe_local_harness.vibe import bash_timeout
+
+    overrides = overrides or {}
+    seconds = {
+        key: shell_timeout_seconds(tool_name, key, overrides[key])
+        for key in ("default_timeout", "max_timeout_seconds")
+        if overrides.get(key) is not None
+    }
+    default = seconds.get("default_timeout")
+    return bash_timeout(
+        default,
+        shell_max_timeout(default, seconds.get("max_timeout_seconds")),
+        default_setting=f"tools.{tool_name}.default_timeout",
+        max_setting=f"tools.{tool_name}.max_timeout_seconds",
+    )
+
+
+def _build_project_context_section(
+    config: VibeConfigSchema, harness_files: HarnessFilesManager, cwd: Path
 ) -> str:
-    from mistralai_vibe_local_harness.vibe import build_vibe_code_system_instructions
+    """Replicate the legacy system prompt's project-context block.
+
+    Includes the absolute working directory, git status (branch, main
+    branch, porcelain status, recent commits), and any extra working
+    directories — the same information ``build_system_prompt`` injects for
+    the legacy backend.
+    """
+    from string import Template
+
+    from vibe.core.prompts import UtilityPrompt
+
+    is_dangerous, reason = is_dangerous_directory(cwd)
+    if is_dangerous:
+        template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
+        return Template(template).safe_substitute(
+            reason=reason.lower(), abs_path=cwd.resolve()
+        )
+
+    context = ProjectContextProvider(
+        config=config.project_context, root_path=cwd
+    ).get_full_context()
+
+    cwd_resolved = cwd.resolve()
+    return _with_extra_roots(
+        context,
+        [
+            *(
+                root
+                for root in harness_files.project_roots
+                if root.resolve() != cwd_resolved
+            ),
+            *harness_files.access_roots,
+        ],
+    )
+
+
+def _prefetch_project_context(config: VibeConfigSchema, cwd: Path) -> None:
+    # Git runs while the rest of the session is built; derivation waits on it.
+    if not config.include_project_context or is_dangerous_directory(cwd)[0]:
+        return
+    ProjectContextProvider(
+        config=config.project_context, root_path=cwd
+    ).prefetch_git_status()
+
+
+def _with_extra_roots(context: str, extra_roots: Sequence[Path]) -> str:
+    if not extra_roots:
+        return context
+    dirs_lines = "\n".join(_extra_root_line(d) for d in extra_roots)
+    return (
+        f"{context}\n\nAdditional working directories (treated with the same "
+        f"file-access permissions as the primary working directory):\n" + dirs_lines
+    )
+
+
+def _extra_root_line(root: Path) -> str:
+    if git_bash_path := git_bash_form(root):
+        return f" - {root} (Git Bash path: {git_bash_path})"
+    return f" - {root}"
+
+
+def _child_models(
+    sources: Iterable[AgentTypeSource],
+    model_of: Callable[[Mapping[str, Any]], PublicChildModel | None],
+) -> dict[str, PublicChildModel]:
+    """The model each agent type declares, by name; a later source takes a name over."""
+    models = {source.name: model_of(source.profile.overrides) for source in sources}
+    return {name: model for name, model in models.items() if model is not None}
+
+
+def _agent_profile_prompt(
+    profile: AgentProfile,
+) -> tuple[str | None, ConfigIssue | None]:
+    """The prompt text an agent profile asks for, or why it cannot have it.
+
+    Only a prompt id the profile itself declares is resolved as a file. The id
+    the config carries otherwise is a GrowthBook variant the SDK owns, and
+    reading a bundled Vibe prompt of the same name would quietly serve the
+    legacy text instead.
+    """
+    from vibe.core.prompts import MissingPromptFileError, load_system_prompt
+
+    prompt_id = profile.overrides.get("system_prompt_id")
+    if not isinstance(prompt_id, str) or not prompt_id:
+        return None, None
+    try:
+        return load_system_prompt(prompt_id), None
+    except (MissingPromptFileError, ValueError) as error:
+        logger.warning("Agent %r: %s", profile.name, error)
+        return None, ConfigIssue(
+            file=str(profile.source_path or profile.name),
+            message=f"Agent '{profile.name}': {error}",
+        )
+
+
+_DESKTOP_FILE_LINK_INSTRUCTIONS = """\
+## Local Desktop file references
+
+When referring to an existing file inside the current session workspace in a
+user-facing response, use a descriptive Markdown link with an absolute file: URI,
+for example [src/main.ts:42](file:///absolute/worktree/src/main.ts).
+Resolve relative paths against the current session workspace, including its
+active worktree, not a previous workspace or the original repository checkout.
+Use standard file URI syntax: file:///absolute/path on POSIX and
+file:///C:/absolute/path on Windows, with forward slashes. Percent-encode spaces
+and URI-reserved characters in file names, such as # and %, in the URI.
+Keep line numbers in the link label, not as :42 or #L42 in the URI: Files opens
+the file, not a particular line. Keep URLs to remote resources as HTTP/HTTPS.
+Do not invent paths or use file: links for directories, missing files, remote
+sandbox files, or files outside the current session workspace.
+"""
+
+
+def _growthbook_behavior(config: VibeConfigSchema) -> str | None:
+    """The behavior GrowthBook sends, or ``None`` to use the variant's.
+
+    Only text the GrowthBook layer supplied counts, and only while no layer
+    above it chose ``system_prompt_id``: a prompt the user picked keeps winning
+    over an experiment, as it does over the GrowthBook variant.
+    """
+    if not config.system_prompt_behavior:
+        return None
+    if config.origin_of("system_prompt_behavior") != GrowthbookLayer.NAME:
+        return None
+    if config.origin_of("system_prompt_id") not in {
+        None,
+        DefaultConfigLayer.NAME,
+        GrowthbookLayer.NAME,
+    }:
+        return None
+    return config.system_prompt_behavior
+
+
+def _build_unified_system_instructions(  # noqa: PLR0913 - one input per prompt section
+    config: VibeConfigSchema,
+    harness_files: HarnessFilesManager,
+    *,
+    cwd: Path,
+    surface: ClientSurface,
+    base: str | None = None,
+    extra: str | None = None,
+    sandbox_workspace: SandboxWorkspaceContext | None = None,
+    sandbox_roots: Sequence[Path] = (),
+    project_instructions: str | None = None,
+    background_processes: bool = False,
+    command_environment: str = "unix",
+    local_desktop: bool = False,
+    worktree_rule: CheckoutState | None = None,
+) -> str:
+    """The session's system instructions.
+
+    With ``sandbox_workspace``, the project context and the project AGENTS.md
+    docs come from the sandbox the tools run in rather than the host's disk;
+    ``sandbox_roots`` are the session's open directories other than the cwd.
+    ``project_instructions`` go with the project AGENTS.md docs, ahead of them.
+    Only with ``background_processes``, in a ``command_environment`` the
+    Harness Core advises the process tools for, does the shell guidance say to
+    start long work in the background. ``surface`` picks the block the app
+    server appends to the behavior, the client-independent product prompt; a
+    ``base`` prompt replaces both.
+    """
+    from mistralai_vibe_local_harness.vibe import (
+        build_vibe_code_system_instructions,
+        with_shell_guidance,
+    )
 
     # The Vibe config layer resolves the GrowthBook system-prompt variant before
-    # the experimental Runtime is composed. The SDK owns the corresponding text.
-    # AGENTS.md docs are host-composed custom instructions: the harness core
-    # never loads them, so parity with the legacy prompt is restored here. The
-    # core appends its capability sections after this text, keeping the docs
-    # above skills/plugins in the final prompt.
-    instructions = build_vibe_code_system_instructions(variant=config.system_prompt_id)
+    # the experimental Runtime is composed. The behavior is that variant's SDK
+    # text, or the text GrowthBook sends in its place, and the surface block
+    # follows either. A behavior GrowthBook sends takes the default layout: its
+    # variant is whatever the variant experiment assigned, which says nothing
+    # of the text. The active agent's own prompt, read off disk, arrives as
+    # ``base`` and replaces both. AGENTS.md docs are host-composed custom
+    # instructions: the harness core never loads them, so parity with the
+    # legacy prompt is restored here. The core appends its capability sections
+    # after this text, keeping the docs above skills/plugins in the final
+    # prompt.
+    growthbook_behavior = _growthbook_behavior(config)
+    if growthbook_behavior is None:
+        behavior = build_vibe_code_system_instructions(variant=config.system_prompt_id)
+        variant: str | None = config.system_prompt_id
+    else:
+        behavior, variant = growthbook_behavior, None
+    instructions = with_shell_guidance(
+        base or with_surface_instructions(behavior, variant=variant, surface=surface),
+        background_processes=background_processes,
+        command_environment=command_environment,
+    )
+    if local_desktop:
+        instructions = f"{instructions}\n\n{_DESKTOP_FILE_LINK_INSTRUCTIONS.strip()}"
+    if extra:
+        instructions = f"{instructions}\n\n{extra}"
+
+    if config.include_commit_signature:
+        instructions = f"{instructions}\n\n{get_commit_signature_section()}"
+
+    if worktree_rule is not None:
+        instructions = (
+            f"{instructions}\n\n"
+            f"{_WORKTREE_RULES[(config.auto_worktree, worktree_rule)]}"
+        )
+
     if config.include_project_context:
+        if sandbox_workspace is None:
+            project_context = _build_project_context_section(config, harness_files, cwd)
+            project_docs = harness_files.load_project_docs()
+        else:
+            project_context = _with_extra_roots(
+                sandbox_workspace.project_context, sandbox_roots
+            )
+            project_docs = sandbox_workspace.project_docs
+        instructions = f"{instructions}\n\n{project_context}"
         agents_md_section = get_agents_md_section(
-            harness_files.load_user_doc(), harness_files.load_project_docs()
+            harness_files.load_user_doc(),
+            project_docs,
+            project_instructions=project_instructions,
         )
         if agents_md_section:
             instructions = f"{instructions}\n\n{agents_md_section}"
     return instructions
+
+
+type CheckoutState = Literal["clean", "in_progress"]
+
+_WORKTREE_RULE_COMMON = """\
+Skip all this for questions, reviews and read-only investigation. Once you \
+are in a worktree, the choice is settled: keep editing there. When a task \
+continues work you started in a worktree, re-enter that one rather than \
+creating another."""
+
+# The `auto_worktree` setting picks the pair, with the CheckoutState of the
+# session's cwd: off edits the checkout in place, on enters a worktree before
+# the first edit. An explicit user request for their checkout or for a
+# worktree always wins over both.
+_WORKTREE_RULES: dict[tuple[bool, CheckoutState], str] = {
+    (False, "clean"): f"""\
+## Worktrees
+
+The working directory is the user's own checkout. Make edits in place; call \
+`enter_worktree` only when the user asks to work in a worktree. \
+{_WORKTREE_RULE_COMMON}""",
+    (False, "in_progress"): f"""\
+## Worktrees
+
+The working directory is the user's own checkout, and it holds work in \
+progress: a branch other than the default one, or uncommitted changes (the git \
+status above shows which). A new worktree starts from the default branch \
+without that work, so when the request is about that work (fixing, finishing \
+or testing it), edit the checkout in place. Any other request too: make edits \
+in place, calling `enter_worktree` only when the user asks to work in a \
+worktree. {_WORKTREE_RULE_COMMON}""",
+    (True, "clean"): f"""\
+## Worktrees
+
+The working directory is the user's own checkout. Unless the user asks to \
+work in their checkout, call `enter_worktree` before the first edit and work \
+there. {_WORKTREE_RULE_COMMON}""",
+    (True, "in_progress"): f"""\
+## Worktrees
+
+The working directory is the user's own checkout, and it holds work in \
+progress: a branch other than the default one, or uncommitted changes (the git \
+status above shows which). A new worktree starts from the default branch \
+without that work, so when the request is about that work (fixing, finishing \
+or testing it), edit the checkout in place. Any other request: unless the \
+user asks to work in their checkout, call `enter_worktree` before the first \
+edit and work there. {_WORKTREE_RULE_COMMON}""",
+}
+
+
+def _checkout_state(cwd: Path) -> CheckoutState | None:
+    """What the agent leaves behind by moving off ``cwd`` into a worktree.
+
+    None where it cannot: no repository, one without commits, or a cwd that
+    already is a managed worktree.
+    """
+    from vibe.core.git.errors import GitError
+    from vibe.core.git.repo import GitRepo
+
+    if ManagedWorktree.at(cwd) is not None:
+        return None
+    try:
+        with GitRepo.open(cwd) as repository:
+            if not repository.has_commits():
+                return None
+            branch = repository.branch()
+            on_default = branch is not None and branch == repository.base_branch()
+            if on_default and not repository.has_uncommitted_changes():
+                return "clean"
+            return "in_progress"
+    except GitError:
+        return None
 
 
 def _build_launch_context_from_services(
@@ -169,28 +535,79 @@ def _build_launch_context_from_services(
         client_info = services.client_info()
     except RuntimeError:
         return None
-    return build_launch_context(
-        agent_entrypoint=client_info.entrypoint,
-        agent_version=__version__,
-        client_name=client_info.name,
-        client_version=client_info.version,
-        terminal_emulator=client_info.terminal_emulator,
-    )
+    return client_launch_context(client_info)
 
 
-def _utility_credential_provider(config: VibeConfigSchema) -> ProviderConfig:
-    """The provider a background title's credential resolves against.
+def session_spawner_for(services: SessionBackendServices) -> SessionSpawner | None:
+    return services if services.client_capabilities().session_spawn else None
 
-    Bound to the Mistral provider (the destination the fast title route targets)
-    rather than re-running utility selection, so a vanished Mistral key surfaces
-    as auth-required instead of resolving the active provider's key — which the
-    route would then send to the Mistral endpoint. Raising here is turned into an
-    auth-required state by the credential service.
+
+def session_peers_for(services: SessionBackendServices) -> SessionPeers | None:
+    return services if services.client_capabilities().session_peers else None
+
+
+def _auto_titles_enabled(config: VibeConfigSchema, entrypoint: str) -> bool:
+    """Only interactive clients get background titles: terminal, desktop, and
+    the VS Code extension's ACP surface (its sessions list renders titles).
+
+    VIBE_TEST_DISABLE_AUTO_TITLE is the same kill switch the agent loop
+    honors, for harnesses that run the real CLI against a mock model.
     """
-    provider = config.get_mistral_provider()
-    if provider is None:
-        raise ValueError("No Mistral provider available for utility completions")
-    return provider
+    if os.environ.get("VIBE_TEST_DISABLE_AUTO_TITLE") == "1":
+        return False
+    return config.session_logging.generate_titles and entrypoint in {
+        "cli",
+        "desktop",
+        "acp",
+    }
+
+
+def _named_provider(name: str) -> Callable[[VibeConfigSchema], ProviderConfig]:
+    """Select a provider by name, so a key always matches its route's endpoint.
+
+    Raising becomes an auth-required state in the credential service.
+    """
+
+    def select(config: VibeConfigSchema) -> ProviderConfig:
+        provider = next((p for p in config.providers if p.name == name), None)
+        if provider is None:
+            raise ValueError(f"Provider '{name}' is no longer configured")
+        return provider
+
+    return select
+
+
+def _require_active_provider_credential(
+    config: VibeConfigSchema,
+    platform_credentials: PlatformCredentialFactory,
+    run_keys: Mapping[str, str] | None,
+) -> None:
+    """Raise ``MissingAPIKeyError`` when the active provider has no credential.
+
+    A Mistral provider's model calls send the connection's credential, so it
+    is that credential that must exist: a Desktop sign-in, the CLI's own OIDC
+    session, or the API key. A Desktop connection without a sign-in starts
+    anyway: its first model call reports ``credential_unavailable``, which an
+    API key would not fix. Any other provider, and a run that brings its own
+    key, is checked for its key as before.
+    """
+    try:
+        provider = config.get_active_provider()
+    except ValueError:
+        return
+    if (
+        provider.backend == Backend.MISTRAL
+        and not provider.uses_vertex
+        and not (run_keys and run_keys.get(provider.api_key_env_var))
+    ):
+        selected = platform_credentials(provider.api_key_env_var)
+        if not isinstance(selected, CachedPrincipal) or selected.has_credential():
+            return
+        # Desktop's missing sign-in fails the first model call with its own
+        # reason; asking for an API key would be wrong advice.
+        if isinstance(selected, DesktopCredentialUnavailable):
+            return
+    config.require_active_provider_api_key()
 
 
 def _utility_provider_route(
@@ -219,30 +636,72 @@ def _utility_provider_route(
         credentials=credentials,
         reasoning_field_name=provider_cfg.reasoning_field_name,
         emits_finish_reason=provider_cfg.emits_finish_reason,
-        extra_headers=dict(provider_cfg.extra_headers),
+        tool_result_images=provider_cfg.sends_tool_result_images,
+        extra_headers=with_user_agent(provider_cfg.extra_headers, provider_cfg.backend),
         project_id=provider_cfg.project_id,
         region=provider_cfg.region,
     )
 
 
+def _compaction_model_input_modalities(
+    agent: ModelFacts, compaction: ModelFacts
+) -> list[RustInputModality] | None:
+    """What the compaction model reads, when it differs from the agent model."""
+    from mistralai_vibe_local_harness.vibe import rust_input_modalities
+
+    if list(compaction.input_modalities) == list(agent.input_modalities):
+        return None
+    return rust_input_modalities(compaction.input_modalities)
+
+
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
+    from mistralai_vibe_local_harness.protocol import (
+        RustBashTimeoutSettings,
+        RustInputModality,
+        RustRuntimeBuiltinToolName,
+        RustToolGroupDefinition,
+    )
     from mistralai_vibe_local_harness.vibe import (
+        HelperCrashCount,
+        HookContext,
         LocalProviderRoute,
         ProviderCredentialProvider,
+        SandboxAdapter,
     )
-
+    from mistralai_vibe_local_harness.vibe.completion_profile import ModelFacts
+    from mistralai_vibe_local_harness.vibe.plugins import DeclaredCompletionRoute
     from vibe.app_server._account import AccountGateway
+    from vibe.app_server._agent_socket import AgentSocketMount
     from vibe.app_server._identity import IdentityGateway
+    from vibe.app_server._left_turns import (
+        LeftTurns,
+        ListOnOwnChannel,
+        OpenLeftTurnChannel,
+    )
+    from vibe.app_server._local_projects import LocalProjectStore
     from vibe.app_server._mcp_auth import MCPAuthenticationService
+    from vibe.app_server._open_sessions import OpenSessions
+    from vibe.app_server._org_config_service import OrgConfigKey
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._plugins import SessionPlugins, UnifiedPluginProvider
+    from vibe.app_server._process_services import ProcessServices
+    from vibe.app_server._process_settings import ProcessSettings
+    from vibe.app_server._provider_credentials import ProviderCredentialService
+    from vibe.app_server._sandbox_skills import SandboxSkills
+    from vibe.app_server._sandbox_workspace import SandboxWorkspaceContext
     from vibe.app_server._session_backend_port import ResolvedMCPCatalog
-    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionContext
+    from vibe.app_server._session_peers import SessionPeers
+    from vibe.app_server._session_spawn import SessionSpawner
+    from vibe.app_server._subagent_permissions import SubagentPermissions
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedReadContext,
+        UnifiedSessionContext,
+    )
+    from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
     from vibe.app_server.server import AppServer
     from vibe.core.config import ProviderConfig
+    from vibe.core.platform_auth import PlatformCredentialFactory
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
-    from vibe.core.tools.mcp.registry import MCPRegistry
 
 
 def merge_plugin_mcp_into_catalog(
@@ -399,194 +858,122 @@ class LocalHarnessOptions:
     )
     session: LocalSessionIntent = field(default_factory=NewSessionIntent)
     client_tool_handler: ClientToolHandler | None = None
-    experimental_harness: bool = field(default=False, kw_only=True)
-    legacy_harness: bool = field(default=False, kw_only=True)
 
-
-class RuntimeSessionNotFoundError(RuntimeError):
-    pass
-
-
-class RuntimeAuthenticationError(RuntimeError):
-    def __init__(self, provider: str) -> None:
-        self.provider = provider
-        super().__init__(f"Authentication is required for provider: {provider}")
-
-
-class RuntimeConfigurationError(RuntimeError):
-    pass
-
-
-class RuntimeUnfinishedMigrationError(RuntimeError):
-    def __init__(self, session_id: str, source_backend: str) -> None:
-        self.session_id = session_id
-        self.source_backend = source_backend
-        super().__init__(
-            f"The {source_backend} session has unfinished recoverable work: "
-            f"{session_id}"
-        )
-
-
-class RuntimeInvalidMigrationSourceError(RuntimeError):
-    def __init__(self, session_id: str, source_backend: str, message: str) -> None:
-        self.session_id = session_id
-        self.source_backend = source_backend
-        super().__init__(message)
-
-
-@dataclass(frozen=True, slots=True)
-class RootOpenRequest:
-    options: SessionOptions
-    client_info: ClientInfo
-    session_id: str | None = None
-    continue_latest: bool = False
-    client_capabilities: ClientCapabilities = field(default_factory=ClientCapabilities)
-
-    def __post_init__(self) -> None:
-        if self.session_id is not None and self.continue_latest:
-            raise ValueError("Cannot resume a session and continue the latest")
-
-
-@dataclass(frozen=True, slots=True)
-class _ImportedSession:
-    session_id: str
-    cwd: str | None
-    root_session_id: str
-    parent_session_id: str | None
-    messages: list[LLMMessage]
-    provenance: dict[str, JsonValue]
-    active_model: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _AgentLoopBlueprint:
-    config_orchestrator: ConfigOrchestrator[VibeConfigSchema]
-    agent_name: str
-    policy: AgentRuntimePolicy
-    cwd: Path
-    harness_files: HarnessFilesManager
-    is_subagent: bool = False
-    parent_session_id: str | None = None
-    session_id: str | None = None
-    session_dir: Path | None = None
-    session_lease: SessionLease | None = None
-    experiment_state: EvalResponse | None = None
-    await_experiment_model: bool = False
-    mcp_registry: MCPRegistry | None = None
-    connector_registry: ConnectorRegistry | None = None
-
-    def build(self) -> AgentLoop:
-        return AgentLoop(
-            config_orchestrator=self.config_orchestrator,
-            agent_name=self.agent_name,
-            max_turns=self.policy.max_turns,
-            max_price=self.policy.max_price,
-            max_tokens=self.policy.max_tokens,
-            max_session_tokens=self.policy.max_session_tokens,
-            enable_streaming=self.policy.enable_streaming,
-            launch_context=self.policy.launch_context,
-            is_subagent=self.is_subagent,
-            defer_heavy_init=True,
-            headless=self.policy.headless,
-            hook_config_result=self.policy.hook_config_result,
-            permission_store=self.policy.permission_store,
-            mcp_registry=self.mcp_registry,
-            connector_registry=self.connector_registry,
-            cache_store=self.policy.cache_store,
-            force_bypass_tool_permissions=self.policy.force_bypass_tool_permissions,
-            local_managed_shell_runtime_enabled=(
-                self.policy.local_managed_shell_runtime_enabled
-            ),
-            auto_title_enabled=self.policy.auto_title_enabled,
-            experiment_state=self.experiment_state,
-            await_experiment_model=self.await_experiment_model,
-            parent_session_id=self.parent_session_id,
-            cwd=self.cwd,
-            harness_files=self.harness_files,
-            session_id=self.session_id,
-            session_dir=self.session_dir,
-            session_lease=self.session_lease,
-        )
+    # Runs the workspace tools in this sandbox instead of on the host, and
+    # reads the workspace context through it. Requires the Unified Harness.
+    sandbox: SandboxAdapter | None = field(default=None, kw_only=True)
+    # Tools the embedding host runs itself, offered to every session next to
+    # Vibe's own. Internal: nothing on the wire declares them. Requires the
+    # Unified Harness.
+    client_tools: ClientTools | None = field(default=None, kw_only=True)
+    # The user config to read in place of the user config file, as the parsed
+    # TOML document. Saves to it stay in memory. Internal: an embedding host
+    # serving many runs gives each its own.
+    user_config: Mapping[str, Any] | None = field(default=None, kw_only=True)
+    # Project instructions the embedding host gives every session, shown to
+    # the model ahead of the project's AGENTS.md docs. Requires the Unified
+    # Harness.
+    project_instructions: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
 class _SessionConfig:
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema]
     harness_files: HarnessFilesManager
+    org_config: OrgConfigAttempt
+    org_config_key: OrgConfigKey | None
 
 
-@dataclass(frozen=True, slots=True)
-class _RootRuntimeBlueprint:
-    config_orchestrator: ConfigOrchestrator[VibeConfigSchema]
-    harness_files: HarnessFilesManager
-    options: SessionOptions
-    client_info: ClientInfo
-    client_capabilities: ClientCapabilities
-    hook_config_result: HookConfigResult
-    cache_store: FileSystemCacheStore
-    mcp_registry: MCPRegistry | None = None
-    connector_registry: ConnectorRegistry | None = None
+# The harness always binds a session to a concrete on-disk store: there is no
+# in-memory backend, and a ``None`` root silently falls back to the configured save
+# dir. One root per process, because ``configure_storage`` refuses to move the root
+# while a session is bound to it. Every app-server on the process holds a lease, so
+# the last one out removes the tree: a stop is not the end of the process, and ACP
+# keeps opening sessions on it. A later session gets a fresh root, which
+# ``configure_storage`` accepts because nothing is bound by then.
+class ThrowawayStorageRoot:
+    PREFIX = "vibe-session-logging-disabled-"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._path: Path | None = None
+        self._leases: set[ThrowawayStorageLease] = set()
 
     @property
-    def cwd(self) -> Path:
-        return Path(self.options.cwd or Path.cwd()).expanduser().resolve()
+    def current(self) -> Path | None:
+        with self._lock:
+            return self._path
 
-    @property
-    def config(self) -> VibeConfigSchema:
-        return self.config_orchestrator.config
+    def lease(self) -> ThrowawayStorageLease:
+        lease = ThrowawayStorageLease(self)
+        with self._lock:
+            self._leases.add(lease)
+        return lease
 
-    def build(
-        self,
-        *,
-        parent_session_id: str | None = None,
-        session_id: str | None = None,
-        session_dir: Path | None = None,
-        session_lease: SessionLease | None = None,
-    ) -> AgentLoop:
-        policy = AgentRuntimePolicy(
-            max_turns=self.options.max_turns,
-            max_price=self.options.max_price,
-            max_tokens=None,
-            max_session_tokens=self.options.max_session_tokens,
-            enable_streaming=True,
-            launch_context=build_launch_context(
-                agent_entrypoint=self.client_info.entrypoint,
-                agent_version=__version__,
-                client_name=self.client_info.name,
-                client_version=self.client_info.version,
-                terminal_emulator=self.client_info.terminal_emulator,
-            ),
-            headless=self.options.headless,
-            hook_config_result=self.hook_config_result,
-            permission_store=PermissionStore(),
-            cache_store=self.cache_store,
-            force_bypass_tool_permissions=self.options.auto_approve,
-            local_managed_shell_runtime_enabled=(
-                "terminal" not in self.client_capabilities.client_tools
-            ),
-            # The legacy AgentLoop generates background titles for CLI and Desktop.
-            # Other clients retain the preview, and config can disable generation.
-            auto_title_enabled=(
-                self.client_info.entrypoint in {"cli", "desktop"}
-                and self.config.session_logging.generate_titles
-            ),
-        )
-        cached = load_cached_eval_response(self.config)
-        return _AgentLoopBlueprint(
-            config_orchestrator=self.config_orchestrator.copy(),
-            agent_name=self.options.agent or self.config.resolve_default_agent(),
-            policy=policy,
-            parent_session_id=parent_session_id,
-            cwd=self.cwd,
-            harness_files=self.harness_files,
-            session_id=session_id,
-            session_dir=session_dir,
-            session_lease=session_lease,
-            experiment_state=cached,
-            await_experiment_model=cached is None and session_id is None,
-            mcp_registry=self.mcp_registry,
-            connector_registry=self.connector_registry,
-        ).build()
+    def path(self) -> Path:
+        with self._lock:
+            if self._path is None:
+                try:
+                    self._path = Path(tempfile.mkdtemp(prefix=self.PREFIX))
+                except OSError as exc:
+                    raise RuntimeError(
+                        "session_logging.enabled is false and no temporary "
+                        "directory is available to hold the session store"
+                    ) from exc
+                logger.debug("Throwaway session store created at %s", self._path)
+            return self._path
+
+    def release(self, lease: ThrowawayStorageLease) -> None:
+        with self._lock:
+            # Dropping a lease rather than counting down, because the same lease
+            # is released twice: `session/stop` closes the root, and a disconnect
+            # closes it again, the first never having marked the app server shut
+            # down. Idempotent here by construction, not by a flag the callers
+            # race on from worker threads.
+            self._leases.discard(lease)
+            if self._leases:
+                return
+            path, self._path = self._path, None
+        self._remove(path)
+
+    def discard(self) -> None:
+        with self._lock:
+            self._leases.clear()
+            path, self._path = self._path, None
+        self._remove(path)
+
+    def _remove(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            shutil.rmtree(path, onexc=_reopen_and_retry)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove the throwaway session store at %s", path, exc_info=exc
+            )
+
+
+class ThrowawayStorageLease:
+    def __init__(self, root: ThrowawayStorageRoot) -> None:
+        self._root = root
+
+    def release(self) -> None:
+        self._root.release(self)
+
+
+def _reopen_and_retry(
+    func: Callable[[str], None], path: str, exc: BaseException
+) -> None:
+    # The Harness checks plugin packages out as read-only trees under the same
+    # storage root the sessions live in, and nothing can be unlinked from one until
+    # its directory is writable again.
+    if not isinstance(exc, PermissionError):
+        raise exc
+    parent = Path(path).parent
+    parent.chmod(parent.stat().st_mode | stat.S_IRWXU)
+    func(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,497 +999,445 @@ class HarnessServer:
         )
 
 
-class AgentRuntimeFactory:
-    def resolve_latest(self, source: AgentLoop, cwd: Path) -> str:
-        _require_session_logging(source.config)
-        return _find_session_to_continue(source.config, cwd=cwd)
+def client_tool_groups_for(
+    groups: Sequence[RustToolGroupDefinition],
+    plugin_names: frozenset[str],
+    bound: SessionPlugins,
+) -> list[RustToolGroupDefinition]:
+    """The client tool groups a session may call: its BUILTIN plugins that the
+    client declared at ``initialize``.
+    """
+    return [
+        group
+        for group in groups
+        if group.name in bound_client_plugin_names(bound, plugin_names)
+    ]
 
-    async def resume_root(self, source: AgentLoop, session_id: str) -> None:
-        """Resume a stored session by rebinding the existing loop in place.
 
-        The existing MCP connections, tool registry, git context, and config
-        are all reused — only session-scoped state (ID, messages, stats,
-        session logger) is swapped. This avoids the cold-rebuild overhead of
-        creating a fresh AgentLoop on every resume.
+def bound_client_plugin_names(
+    bound: SessionPlugins, plugin_names: frozenset[str]
+) -> frozenset[str]:
+    """The names of a session's BUILTIN plugins the client declared at
+    ``initialize``.
+    """
+    return frozenset(
+        plugin.name
+        for plugin in bound.materialized.resolution.plugins
+        if plugin.scope == SkillScope.BUILTIN and plugin.name in plugin_names
+    )
 
-        The rebind runs before waiting for deferred init so the UI can render
-        the resumed transcript immediately. ``finish_resume_root`` must be
-        called afterward to await readiness and hydrate experiments.
-        """
-        session_id = await asyncio.to_thread(
-            _resolve_resume_session_id, source.config, session_id
-        )
-        lease = await asyncio.to_thread(
-            _acquire_session_lease, source.config, session_id
-        )
-        previous_model = source.config.get_active_model().alias
-        previous_session_pinned = source.session_logger.active_model is not None
+
+@dataclass
+class _BoundSession:
+    """A session's plugin set plus the event a release or re-pin sets to revoke
+    its in-flight client tool calls.
+    """
+
+    plugins: SessionPlugins
+    revoked: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class BoundSessionClientToolRunner:
+    """Delegates to the connection runner only when the caller's session still
+    runs the tool's plugin; a release or re-pin cancels in-flight calls.
+    """
+
+    def __init__(
+        self, bound: dict[str, _BoundSession], runner: ClientToolRunner
+    ) -> None:
+        self._bound = bound
+        self._runner = runner
+
+    async def call_tool(self, call: ClientToolCall) -> ClientToolResult:
+        caller = call.caller
+        namespace = call.name.partition(".")[0]
+        entry = self._bound.get(caller.session_id) if caller is not None else None
+        if (
+            entry is None
+            or entry.revoked.is_set()
+            or not any(
+                plugin.name == namespace and plugin.scope == SkillScope.BUILTIN
+                for plugin in entry.plugins.materialized.resolution.plugins
+            )
+        ):
+            return ClientToolResult(
+                error=ClientToolError(
+                    "The client tool caller is unavailable", "client_tool_unavailable"
+                )
+            )
+        task = asyncio.create_task(self._runner.call_tool(call))
+        revoked = asyncio.create_task(entry.revoked.wait())
         try:
-            try:
-                session_path, loaded_messages, metadata = await asyncio.to_thread(
-                    _load_session, source.config, session_id
+            done, _pending = await asyncio.wait(
+                (task, revoked), return_when=asyncio.FIRST_COMPLETED
+            )
+            if task in done:
+                return await task
+            return ClientToolResult(
+                error=ClientToolError(
+                    "The client tool caller is unavailable", "client_tool_unavailable"
                 )
-                active_model = config_active_model(metadata)
-            except RuntimeSessionNotFoundError:
-                imported = await asyncio.to_thread(
-                    _load_unified_import, source.config, session_id
-                )
-                if imported is None:
-                    raise
-                active_model = imported.active_model
-                await _restore_session_active_model(
-                    source.config_orchestrator,
-                    active_model,
-                    clear_existing=previous_session_pinned,
-                )
-                logger = SessionLogger(
-                    source.config.session_logging,
-                    session_id,
-                    cwd=Path(imported.cwd) if imported.cwd is not None else source.cwd,
-                )
-                if logger.session_metadata is None or logger.session_dir is None:
-                    raise RuntimeConfigurationError(
-                        "Legacy session logging must be enabled for import"
-                    )
-                logger.session_metadata.import_provenance = imported.provenance
-                logger.session_metadata.parent_session_id = imported.parent_session_id
-                await logger.save_interaction(
-                    imported.messages,
-                    AgentStats(),
-                    source.config,
-                    source.tool_manager,
-                    source.agent_profile,
-                    allow_empty=True,
-                )
-                session_path = logger.session_dir
-                loaded_messages, metadata = await asyncio.to_thread(
-                    SessionLoader.load_session, session_path
-                )
-            else:
-                await _restore_session_active_model(
-                    source.config_orchestrator,
-                    active_model,
-                    clear_existing=previous_session_pinned,
-                )
-            # ``_load_session`` already parsed metadata.json into ``metadata``;
-            # parse that dict instead of re-reading the file from disk.
-            session_metadata = SessionMetadata.model_validate(metadata)
-            stats = _build_stats(source, metadata)
-            # Rebind before waiting for deferred init so the UI can render the
-            # resumed transcript immediately. The init thread's
-            # ``update_system_prompt`` inserts at position 0 (see
-            # ``MessageList.update_system_prompt``), so it lands correctly on top
-            # of the resumed messages whenever it completes — same pattern as
-            # ``resume_blueprint``.
-            source.rebind_to_session(
-                session_id,
-                session_path,
-                loaded_messages,
-                session_metadata=session_metadata,
-                parent_session_id=_parent_session_id(metadata),
-                stats=stats,
             )
-            if source.config.get_active_model().alias != previous_model:
-                await source.reload_with_initial_messages()
-        except BaseException:
-            if lease is not None:
-                await asyncio.to_thread(lease.release)
-            raise
-        source.replace_session_lease(lease)
-
-    async def finish_resume_root(self, source: AgentLoop, session_id: str) -> None:
-        """Finish a resume: await deferred init, then hydrate experiments.
-
-        Called after the ``session/resume`` RPC response is sent so the client
-        can render the transcript while MCP/connector init completes in the
-        background. Both steps are best-effort: the rebind already committed, so
-        a deferred-init or hydration failure must not abort the caller before it
-        emits ``runtime/updated`` — the degraded state (e.g. MCP discovery
-        errors) is carried in the runtime snapshot instead.
-
-        Init-duration recording lives in ``wait_until_ready`` via
-        ``_ensure_init_duration_recorded``, not here.
-        """
-        try:
-            await source._await_deferred_init()
-        except Exception:
-            logger.exception(
-                "Deferred init failed after resuming session_id=%s", session_id
-            )
-        try:
-            await source.hydrate_experiments_from_session()
-        except Exception:
-            logger.exception(
-                "Failed to hydrate experiments after resuming session_id=%s", session_id
-            )
-
-    async def resume_blueprint(
-        self,
-        blueprint: _RootRuntimeBlueprint,
-        session_id: str,
-        session_lease: SessionLease | None = None,
-    ) -> AgentLoop:
-        try:
-            session_path, loaded_messages, metadata = await asyncio.to_thread(
-                _load_session, blueprint.config, session_id
-            )
-        except RuntimeSessionNotFoundError:
-            imported = await asyncio.to_thread(
-                _load_unified_import, blueprint.config, session_id
-            )
-            if imported is None:
-                raise
-            await _restore_session_active_model(
-                blueprint.config_orchestrator, imported.active_model
-            )
-            replacement = blueprint.build(
-                parent_session_id=imported.parent_session_id,
-                session_id=session_id,
-                session_lease=session_lease,
-            )
-            try:
-                replacement.messages.reset_preserving_system(imported.messages)
-                session_metadata = replacement.session_logger.session_metadata
-                if session_metadata is None:
-                    raise RuntimeConfigurationError(
-                        "Legacy session logging must be enabled for import"
-                    )
-                session_metadata.import_provenance = imported.provenance
-                session_metadata.environment["working_directory"] = imported.cwd or str(
-                    blueprint.cwd
-                )
-                await replacement.session_logger.save_interaction(
-                    replacement.messages,
-                    AgentStats(),
-                    replacement.config,
-                    replacement.tool_manager,
-                    replacement.agent_profile,
-                    allow_empty=True,
-                )
-                await replacement.hydrate_experiments_from_session(refresh_prompt=False)
-            except BaseException:
-                await close_agent_loop(replacement)
-                raise
-            return replacement
-        await _restore_session_active_model(
-            blueprint.config_orchestrator, config_active_model(metadata)
-        )
-        replacement = blueprint.build(
-            parent_session_id=_parent_session_id(metadata),
-            session_id=session_id,
-            session_dir=session_path,
-            session_lease=session_lease,
-        )
-        # Set messages and stats immediately so the UI can render the stored
-        # transcript while the runtime (git, MCP) warms up in the background.
-        # MessageList.update_system_prompt() inserts at position 0 when the
-        # background thread eventually sets the system prompt, so no system
-        # message needs to be present here.
-        try:
-            replacement.messages.reset_preserving_system(loaded_messages)
-            _apply_stored_stats(replacement, metadata)
-            # refresh_prompt=False: deferred init hasn't completed yet (git, MCP),
-            # so refresh_system_prompt() — gated by @requires_init — would block.
-            # The background thread updates the system prompt once init finishes,
-            # same as a fresh session start.
-            await replacement.hydrate_experiments_from_session(refresh_prompt=False)
-        except BaseException:
-            await close_agent_loop(replacement)
-            raise
-        return replacement
-
-    async def create_child(
-        self,
-        parent: AgentLoop,
-        agent_name: str,
-        *,
-        session_id: str | None = None,
-        session_dir: Path | None = None,
-    ) -> AgentLoop:
-        parent_session_dir = parent.session_logger.session_dir
-        orchestrator = parent.config_orchestrator.copy()
-        session_logging = SessionLoggingConfig(
-            save_dir=(
-                str(parent_session_dir / "agents")
-                if parent_session_dir is not None
-                else ""
-            ),
-            session_prefix=agent_name,
-            enabled=parent_session_dir is not None,
-        )
-        failures = await orchestrator.set_field(
-            "/session_logging",
-            session_logging.model_dump(mode="json"),
-            reason="configure child session logging",
-            target_layer=OverridesLayer.NAME,
-        )
-        if failures:
-            raise RuntimeConfigurationError(
-                "Failed to configure child session logging"
-            ) from failures[0]
-        child_session_id = session_id or generate_session_id()
-        lease = await asyncio.to_thread(
-            _acquire_session_lease, parent.config, child_session_id
-        )
-        try:
-            return self._create_like(
-                parent,
-                config_orchestrator=orchestrator,
-                agent_name=agent_name,
-                is_subagent=True,
-                parent_session_id=parent.session_id,
-                session_id=child_session_id,
-                session_dir=session_dir,
-                session_lease=lease,
-                share_permissions=True,
-            )
-        except BaseException:
-            if lease is not None:
-                await asyncio.to_thread(lease.release)
-            raise
-
-    async def resume_child(
-        self, parent: AgentLoop, agent_name: str, session_id: str, session_dir: Path
-    ) -> AgentLoop:
-        loaded_messages, metadata = await asyncio.to_thread(
-            SessionLoader.load_session, session_dir
-        )
-        child = await self.create_child(
-            parent, agent_name, session_id=session_id, session_dir=session_dir
-        )
-        # Eager message setting: background thread inserts system prompt at position 0
-        # when _complete_init finishes, same pattern as resume_blueprint.
-        try:
-            child.messages.reset_preserving_system(loaded_messages)
-            _apply_stored_stats(child, metadata)
-            # refresh_prompt=False for the same reason as resume_blueprint: the child's
-            # deferred init hasn't run yet, so @requires_init would block here.
-            await child.hydrate_experiments_from_session(refresh_prompt=False)
-        except BaseException:
-            await close_agent_loop(child)
-            raise
-        return child
-
-    async def fork(self, source: AgentLoop, message_id: str | None) -> AgentLoop:
-        session_id = generate_session_id(suffix=extract_suffix(source.session_id))
-        lease = await asyncio.to_thread(
-            _acquire_session_lease, source.config, session_id
-        )
-        forked: AgentLoop | None = None
-        try:
-            forked = self._create_like(
-                source,
-                agent_name=source.agent_profile.name,
-                parent_session_id=source.session_id,
-                session_id=session_id,
-                session_lease=lease,
-            )
-            await forked.wait_until_ready()
-            forked.messages.extend(_messages_for_fork(source, message_id))
-            await forked.session_logger.save_interaction(
-                forked.messages,
-                forked.stats,
-                forked.config,
-                forked.tool_manager,
-                forked.agent_profile,
-            )
-        except BaseException:
-            if forked is not None:
-                await close_agent_loop(forked)
-            elif lease is not None:
-                await asyncio.to_thread(lease.release)
-            raise
-        return forked
-
-    @staticmethod
-    def _create_like(
-        source: AgentLoop,
-        *,
-        config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
-        agent_name: str,
-        is_subagent: bool = False,
-        parent_session_id: str | None = None,
-        session_id: str | None = None,
-        session_dir: Path | None = None,
-        session_lease: SessionLease | None = None,
-        share_permissions: bool = False,
-    ) -> AgentLoop:
-        policy = source.runtime_policy
-        if not share_permissions:
-            policy = replace(policy, permission_store=PermissionStore())
-        if is_subagent:
-            policy = replace(policy, enable_streaming=False)
-        replacement = _AgentLoopBlueprint(
-            config_orchestrator=(
-                config_orchestrator or source.config_orchestrator.copy()
-            ),
-            agent_name=agent_name,
-            policy=policy,
-            is_subagent=is_subagent,
-            parent_session_id=parent_session_id,
-            cwd=source.cwd,
-            harness_files=source.harness_files,
-            session_id=session_id,
-            session_dir=session_dir,
-            session_lease=session_lease,
-            experiment_state=source.experiment_manager.export_state(),
-            mcp_registry=(
-                source.mcp_registry.clone_configuration()
-                if source.mcp_registry is not None
-                else None
-            ),
-            connector_registry=(
-                source.connector_registry.clone_configuration()
-                if source.connector_registry is not None
-                else None
-            ),
-        ).build()
-        return replacement
+        finally:
+            task.cancel()
+            revoked.cancel()
+            await asyncio.gather(task, revoked, return_exceptions=True)
 
 
 class HarnessProcess:
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0915 - one collaborator per concern, all keyword-only
         self,
         harness_files: HarnessFilesManager | None = None,
         *,
-        experimental_harness: bool = False,
-        legacy_harness: bool = False,
+        services: ProcessServices,
+        additional_builtin_plugin_roots: Sequence[Path] = (),
+        shared: bool = False,
+        sandbox: SandboxAdapter | None = None,
+        client_tools: ClientTools | None = None,
+        user_config: Mapping[str, Any] | None = None,
+        project_instructions: str | None = None,
+        agent_socket: AgentSocketMount | None = None,
+        credentials: Mapping[str, str] | None = None,
+        process_settings: ProcessSettings | None = None,
     ) -> None:
         from vibe.app_server._mcp_auth import MCPAuthenticationService
+        from vibe.app_server._plugins import packaged_builtin_plugin_roots
         from vibe.app_server.mcp_catalog import MCPCatalogService
         from vibe.app_server.plugin_catalog import PluginCatalogService
 
-        self.runtime_factory = AgentRuntimeFactory()
-        self.cache_store = FileSystemCacheStore()
+        # Shared with every other channel of the OS process, which owns them.
+        self.services = services
+        # The agent server's sandbox, tools and instructions, when the
+        # handshake succeeded; otherwise every session open reports its failure.
+        self._agent_socket = agent_socket
+        # A run's own API keys, by environment variable name: they resolve
+        # before this process's, for its model calls only.
+        self._credentials = credentials
+        # What this process applies to every run, which a session's config
+        # must agree with.
+        self._process_settings = process_settings
+        if agent_socket is not None and agent_socket.agent_socket is not None:
+            sandbox = agent_socket.agent_socket.sandbox
+            client_tools = agent_socket.agent_socket.client_tools()
+            project_instructions = agent_socket.agent_socket.instructions
+        if (
+            sandbox is not None
+            and harness_files is not None
+            and "project" in harness_files.sources
+        ):
+            # The project lives in the sandbox; its config, skills and hooks
+            # would be read from the host's disk at the same path.
+            raise HeadlessUsageError("A sandboxed session cannot load project files")
+        # The connection's credential selection, bound by create_harness_server.
+        self.credentials = ConnectionCredentials()
+        self.imports = build_local_imports_service(
+            self.build_import_writer, self.build_import_local_projects
+        )
         self.harness_files = harness_files or HarnessFilesManager(
-            sources=("user", "project")
+            sources=("user",) if sandbox is not None else ("user", "project")
         )
-        self._configuration_lock = threading.Lock()
-        self._configured = False
-        self._staged_roots: dict[str, AgentLoop] = {}
-        self._staged_roots_lock = asyncio.Lock()
+        if user_config is not None:
+            self.harness_files = replace(self.harness_files, user_config=user_config)
+        self._sandbox = sandbox
+        # The tool helper's crashes in a row in the sandbox, counted across
+        # this process's sessions, as they share the sandbox. Made with the
+        # first unified session.
+        self._helper_crashes: HelperCrashCount | None = None
+        # The skills copied into the sandbox, shared by this process's sessions.
+        self._sandbox_skills: SandboxSkills | None = None
+        if sandbox is not None:
+            from vibe.app_server._sandbox_skills import SandboxSkills
+
+            self._sandbox_skills = SandboxSkills(sandbox)
+        # First: tools Vibe cannot offer fail the process before any session.
+        self._client_tools = ClientToolExecutor(client_tools)
+        # The template advertises socket-declared groups host-wide; groups a
+        # client declares at ``initialize`` ride on their plugin capabilities.
+        self._template_client_tool_groups = self._client_tools.groups
+        # The plugins a client declared at ``initialize`` whose tools this
+        # process serves, and the plugin set each bound session runs.
+        self._client_plugin_names: frozenset[str] = frozenset()
+        self._bound_session_plugins: dict[str, _BoundSession] = {}
+        self._project_instructions = project_instructions
+        self._close_lock = asyncio.Lock()
         self._closed = False
+        self._shared = shared
         self._experimental_harness_host: object | None = None
-        self.harness_selection_source: str = "default"
+        self._throwaway_storage_root = ThrowawayStorageRoot()
+        self._session_configs = SessionConfigCache()
+        self._builtin_plugin_roots = [
+            *packaged_builtin_plugin_roots(),
+            *additional_builtin_plugin_roots,
+        ]
+        candidate = create_experimental_harness_host()
+        # The Host-global builtin hook registry: the lazy AGENTS.md
+        # injection handler must not land in any session's *foreign*
+        # handler map, or it surfaces public hook-run notices. The
+        # matching binding is merged into every session's compiled
+        # hooks at context build (see merge_agents_md_hook).
+        from vibe.app_server._agents_md_hooks import agents_md_hook_handlers
 
-        # Resolve which harness to use. The rollout variant is read from the
-        # eval cache (synchronous local I/O, no network) so it is available
-        # before the config orchestrator is built. The cache is read even when
-        # telemetry/experiments are disabled: the file on disk was written by a
-        # previous session's eval, and the rollout decision should not depend
-        # on the current telemetry opt-in state.
-        from vibe._experimental_harness import resolve_harness_selection
-
-        cached_eval = None
+        # The session_start context each session owes its next message, shared by
+        # every session of this process: a Host-global builtin pre_agent hook
+        # hands it over.
+        self.session_start_contexts = SessionStartContexts()
         try:
-            cached_eval = _load_rollout_cache()
-        except Exception:
-            pass
-
-        selection = resolve_harness_selection(
-            experimental_harness=experimental_harness,
-            legacy_harness=legacy_harness,
-            cached_eval=cached_eval,
-        )
-        self.harness_selection_source = selection.source
-
-        startup_issue: ConfigIssue | None = None
-        if selection.use_unified:
-            try:
-                self._experimental_harness_host = create_experimental_harness_host()
-            except (ExperimentalHarnessUnavailableError, ImportError) as exc:
-                startup_issue = ConfigIssue(
-                    file="--experimental-harness",
-                    message=f"{exc}; falling back to the legacy harness.",
+            builtin_hooks = agents_md_hook_handlers(self.harness_files)
+            cast(Any, candidate).configure_hook_handlers(
+                replace(
+                    builtin_hooks,
+                    pre_agent_turn={
+                        **builtin_hooks.pre_agent_turn,
+                        SESSION_START_CONTEXT_BINDING_ID: session_start_context_handler(
+                            self.session_start_contexts
+                        ),
+                    },
                 )
-        self.host_handler = HostRequestHandler(
-            self.harness_files,
-            startup_issue=startup_issue,
-            harness_selection_source=self.harness_selection_source,
-        )
+            )
+        except Exception as exc:
+            # An older pinned harness without the builtin-hook registry
+            # (or one whose import surface the version cannot satisfy)
+            # is an incompatible Runtime: startup must fail with the
+            # actionable error, not hand out an unconfigured Host. The
+            # candidate needs no teardown — create_harness_host is a
+            # pure construction with no native side effects, and every
+            # caller aborts the process on this error.
+            raise runtime_startup_error(
+                f"the runtime host rejected its configuration: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        self._experimental_harness_host = candidate
         self.mcp_authentication = MCPAuthenticationService()
         self.mcp_catalog = MCPCatalogService(
             self.mcp_authentication,
             sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
         )
         self.connector_catalog = ConnectorCatalogService(
+            services.connector_catalog,
             implicit_source_enabled=self._experimental_harness_host is not None,
             sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
+            credentials=self.credentials,
+        )
+        self.host_handler = HostRequestHandler(
+            self.harness_files,
+            org_config=services.org_config,
+            credentials=self.credentials,
+            worktrees=services.worktrees,
+            experiments=services.experiments,
+            model_catalog=services.model_catalog,
+            image_fallback=self._experimental_harness_host is not None,
+            builtin_plugin_roots=self._builtin_plugin_roots,
+            open_sessions=services.open_sessions,
+            config_changes=services.config_changes,
+            connector_catalog=self.connector_catalog.read_cached_catalog,
         )
         self.plugin_catalog = PluginCatalogService()
+        self._connector_warm_up: asyncio.Task[None] | None = None
+
+    def configure_agent_plugins(
+        self,
+        plugins: list[AgentPlugin],
+        definitions: list[ClientToolDefinitionParams],
+        runner: ClientToolRunner,
+    ) -> None:
+        if plugins and self._shared:
+            raise ValueError("Client tools require a dedicated client session host")
+        if not plugins and not definitions:
+            return
+        roots = {plugin.name: Path(plugin.root).resolve() for plugin in plugins}
+        if len(roots) != len(plugins) or len(set(roots.values())) != len(roots):
+            raise ValueError("Client plugins require distinct names and roots")
+        if any(tool.namespace not in roots for tool in definitions):
+            raise ValueError("Client tools require a declared Agent Plugin")
+        if self._client_plugin_names or self._client_tools.group_names:
+            raise ValueError("Client tools cannot change while sessions are active")
+        self._client_plugin_names = frozenset(roots)
+        self._client_tools = ClientToolExecutor(
+            ClientTools(
+                definitions=[
+                    ClientToolDefinition(
+                        namespace=tool.namespace,
+                        name=tool.name,
+                        description=tool.description,
+                        input_schema=tool.input_schema,
+                        output_schema=tool.output_schema,
+                    )
+                    for tool in definitions
+                ],
+                runner=BoundSessionClientToolRunner(
+                    self._bound_session_plugins, runner
+                ),
+            )
+        )
+
+    def _client_tool_groups(
+        self, bound: SessionPlugins
+    ) -> list[RustToolGroupDefinition]:
+        return client_tool_groups_for(
+            self._client_tools.groups, self._client_plugin_names, bound
+        )
+
+    async def _remember_bound_plugins(
+        self, session_id: str, bound: SessionPlugins
+    ) -> None:
+        existing = self._bound_session_plugins.get(session_id)
+        if existing is not None:
+            same = bound_client_plugin_names(
+                existing.plugins, self._client_plugin_names
+            ) == bound_client_plugin_names(bound, self._client_plugin_names)
+            if same:
+                existing.plugins = bound
+                return
+            existing.revoked.set()
+        self._bound_session_plugins[session_id] = _BoundSession(bound)
+
+    async def _forget_bound_plugins(self, session_id: str) -> None:
+        entry = self._bound_session_plugins.pop(session_id, None)
+        if entry is not None:
+            entry.revoked.set()
+
+    def start_connector_warm_up(self) -> None:
+        """Fetch the connector catalog now, before any session needs it.
+
+        A session's first turn waits for the catalog when nothing is cached,
+        and every session joins this fetch rather than starting its own. It
+        fetches whatever the age of the copy on disk: a connector connected
+        while no app server ran reaches every session at its next turn
+        boundary.
+
+        Only the stdio servers start it; the process is left to end with them.
+        """
+        if self._connector_warm_up is None and not self._closed:
+            self._connector_warm_up = asyncio.create_task(
+                self._warm_connector_catalog(), name="vibe-connector-warm-up"
+            )
+
+    async def _warm_connector_catalog(self) -> None:
+        try:
+            orchestrator = await self.build_sessionless_mcp_catalog()
+            await self.connector_catalog.warm_up(orchestrator)
+        except Exception as exc:
+            logger.info("Connector catalog warm-up failed: %s", exc)
 
     def create_session_backend_host(
         self, services: SessionBackendServices
     ) -> SessionBackendHost:
         host = self._experimental_harness_host
-        if host is not None:
-            from vibe.app_server._unified_harness_backend_adapter import (
-                adapt_harness_host,
-            )
+        from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
 
-            return adapt_harness_host(
-                host,
-                self.build_unified_session_context,
-                services,
-                launch_context_getter=lambda: _build_launch_context_from_services(
-                    services
-                ),
-            )
+        if self._agent_socket is not None:
+            self._agent_socket.subscribe(services.notify)
+        # One per app server, even in a shared process: closing one app server
+        # waits for its own background hooks only, and leaves the others running.
+        host_hooks = HostHooks()
 
-        from vibe.app_server._legacy_session_runtime import (
-            create_legacy_session_backend_host,
+        async def build_session_context(
+            options: SessionOptions,
+            *,
+            require_api_key: bool = True,
+            entrypoint: AgentEntrypoint = "cli",
+            org_config: OrgConfigSource,
+        ) -> UnifiedSessionContext:
+            context = await self.build_unified_session_context(
+                options,
+                require_api_key=require_api_key,
+                entrypoint=entrypoint,
+                org_config=org_config,
+                session_spawner=session_spawner_for(services),
+                session_peers=session_peers_for(services),
+                reply_route=services,
+                agent_worktrees=services.client_capabilities().agent_worktrees,
+                agent_projects=services.client_capabilities().agent_projects,
+            )
+            return replace(context, host_hooks=host_hooks)
+
+        return adapt_harness_host(
+            host,
+            build_session_context,
+            services,
+            host_hooks=host_hooks,
+            pin_session_options=None
+            if self._agent_socket is None
+            else self._agent_socket.pin_session_options,
+            worktree_housekeeping=self.services.worktrees,
+            worktree_naming_credentials=self.utility_credentials,
+            open_sessions=self.services.open_sessions,
+            build_read_context=self.build_unified_read_context,
+            launch_context_getter=lambda: _build_launch_context_from_services(services),
+            # Neither the TUI nor ``vibe -p`` reaches ``HarnessProcess.close``
+            # on the way out; both stop at the host's shutdown. A store hung
+            # off ``close`` alone would survive every interactive run. A
+            # shared process outlives each app server: only ``close`` may shut
+            # its Host down and discard the store the Host still writes into.
+            release_storage=(
+                None if self._shared else self._throwaway_storage_root.lease().release
+            ),
+            owns_host=not self._shared,
         )
 
-        return create_legacy_session_backend_host(
-            open_root=self.open_root,
-            runtime_factory=self.runtime_factory,
-            host_handler=self.host_handler,
-            stage_root=self.stage_root,
-            services=services,
-            mcp_catalog_service=self.mcp_catalog,
-            connector_catalog_service=self.connector_catalog,
-            account_gateway=services.account_gateway(),
-            identity_gateway=services.identity_gateway(),
+    def utility_credentials(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+    ) -> UtilityCredentials:
+        """The connection's credentials for a utility call made with a config
+        of its own (worktree naming, which loads the config of the directory
+        it names in).
+
+        Its credential services live as long as that config: one naming call.
+        The connection's sign-in still learns of a refusal, so the next call
+        sends a replacement rather than the refused token.
+        """
+        return UtilityCredentials(
+            platform=self.credentials,
+            for_provider=lambda name: self._provider_credentials(orchestrator, name),
+            run_keys=self._credentials,
         )
 
-    async def stage_root(self, root: AgentLoop) -> None:
-        superseded: AgentLoop | None = None
-        async with self._staged_roots_lock:
-            if self._closed:
-                superseded = root
-            else:
-                superseded = self._staged_roots.get(root.session_id)
-                self._staged_roots[root.session_id] = root
-        if superseded is not None and superseded is not root:
-            await close_agent_loop(superseded)
-        if self._closed:
-            if superseded is root:
-                await close_agent_loop(root)
-            raise RuntimeError("The app-server harness process is closed")
+    def _provider_credentials(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema], provider_name: str
+    ) -> ProviderCredentialService:
+        """What a call to the provider named ``provider_name`` sends, pinned to
+        that provider so a key always matches its route's endpoint.
+        """
+        from vibe.app_server._provider_credentials import ProviderCredentialService
+
+        return ProviderCredentialService(
+            orchestrator,
+            select_provider=_named_provider(provider_name),
+            credentials=self._credentials,
+            platform_credentials=self.credentials,
+        )
 
     async def close(self) -> None:
-        async with self._staged_roots_lock:
+        async with self._close_lock:
             if self._closed:
                 return
             self._closed = True
-            staged = list(self._staged_roots.values())
-            self._staged_roots.clear()
+        if (warm_up := self._connector_warm_up) is not None:
+            warm_up.cancel()
+            # Not ``suppress``: a cancellation of ``close`` itself must still land.
+            await asyncio.wait([warm_up])
         errors: list[BaseException] = []
-        for root in staged:
+        try:
+            await self.imports.close()
+        except BaseException as exc:
+            errors.append(exc)
+        if self._experimental_harness_host is not None:
             try:
-                await close_agent_loop(root)
+                await cast(Any, self._experimental_harness_host).shutdown()
             except BaseException as exc:
                 errors.append(exc)
+        await asyncio.to_thread(self._throwaway_storage_root.discard)
         if len(errors) == 1:
             raise errors[0]
         if errors:
-            raise BaseExceptionGroup("Failed to close staged session runtimes", errors)
+            raise BaseExceptionGroup("Failed to close the harness process", errors)
 
-    async def build_session_runtime(self, options: SessionOptions) -> RuntimeSnapshot:
-        session_config = await self._build_session_config(options)
-        return build_runtime_snapshot(
-            options, session_config.config_orchestrator, session_config.harness_files
-        )
+    def _unified_storage_root(self, session_logging: SessionLoggingConfig) -> str:
+        if session_logging.enabled:
+            # Storage usage counts every store open here, not only the default.
+            self.services.storage_usage.add_session_root(Path(session_logging.save_dir))
+            return session_logging.save_dir
+        return str(self._throwaway_storage_root.path())
 
     async def build_sessionless_mcp_catalog(
         self,
@@ -1110,18 +1445,150 @@ class HarnessProcess:
         session_config = await self._build_session_config(SessionOptions())
         return session_config.config_orchestrator
 
-    async def build_unified_session_context(  # noqa: PLR0914, PLR0915 - composition root
+    async def build_import_writer(self) -> UnifiedSessionImportWriter:
+        from vibe.app_server._local_projects import LocalProjectStore
+        from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
+
+        session_config = await self._build_session_config(SessionOptions())
+        config = session_config.config_orchestrator.config
+        return UnifiedSessionImportWriter(config.session_logging, LocalProjectStore())
+
+    async def build_import_local_projects(self) -> LocalProjectStore:
+        from vibe.app_server._local_projects import LocalProjectStore
+
+        return LocalProjectStore()
+
+    async def build_unified_read_context(
+        self, options: SessionOptions
+    ) -> UnifiedReadContext:
+        """Deliberately not ``build_unified_session_context``: a read resolves no
+        model, tool, plugin, MCP server or connector.
+        """
+        from vibe.app_server._unified_harness_backend_adapter import UnifiedReadContext
+
+        session_config = await self._build_session_config(options)
+        config_orchestrator = session_config.config_orchestrator
+        legacy_store = LegacySessionStore(config_orchestrator.config)
+
+        def build_agents() -> AgentManager:
+            return AgentManager(
+                config_orchestrator,
+                options.agent,
+                harness_files=session_config.harness_files,
+                initial_policy=options.approval_policy,
+            )
+
+        return UnifiedReadContext(
+            storage_root=self._unified_storage_root(
+                config_orchestrator.config.session_logging
+            ),
+            config_orchestrator=config_orchestrator,
+            harness_files=session_config.harness_files,
+            legacy_source_loader=legacy_store.loader(),
+            legacy_source_resolver=legacy_store.resolver(),
+            build_agents=build_agents,
+        )
+
+    async def build_unified_session_context(
         self,
         options: SessionOptions,
         *,
         require_api_key: bool = True,
         entrypoint: AgentEntrypoint = "cli",
+        org_config: OrgConfigSource = OrgConfigSource.CACHED,
+        session_spawner: SessionSpawner | None = None,
+        session_peers: SessionPeers | None = None,
+        reply_route: SessionPeers | None = None,
+        agent_worktrees: bool = False,
+        agent_projects: bool = False,
+    ) -> UnifiedSessionContext:
+        """Build a session context; no build fails because of the org config.
+
+        ``org_config`` is ``ENSURED`` for a session start: it waits for a first
+        copy when the process holds none. Every other build uses the copy the
+        process holds. When the session cannot be built or run under it, the
+        build falls back to local config. A failure with no
+        org config applied is the local config's, and propagates. Nothing is
+        removed from the cache: the failure can be this project's or this
+        user's local config, not the org config's. The context carries the
+        report for the session to publish.
+        """
+        source = org_config
+        error: Exception | None = None
+        first: OrgConfigAttempt | None = None
+        while True:
+            session_config = await self._build_session_config(
+                options, org_config=source, check_process_settings=False
+            )
+            applied = session_config.org_config
+            first = first or applied
+            try:
+                if self._process_settings is not None:
+                    self._process_settings.check(
+                        session_config.config_orchestrator.config
+                    )
+                context = await self._build_unified_session_context_once(
+                    options,
+                    session_config,
+                    require_api_key=require_api_key,
+                    entrypoint=entrypoint,
+                    session_spawner=session_spawner,
+                    session_peers=session_peers,
+                    reply_route=reply_route,
+                    agent_worktrees=agent_worktrees,
+                    agent_projects=agent_projects,
+                )
+                await _accept_org_config(context)
+                break
+            except Exception as exc:
+                # A context the Core check rejected is dropped without being
+                # closed: nothing in it is open yet. Its experiment client
+                # connects on the first evaluation, after the session opens,
+                # and the MCP auth service holds its bindings by weak reference.
+                retry = applied.next_source()
+                if retry is None:
+                    raise
+                error = error or exc
+                source = retry
+        outcome = fetch_outcome = first.fetch_outcome
+        if error is not None:
+            logger.warning("Org config rejected by the session", exc_info=error)
+            outcome = AdminConfigApplyResult(
+                AdminConfigOutcome.APPLY_FAILED, error=str(error)
+            )
+        elif (cache_failure := applied.cache_failure) is not None:
+            outcome = cache_failure
+        context.org_config_report.report = OrgConfigReport(
+            outcome,
+            excluded_agent=context.agents.excluded_agent,
+            fetch_outcome=fetch_outcome,
+        )
+        # What the follower compares a refresh against: a copy this build
+        # could not run under is not news to apply again.
+        context.org_config_report.loaded = first.considered or ""
+        return context
+
+    async def _build_unified_session_context_once(  # noqa: PLR0914, PLR0915 - composition root
+        self,
+        options: SessionOptions,
+        session_config: _SessionConfig,
+        *,
+        require_api_key: bool,
+        entrypoint: AgentEntrypoint,
+        session_spawner: SessionSpawner | None,
+        session_peers: SessionPeers | None,
+        reply_route: SessionPeers | None,
+        agent_worktrees: bool,
+        agent_projects: bool,
     ) -> UnifiedSessionContext:
         from mistralai_vibe_local_harness import HarnessSession
         from mistralai_vibe_local_harness.protocol import (
             RustAutomaticCompactionPolicy,
             RustContextSettings,
-            RustDisabledCompactionPolicy,
+            RustDisabledOutputLimitRecovery,
+            RustDisabledRuntimeToolFeature,
+            RustEnabledAgentTools,
+            RustEnabledModelWait,
             RustEnabledRuntimeToolFeature,
             RustFilesystemLargeOutputPolicy,
             RustGitBashCommandEnvironment,
@@ -1130,61 +1597,322 @@ class HarnessProcess:
             RustHarnessSettings,
             RustPowerShellCommandEnvironment,
             RustProgrammaticToolSettings,
+            RustPromptSettings,
             RustProvidedToolDefinition,
+            RustRetryOutputLimitRecovery,
             RustToolGroupDefinition,
             RustToolSettings,
             RustTurnSettings,
             RustUnixCommandEnvironment,
         )
         from mistralai_vibe_local_harness.vibe import (
-            LegacyImportSource,
-            LegacySessionReference as HarnessLegacySessionReference,
+            FILE_SYSTEM,
+            CompletionPricing,
+            HelperCrashCount,
             LocalModelRoute,
             LocalRuntimeAdapterConfig,
+            SessionWorkspace,
+            SharedCompletionBudget,
             compile_foreign_hooks,
+            output_room,
+            rust_model_facts,
+            sandbox_path,
             tool_catalog_for_config,
         )
+        from vibe.app_server._agents_md_hooks import (
+            merge_agents_md_hook,
+            register_access_roots,
+        )
+        from vibe.app_server._completion_facts import (
+            ModelFactsError,
+            SavedCatalogue,
+            SessionModelFacts,
+            compile_session_model_facts,
+        )
 
+        # Import the provider service after loading the bundled Harness package.
+        from vibe.app_server._context_breakdown import ModelRequestLog
         from vibe.app_server._plugins import (
-            core_plugins,
+            plugin_agent_names,
+            plugin_agent_sources,
             plugin_issues,
             requested_plugin_definitions,
         )
-
-        # Imported here rather than at module scope: it depends on the Harness
-        # package, which only exists under the experimental-harness extra.
         from vibe.app_server._provider_credentials import ProviderCredentialService
+        from vibe.app_server._subagent_permissions import SubagentPermissions
+        from vibe.app_server._subagent_runs import SubagentSteps
         from vibe.app_server._unified_harness_backend_adapter import (
+            CompletionBudgetSlot,
             CorrelationIdHolder,
+            MalformedToolCallsQueue,
+            OrgConfigKeySlot,
             RequestSentQueue,
+            UnifiedConfigCandidate,
             UnifiedRuntimeDerivation,
             UnifiedSessionContext,
             UnifiedSessionSettings,
+            WorkspaceSlot,
         )
-        from vibe.app_server._unified_permissions import UnifiedPermissionResolver
-        from vibe.core.llm.utility_completion import (
-            is_fast_utility_model,
-            select_utility_model,
+        from vibe.app_server._unified_permissions import (
+            ProvidedToolNames,
+            UnifiedPermissionResolver,
         )
+        from vibe.core.tools.builtins.ask_user_question import AskUserQuestion
         from vibe.questions import UserQuestionRequest, UserQuestionResult
 
-        session_config = await self._build_session_config(options)
+        # A rebuild for a live session adopts the previous context's slot
+        # (``CompletionBudgetSlot.adopt``); derivations after the adopt read the
+        # shared budget, so this one only serves a new run.
+        completion_budget = CompletionBudgetSlot(
+            SharedCompletionBudget(
+                max_total_tokens=options.max_session_tokens, max_price=options.max_price
+            )
+            if options.max_session_tokens is not None or options.max_price is not None
+            else None
+        )
+
+        def completion_pricing(model: ModelConfig) -> CompletionPricing:
+            # Every route carries its model's price, budgeted or not: a rebuild
+            # whose options lack ``max_price`` (a relocation, say) may adopt a
+            # priced budget. A price of 0, the default, is a free model.
+            return CompletionPricing(
+                input_per_million=model.input_price,
+                output_per_million=model.output_price,
+                cached_input_per_million=model.cached_input_price,
+            )
+
         config_orchestrator = session_config.config_orchestrator
         harness_files = session_config.harness_files
         config = config_orchestrator.config
-        cwd = Path(options.cwd or Path.cwd()).expanduser().resolve()
+        sandbox = self._sandbox
+        if self._helper_crashes is None:
+            self._helper_crashes = HelperCrashCount()
+        helper_crashes = self._helper_crashes
+        cwd = self._session_cwd(options)
+        if sandbox is None:
+            _prefetch_project_context(config, cwd)
         # The harness reads a non-empty root set as the complete one, so the cwd
         # has to stay in it: ``--add-dir`` widens the workspace, never replaces it.
-        workspace_roots = tuple(
-            dedup_paths([
-                cwd,
-                *(Path(root).expanduser() for root in options.workspace_roots),
-            ])
+        if sandbox is None:
+            workspace = SessionWorkspace(
+                cwd=cwd,
+                roots=(
+                    cwd,
+                    *(Path(root).expanduser() for root in options.workspace_roots),
+                    *harness_files.access_roots,
+                ),
+            )
+            register_access_roots(
+                workspace.cwd, workspace.roots, harness_files.access_roots
+            )
+        else:
+            # Sandbox paths: normalized, never resolved against the host.
+            workspace = SessionWorkspace(
+                cwd=cwd,
+                roots=(
+                    cwd,
+                    *(sandbox_path(root, cwd=cwd) for root in options.workspace_roots),
+                ),
+                path_space="sandbox",
+            )
+        workspace_slot = WorkspaceSlot(workspace)
+        # A sandbox has no host checkout to keep clean.
+        agent_worktrees = agent_worktrees and sandbox is None
+        # Read once: the repository the session starts in does not change,
+        # and a derivation runs on every configuration change.
+        checkout_state = (
+            await asyncio.to_thread(_checkout_state, cwd) if agent_worktrees else None
         )
-        plugins, plugin_provider, plugin_mcp = await self._build_plugins(
-            session_config, cwd
+        # Built before the plugins, which bind the workspace's own agent types
+        # through the same projection as a plugin's and therefore need a manager
+        # to read them from. Both the credential service and the agent manager
+        # read the orchestrator lazily, so they stay correct across every config
+        # mutation and must outlive any single derivation.
+        agents = AgentManager(
+            config_orchestrator,
+            options.agent,
+            harness_files=harness_files,
+            initial_policy=options.approval_policy,
         )
-        command_environment_mode = _command_environment_mode()
+        # Derivation reads the probe's answer synchronously, so it must finish
+        # first. Only features on at open are probed; one turned on later falls
+        # back until the next session open.
+        probe_features = tuple(
+            feature
+            for feature, enabled in (
+                (
+                    UtilityFeature.SMART_APPROVE,
+                    agents.active_policy.name == ApprovalPolicyName.SMART_APPROVE,
+                ),
+            )
+            if enabled
+        )
+
+        def declared_model(
+            overrides: Mapping[str, Any],
+        ) -> tuple[ModelConfig, SessionModelFacts, ProviderConfig] | None:
+            # Resolved as the session resolves its own model, from the profile's
+            # layer over the session's config; only the alias lookup differs, as
+            # a model the allowlist excludes is refused rather than replaced.
+            alias = overrides.get("active_model")
+            if alias is None:
+                return None
+            profile_config = config_orchestrator.copy()
+            apply_profile_overrides(profile_config, dict(overrides))
+            config = profile_config.config
+            if isinstance(alias, str):
+                alias = config.resolve_model_name(alias)
+            model = config.models.get(alias) if isinstance(alias, str) else None
+            if model is None:
+                raise ValueError(
+                    f"active_model: {alias!r} is not an alias defined in [[models]]"
+                )
+            if alias not in config.available_models():
+                raise ValueError(
+                    f"active_model: {alias!r} ({model.name}) is excluded by "
+                    "allowed_models"
+                )
+            # The destination comes from the session's own providers: the session's
+            # key for a provider must not follow an endpoint the profile redefined.
+            provider_cfg = config_orchestrator.config.get_provider_for_model(model)
+            # Compiled as the session compiles its own agent route, so the child
+            # gets the same fitted thinking level, output cap and Core facts.
+            try:
+                facts = compile_session_model_facts(provider_cfg, model, model)
+            except ModelFactsError as error:
+                raise ValueError(
+                    f"active_model: {alias!r} ({model.name}): {error}"
+                ) from error
+            return model, facts, provider_cfg
+
+        def child_model(overrides: Mapping[str, Any]) -> PublicChildModel | None:
+            try:
+                declared = declared_model(overrides)
+            except ValueError:
+                return None
+            if declared is None:
+                return None
+            model, facts, _ = declared
+            return PublicChildModel(
+                display_name=model.display_name or model.alias,
+                thinking=facts.agent_thinking,
+            )
+
+        def completion_route(
+            overrides: Mapping[str, Any],
+        ) -> DeclaredCompletionRoute | None:
+            from mistralai_vibe_local_harness.vibe.plugins import (
+                DeclaredCompletionRoute,
+            )
+
+            declared = declared_model(overrides)
+            if declared is None:
+                return None
+            model, facts, provider_cfg = declared
+            session = config_orchestrator.config
+            return DeclaredCompletionRoute(
+                model=LocalModelRoute(
+                    model=model.name,
+                    temperature=model.temperature,
+                    thinking=facts.agent_thinking,
+                    top_p=model.top_p,
+                    max_output_tokens=facts.agent.max_output_tokens,
+                    output_room=output_room(
+                        facts.agent.context_window, facts.agent.compaction_threshold
+                    ),
+                    reasoning=facts.agent_reasoning,
+                    pricing=completion_pricing(model),
+                ),
+                provider=_utility_provider_route(
+                    provider_cfg,
+                    session_provider_name=session.get_provider_for_model(
+                        session.get_active_model()
+                    ).name,
+                    credentials=credentials_for(provider_cfg.name),
+                    enabled=True,
+                ),
+                model_facts=rust_model_facts(facts.agent),
+            )
+
+        # A sandbox is a POSIX environment whatever the host runs.
+        command_environment_mode: _CommandEnvironmentMode = (
+            "unix" if sandbox is not None else _command_environment_mode()
+        )
+        # The store is the session's memory of what the user approved
+        permissions = PermissionStore()
+
+        def session_tools(config_getter: Callable[[], VibeConfigSchema]) -> ToolManager:
+            tools = ToolManager(
+                config_getter,
+                defer_mcp=True,
+                cwd=workspace.cwd,
+                harness_files=harness_files,
+                permission_getter=permissions.get_tool_permission,
+            )
+            if workspace_slot.moved:
+                tools.move_to(workspace_slot.workspace.cwd, workspace_slot.entered)
+            return tools
+
+        # The MCP and connector projections write the routes they published into
+        # this map; the resolver reads it to find the name they were configured
+        # under. Both need the same instance, so the context carries it.
+        provided_names = ProvidedToolNames()
+        permission_resolver = UnifiedPermissionResolver(
+            session_tools(lambda: config_orchestrator.config),
+            permissions,
+            config_orchestrator,
+            provided_names,
+            path_space=workspace.path_space,
+            command_environment=command_environment_mode,
+        )
+        # Built before the plugins, which hand each declared subagent profile the
+        # resolver its calls go through.
+        subagent_permissions = SubagentPermissions(
+            permission_resolver,
+            config_orchestrator,
+            session_tools,
+            cwd=lambda: workspace_slot.workspace.cwd,
+        )
+        # Constructed once per session rather than per derivation: it holds the
+        # set of revisions a provider has refused, and a service rebuilt on
+        # every derivation would forget them and re-send a rejected key.
+        credentials = ProviderCredentialService(
+            config_orchestrator,
+            credentials=self._credentials,
+            platform_credentials=self.credentials,
+        )
+
+        # A route's endpoint is fixed at derivation, so its key is pinned to the
+        # same provider. Per session, like ``credentials``, so rejection memory
+        # survives derivations.
+        utility_credentials: dict[str, ProviderCredentialService] = {}
+
+        def credentials_for(provider_name: str) -> ProviderCredentialService:
+            if provider_name not in utility_credentials:
+                utility_credentials[provider_name] = self._provider_credentials(
+                    config_orchestrator, provider_name
+                )
+            return utility_credentials[provider_name]
+
+        # The fast-model probe and the utility model it picks ask with the
+        # connection's credential, as the session's model calls do.
+        session_utility_credentials = UtilityCredentials(
+            platform=self.credentials,
+            for_provider=credentials_for,
+            run_keys=self._credentials,
+        )
+        (plugins, plugin_provider, plugin_mcp), _ = await asyncio.gather(
+            self._build_plugins(
+                session_config,
+                workspace.cwd,
+                agents=agents,
+                subagent_permissions=subagent_permissions,
+                completion_route=completion_route,
+            ),
+            ensure_utility_models_probed(
+                config, features=probe_features, credentials=session_utility_credentials
+            ),
+        )
         match command_environment_mode:
             case "unix":
                 command_environment = RustUnixCommandEnvironment()
@@ -1192,23 +1920,6 @@ class HarnessProcess:
                 command_environment = RustGitBashCommandEnvironment()
             case "powershell":
                 command_environment = RustPowerShellCommandEnvironment()
-
-        # Constructed once per session rather than per derivation: it holds the
-        # set of revisions a provider has refused, and a service rebuilt on
-        # every derivation would forget them and re-send a rejected key.
-        credentials = ProviderCredentialService(config_orchestrator)
-
-        # A second credential port for background title generation that may run on
-        # the fast Mistral model even when the session's active provider differs.
-        # Bound to the Mistral provider — the one the fast title route targets —
-        # rather than re-running utility selection: if the Mistral key later
-        # disappears, this must surface as auth-required, not fall back to the active
-        # provider and send its key to the Mistral endpoint the route still points
-        # at. Same per-session lifetime as ``credentials`` so rejection memory
-        # survives derivations.
-        title_credentials = ProviderCredentialService(
-            config_orchestrator, select_provider=_utility_credential_provider
-        )
 
         # One holder per session, shared by every derivation's adapter config and
         # the context: the Mistral adapter writes the provider correlation id into
@@ -1218,72 +1929,87 @@ class HarnessProcess:
         # Same lifetime and sharing as ``correlation``: the completion adapter
         # appends each request's shape here, the adapter drains it to telemetry.
         request_sent = RequestSentQueue()
+        malformed_tool_calls = MalformedToolCallsQueue()
+        # The catalogue answer a reopened session saved; the adapter sets it from
+        # the session's pin before the derivation that restores it.
+        saved_catalogue = SavedCatalogue()
+        # The root and its subagents share the sink: it counts each subagent's
+        # agent model calls for ``session/subagents/read``.
+        subagent_steps = SubagentSteps()
+        # Shared the same way: the sizes of each session's newest model input,
+        # which ``session/context/read`` splits the measured usage by.
+        model_requests = ModelRequestLog()
 
-        # Both the credential service and the agent manager read the
-        # orchestrator lazily, so they stay correct across every config
-        # mutation and must outlive any single derivation.
-        agents = AgentManager(
-            config_orchestrator,
-            options.agent or config.resolve_default_agent(),
-            harness_files=harness_files,
-        )
         if require_api_key:
-            config_orchestrator.config.require_active_provider_api_key()
-        # The store is the session's memory of what the user approved
-        permissions = PermissionStore()
-        tools = ToolManager(
-            lambda: config_orchestrator.config,
-            defer_mcp=True,
-            cwd=cwd,
-            harness_files=harness_files,
-            permission_getter=permissions.get_tool_permission,
-        )
-        permission_resolver = UnifiedPermissionResolver(
-            tools, permissions, config_orchestrator
-        )
-
-        def resolve_legacy_source(
-            session_id: str,
-        ) -> HarnessLegacySessionReference | None:
-            reference = resolve_legacy_session_reference(
-                session_id, config_orchestrator.config.session_logging
+            _require_active_provider_credential(
+                config_orchestrator.config, self.credentials, self._credentials
             )
-            if reference is None:
-                return None
-            return HarnessLegacySessionReference(
-                session_id=reference.session_id, cwd=reference.cwd
+        # Read once per session, like the host's own git snapshot: the context
+        # describes the workspace as the session found it.
+        sandbox_workspace = None
+        sandbox_skills = None
+        sandbox_roots: tuple[Path, ...] = ()
+        if sandbox is not None:
+            from vibe.app_server._sandbox_workspace import (
+                read_sandbox_workspace_context,
             )
 
-        def load_legacy_source(session_id: str) -> LegacyImportSource:
             try:
-                export = export_legacy_committed_history(
-                    session_id, config_orchestrator.config.session_logging
+                sandbox_roots = tuple(
+                    dict.fromkeys(root for root in workspace.roots if root != cwd)
                 )
-            except InvalidLegacyInteropSourceError as exc:
-                return LegacyImportSource(state="invalid", error=str(exc))
-            if export is None:
-                return LegacyImportSource(state="absent")
-            return LegacyImportSource(
-                state="quiescent",
-                reference=HarnessLegacySessionReference(
-                    session_id=export.reference.session_id, cwd=export.reference.cwd
-                ),
-                store_revision=export.store_revision,
-                history=export.history,
-                active_model=export.active_model,
-            )
+                if config.include_project_context:
+                    sandbox_workspace = await read_sandbox_workspace_context(
+                        sandbox,
+                        config.project_context,
+                        cwd=cwd,
+                        roots=(cwd, *sandbox_roots),
+                    )
+                # The model reads skills with tools that run in the sandbox: the
+                # host's skills are copied there, and the project's are read there.
+                assert self._sandbox_skills is not None
+                root_skills = await asyncio.to_thread(
+                    host_skills,
+                    lambda: config_orchestrator.config,
+                    harness_files=harness_files,
+                )
+                sandbox_skills = await self._sandbox_skills.prepare_session(
+                    [
+                        *root_skills.values(),
+                        *plugins.materialized.resolution.skills.values(),
+                    ],
+                    roots=(cwd, *sandbox_roots),
+                )
+            finally:
+                # The agent server's abort, however the sandbox reads reported
+                # it: some, such as the git context, swallow their failures.
+                if self._agent_socket is not None:
+                    self._agent_socket.check()
+        legacy_store = LegacySessionStore(config_orchestrator.config)
 
         # Discover the user's hooks once. The raw parse -- including any parse/duplicate
         # diagnostics on result.issues -- is settings-independent, so load it before the
         # derivation closure and surface those diagnostics as session notices, matching
-        # legacy (which projects hook_config_issues) and the design's failure table.
+        # legacy (which projects hook_config_issues).
         hook_result = await asyncio.to_thread(
             load_hooks_from_fs, harness_files=session_config.harness_files
         )
+        # Plugin hooks bind with the user's own when the session starts. A
+        # ``plugin/reload`` swaps the plugin set a derivation sees, but cannot rebind
+        # the session's hooks, so it tells the user they apply to new sessions.
+        plugin_hooks, plugin_hook_issues = _runnable_plugin_hooks(plugins)
         mcp_catalog = await self.mcp_catalog.resolve_catalog(config_orchestrator)
-        mcp_catalog = merge_plugin_mcp_into_catalog(
-            mcp_catalog, plugin_mcp, authentication=self.mcp_authentication
-        )
+        if config_orchestrator.config.enable_mcp:
+            mcp_catalog = merge_plugin_mcp_into_catalog(
+                mcp_catalog, plugin_mcp, authentication=self.mcp_authentication
+            )
+            try:
+                server_names = [server.name for server in mcp_catalog.servers]
+                self._client_tools.check_mcp_server_names(server_names)
+            except ClientToolDeclarationError as e:
+                from vibe.app_server._agent_socket import session_open_error
+
+                raise session_open_error(RunOutcome.USAGE_ERROR, str(e)) from e
         # Connector discovery is deferred to a background task so it never blocks
         # session/start. The session opens with an empty connector catalog and the
         # adapter resolves it after start, reconfiguring connectors in-place when
@@ -1295,57 +2021,86 @@ class HarnessProcess:
             config_orchestrator, connector_catalog
         )
         connector_provider = config.get_mistral_provider()
-        connector_api_key = ""
         connector_base_url = "https://api.mistral.ai"
         if connector_provider is not None:
-            connector_api_key = (
-                resolve_api_key(connector_provider.api_key_env_var or "MISTRAL_API_KEY")
-                or ""
-            )
             connector_base_url = (
                 get_server_url_from_api_base(connector_provider.api_base)
                 or connector_base_url
             )
 
         def derive_config(  # noqa: PLR0914 - one cohesive config derivation
-            config: VibeConfigSchema, settings: UnifiedSessionSettings
+            config: VibeConfigSchema,
+            settings: UnifiedSessionSettings,
+            candidate: UnifiedConfigCandidate | None = None,
         ) -> UnifiedRuntimeDerivation:
+            # A candidate not installed yet derives from itself throughout.
+            orchestrator = (
+                config_orchestrator if candidate is None else candidate.orchestrator
+            )
+            agent_view = agents if candidate is None else candidate.agents
+            active_profile = agent_view.active_agent
             active_model = config.get_active_model()
             provider = config.get_provider_for_model(active_model)
             compaction_model = config.get_compaction_model()
-            title_model_config, utility_provider_cfg = select_utility_model(config)
-            title_provider_cfg = utility_provider_cfg
-            title_model_is_fast = is_fast_utility_model(config)
-            if title_model_is_fast and not _is_public_mistral_api(
-                utility_provider_cfg.api_base
-            ):
-                title_model_config = active_model
-                title_provider_cfg = provider
-                title_model_is_fast = False
+            title_model_config = (
+                config.get_utility_model(UtilityFeature.TITLE)
+                or config.get_active_model()
+            )
+            title_provider_cfg = config.get_provider_for_model(title_model_config)
+            classifier_model_config, classifier_provider_cfg = select_utility_model(
+                config,
+                feature=UtilityFeature.SMART_APPROVE,
+                credentials=session_utility_credentials,
+            )
+            # Only settings the model accepts: Mistral rejects greedy sampling
+            # (temperature 0.0) unless top_p is 1, and some models reject "off".
+            # Without "off", the title keeps the model's own level.
             title_model = LocalModelRoute(
-                model=title_model_config.name, temperature=0.0, thinking="off"
+                model=title_model_config.name,
+                temperature=title_model_config.temperature,
+                thinking="off"
+                if "off" in title_model_config.thinking_levels
+                else title_model_config.thinking,
+                top_p=title_model_config.top_p,
+                pricing=completion_pricing(title_model_config),
             )
-            # Match the legacy policy: only interactive terminal/desktop clients
-            # get background titles; other clients keep the message preview.
-            auto_title_enabled = (
-                config.session_logging.generate_titles
-                and entrypoint in {"cli", "desktop"}
-            )
-            compaction_policy = (
-                RustAutomaticCompactionPolicy(
-                    token_threshold=active_model.auto_compact_threshold
-                )
-                if active_model.auto_compact_threshold > 0
-                else RustDisabledCompactionPolicy()
+            auto_title_enabled = _auto_titles_enabled(config, entrypoint)
+            # The harness has its own built-in title prompt, written for its
+            # transcript format. Send only a prompt the user configured.
+            title_prompt = config.title_prompt
+            if title_prompt == UtilityPrompt.SESSION_TITLE.read():
+                title_prompt = None
+            # Both routes run on the active model's provider.
+            model_facts = compile_session_model_facts(
+                provider,
+                active_model,
+                compaction_model,
+                saved=saved_catalogue.snapshot,
+                agent_max_tokens=config.agent_max_output_tokens or None,
             )
             derived_tools = ToolManager(
-                lambda: config, defer_mcp=True, cwd=cwd, harness_files=harness_files
+                lambda: config,
+                defer_mcp=True,
+                cwd=workspace_slot.workspace.cwd,
+                harness_files=harness_files,
             )
             available_tools = set(derived_tools.available_tools)
-            bypass_approval = options.auto_approve or config.bypass_tool_permissions
-            # Recomputed on every derivation (including switch_agent) so entering or
-            # leaving smart-approve mid-session re-derives the gate live.
-            smart_approve = agents.active_profile.name == BuiltinAgentName.SMART_APPROVE
+            command_tool_name = _command_tool_name(command_environment_mode)
+            bash_timeout = _bash_timeout(
+                command_tool_name, config.tools.get(command_tool_name)
+            )
+            bypass_approval = _effective_bypass_tool_permissions(
+                config, options.auto_approve
+            )
+            if bypass_approval:
+                # A bypass skips every prompt, never a refusal: the tools the
+                # agent sets to `never` are off, as under the auto-approve policy.
+                available_tools -= agent_refused_tools(active_profile)
+            # Recomputed on every derivation (including a policy switch) so entering
+            # or leaving smart-approve mid-session re-derives the gate live.
+            smart_approve = (
+                agent_view.active_policy.name == ApprovalPolicyName.SMART_APPROVE
+            )
             gate = (
                 ToolGate.BYPASS
                 if bypass_approval
@@ -1354,70 +2109,219 @@ class HarnessProcess:
                 else ToolGate.PROMPT
             )
             max_iterations = settings.max_turns or options.max_turns or 1_000
+            session_plugins = plugins if settings.plugins is None else settings.plugins
             skill_issues, skills = discover_session_skills(
-                lambda: config_orchestrator.config,
+                lambda: orchestrator.config,
                 harness_files=harness_files,
-                plugin_skills=plugins.materialized.resolution.skills,
-                plugin_contexts=core_plugins(plugins),
+                plugin_skills=session_plugins.materialized.resolution.skills,
+                plugin_contexts=plugin_provider.core_plugins(session_plugins),
                 skill_tool_available="skill" in available_tools,
+                sandbox=sandbox_skills,
+                session_pins=settings.skill_pins,
             )
+            self.services.skill_shadows.warn(skills.shadowed)
+            # Logged here, not at validation: startup validates the config
+            # before the cached layers add the models they provide.
+            self.services.missing_models.warn(config.missing_model_warnings)
+            # Advertised here, bound by the plugin projection. Both sides measure
+            # the same files against the same catalogue, so the names the model
+            # reads are the names the Host can spawn.
+            plugin_agents = session_plugins.materialized.resolution.agents
+            workspace_types = workspace_agent_types(agent_view)
+            agent_types = resolve_agent_types(
+                workspace_types,
+                AgentToolCatalogue(
+                    available=frozenset(available_tools),
+                    permission_of=lambda name: (
+                        derived_tools.get_tool_config(name).permission
+                    ),
+                    completion_route=completion_route,
+                ),
+                reserved=plugin_agent_names(plugin_agents),
+            )
+            profile_prompt, prompt_issue = _agent_profile_prompt(active_profile)
             return UnifiedRuntimeDerivation(
                 runtime=build_unified_runtime_snapshot(
-                    config_orchestrator,
-                    agents,
+                    orchestrator,
+                    agent_view,
                     issues=[
-                        *plugin_issues(plugins),
+                        *plugin_issues(session_plugins),
                         *skill_issues,
+                        *(
+                            rejection.issue()
+                            for rejection in workspace_agent_rejections(agent_view)
+                        ),
+                        *agent_file_issues(agent_view),
+                        *agent_types.issues,
+                        *([prompt_issue] if prompt_issue is not None else []),
                         *_hook_config_issues(hook_result),
+                        *plugin_hook_issues,
+                        # A trusted home is both a project root and the user
+                        # root: report each tool file once.
+                        *ignored_tool_settings(
+                            dict.fromkeys(
+                                tool_dir.resolve()
+                                for tool_dir in (
+                                    *harness_files.project_tools_dirs,
+                                    *harness_files.user_tools_dirs,
+                                )
+                            )
+                        ),
+                        *(
+                            self._process_settings.issues(config)
+                            if self._process_settings is not None
+                            else []
+                        ),
                     ],
                     skills=skills.catalogue,
                     tools=available_tools,
-                    custom_tool_names=frozenset(derived_tools.custom_tool_names),
-                    hooks_count=len(hook_result.hooks),
+                    hooks_count=len(hook_result.hooks) + len(plugin_hooks),
                     auto_approve=options.auto_approve,
+                    compaction_threshold=model_facts.agent.compaction_threshold,
+                ),
+                skill_payloads=skills.payloads,
+                registry_versions=skills.registry_versions,
+                profile_warnings=model_facts.warnings,
+                completion_catalogue=model_facts.catalogue,
+                # Plugin types last: a plugin keeps a name a workspace agent also claims.
+                child_models=_child_models(
+                    (*workspace_types, *plugin_agent_sources(plugin_agents)),
+                    child_model,
                 ),
                 core_config=RustHarnessConfig(
                     task_id="runtime-template",
                     system_instructions=_build_unified_system_instructions(
-                        config, harness_files
+                        config,
+                        harness_files,
+                        cwd=workspace_slot.workspace.cwd,
+                        surface=client_surface(entrypoint),
+                        base=options.system_prompt or profile_prompt,
+                        extra=active_profile.instructions,
+                        sandbox_workspace=sandbox_workspace,
+                        sandbox_roots=sandbox_roots,
+                        project_instructions=self._project_instructions,
+                        background_processes=config.enable_background_processes,
+                        command_environment=command_environment_mode,
+                        local_desktop=entrypoint == "desktop" and sandbox is None,
+                        worktree_rule=checkout_state
+                        if agent_worktrees
+                        and not workspace_slot.moved
+                        and enter_worktree_offered(
+                            enabled_tools=config.enabled_tools,
+                            disabled_tools=config.disabled_tools,
+                        )
+                        else None,
                     ),
                     settings=RustHarnessSettings(
-                        turn=RustTurnSettings(max_iterations=max_iterations),
-                        context=RustContextSettings(compaction=compaction_policy),
-                        tools=RustToolSettings(
-                            programmatic=RustProgrammaticToolSettings(
-                                max_effects=128, max_operations=1024
+                        prompts=RustPromptSettings(guidance="stock"),
+                        turn=RustTurnSettings(
+                            max_iterations=max_iterations,
+                            # A cut-off answer is discarded and asked for again
+                            # with feedback, at most this many times a turn.
+                            output_limit_recovery=(
+                                RustRetryOutputLimitRecovery(
+                                    max_retries=config.output_limit_retries
+                                )
+                                if config.output_limit_retries > 0
+                                else RustDisabledOutputLimitRecovery()
                             ),
-                            subagents=RustEnabledRuntimeToolFeature(),
-                            background_processes=RustEnabledRuntimeToolFeature(),
+                        ),
+                        context=RustContextSettings(
+                            compaction=RustAutomaticCompactionPolicy(),
+                            model_facts=rust_model_facts(model_facts.agent),
+                            compaction_model_input_modalities=(
+                                _compaction_model_input_modalities(
+                                    model_facts.agent, model_facts.compaction
+                                )
+                            ),
+                        ),
+                        tools=RustToolSettings(
+                            # The local Runtime answers `self.wait` from committed
+                            # Session input (steering, child results, process
+                            # completions). Core offers the direct `wait` tool only
+                            # when subagents or background processes are enabled.
+                            model_wait=RustEnabledModelWait(),
+                            programmatic=RustProgrammaticToolSettings(
+                                max_effects=128,
+                                max_operations=1024,
+                                max_elapsed_ms=60_000,
+                                max_sleep_ms=30_000,
+                            ),
+                            subagents=(
+                                RustEnabledAgentTools(conversation_forking=False)
+                                if config.enable_subagents
+                                else RustDisabledRuntimeToolFeature()
+                            ),
+                            background_processes=(
+                                RustEnabledRuntimeToolFeature()
+                                if config.enable_background_processes
+                                else RustDisabledRuntimeToolFeature()
+                            ),
+                            file_system=FILE_SYSTEM,
                             command_environment=command_environment,
-                            large_output=RustFilesystemLargeOutputPolicy(),
+                            large_output=RustFilesystemLargeOutputPolicy(
+                                max_output_tokens=_LARGE_OUTPUT_MAX_TOKENS,
+                                model_visible_output_tokens=_LARGE_OUTPUT_VISIBLE_TOKENS,
+                            ),
+                            bash_timeout=bash_timeout,
                         ),
                     ),
                     capabilities=RustHarnessCapabilitySet(
-                        tool_groups=(
-                            [
-                                RustToolGroupDefinition(
-                                    name="ui",
-                                    description="Interactive user interface tools",
-                                    tools=[
-                                        RustProvidedToolDefinition(
-                                            name="ask_user_question",
-                                            description=(
-                                                "Ask the user one or more questions and wait "
-                                                "for their answers."
-                                            ),
-                                            input_schema=UserQuestionRequest.model_json_schema(),
-                                            output_schema=UserQuestionResult.model_json_schema(),
-                                            exposure="direct",
-                                        )
-                                    ],
-                                )
-                            ]
-                            if "ask_user_question" in available_tools
-                            else []
-                        ),
+                        tool_groups=[
+                            *(
+                                [
+                                    RustToolGroupDefinition(
+                                        name="ui",
+                                        description="Interactive user interface tools",
+                                        tools=[
+                                            RustProvidedToolDefinition(
+                                                name="ask_user_question",
+                                                description=AskUserQuestion.get_full_description(),
+                                                input_schema=UserQuestionRequest.model_json_schema(),
+                                                output_schema=UserQuestionResult.model_json_schema(),
+                                                exposure="direct",
+                                            )
+                                        ],
+                                    )
+                                ]
+                                if "ask_user_question" in available_tools
+                                else []
+                            ),
+                            *vibe_tool_groups(
+                                available_tools,
+                                enabled_tools=config.enabled_tools,
+                                disabled_tools=config.disabled_tools,
+                                session_spawn=(
+                                    spawn_models(config)
+                                    if session_spawner is not None
+                                    else None
+                                ),
+                                session_peers=session_peers is not None,
+                                enter_worktree=agent_worktrees,
+                                # A sandbox cannot reach the user's project folders.
+                                projects=agent_projects and sandbox is None,
+                                session_peer_rename=(
+                                    session_peers is not None
+                                    and session_peers.client_capabilities().session_peer_rename
+                                ),
+                                session_peer_restore=(
+                                    session_peers is not None
+                                    and session_peers.client_capabilities().session_peer_restore
+                                ),
+                                # Goals start work without the user, like loops,
+                                # so a headless run has none.
+                                goals=not options.headless,
+                                session_peer_mark_seen=(
+                                    session_peers is not None
+                                    and session_peers.client_capabilities().session_peer_mark_seen
+                                ),
+                            ),
+                            # The client chose these; the tool filters are for
+                            # Vibe's own.
+                            *self._template_client_tool_groups,
+                        ],
                         skills=list(skills.definitions),
+                        agent_types=list(agent_types.definitions),
                     ),
                     # No plugins: once a provider is configured its `bind` is
                     # the only source, and a template's would silently win over
@@ -1436,71 +2340,125 @@ class HarnessProcess:
                     active_model=LocalModelRoute(
                         model=active_model.name,
                         temperature=active_model.temperature,
-                        thinking=active_model.thinking,
+                        thinking=model_facts.agent_thinking,
+                        top_p=active_model.top_p,
+                        max_output_tokens=model_facts.agent.max_output_tokens,
+                        output_room=output_room(
+                            model_facts.agent.context_window,
+                            model_facts.agent.compaction_threshold,
+                        ),
+                        reasoning=model_facts.agent_reasoning,
+                        pricing=completion_pricing(active_model),
                     ),
+                    active_model_alias=active_model.alias,
+                    active_agent=active_profile.name,
                     compaction_model=LocalModelRoute(
                         model=compaction_model.name,
                         temperature=compaction_model.temperature,
-                        thinking=compaction_model.thinking,
+                        thinking=model_facts.compaction_thinking,
+                        top_p=compaction_model.top_p,
+                        max_output_tokens=model_facts.compaction.max_output_tokens,
+                        # Compaction input is the agent's context, which reaches
+                        # the agent's threshold.
+                        output_room=output_room(
+                            model_facts.compaction.context_window,
+                            model_facts.agent.compaction_threshold,
+                        ),
+                        reasoning=model_facts.compaction_reasoning,
+                        pricing=completion_pricing(compaction_model),
                     ),
                     title_model=title_model if auto_title_enabled else None,
+                    title_prompt=title_prompt,
                     title_provider=_utility_provider_route(
                         title_provider_cfg,
                         session_provider_name=provider.name,
-                        credentials=title_credentials,
+                        credentials=credentials_for(title_provider_cfg.name),
                         enabled=auto_title_enabled,
                     ),
-                    title_model_is_fast=title_model_is_fast,
-                    # The classifier runs the fast Mistral model even when the
-                    # session runs on another provider, so it needs its own Mistral
-                    # route + credentials rather than the active model's. Set only
-                    # under smart approve, when the classify gate actually runs.
+                    # Its own route: the classifier may run on another provider.
+                    # Set only under smart approve, when the gate runs.
                     classifier_provider=_utility_provider_route(
-                        utility_provider_cfg,
+                        classifier_provider_cfg,
                         session_provider_name=provider.name,
-                        credentials=title_credentials,
+                        credentials=credentials_for(classifier_provider_cfg.name),
                         enabled=smart_approve,
                     ),
+                    # Set in every mode: a mid-turn switch into smart approve keeps
+                    # the turn's model, which matches the turn's provider.
+                    classifier_model=classifier_model_config.name,
+                    classifier_pricing=completion_pricing(classifier_model_config),
+                    completion_budget=completion_budget.budget,
                     max_tokens=settings.max_tokens,
-                    thinking=active_model.thinking,
+                    # 0 is how a TOML file turns a limit off.
+                    agent_max_tokens=config.agent_max_output_tokens or None,
+                    compaction_max_tokens=config.compaction_max_output_tokens or None,
+                    compaction_reasoning_limit_tokens=(
+                        config.compaction_reasoning_limit_tokens or None
+                    ),
+                    subagent_max_children=config.max_subagents,
+                    subagent_max_concurrent_turns=config.max_concurrent_subagents,
+                    session_api=(
+                        config.experimental_local_runtime_session_api
+                        if settings.session_api is None
+                        else settings.session_api
+                    ),
+                    thinking=model_facts.agent_thinking,
                     reasoning_field_name=provider.reasoning_field_name,
                     emits_finish_reason=provider.emits_finish_reason,
-                    extra_headers=dict(provider.extra_headers),
+                    tool_result_images=provider.sends_tool_result_images,
+                    extra_headers=with_user_agent(
+                        provider.extra_headers, provider.backend
+                    ),
                     project_id=provider.project_id,
                     region=provider.region,
                     timeout_s=config.api_timeout,
+                    # 0 sets no separate idle limit: silence after the first
+                    # output then gets the api_timeout wait too.
+                    stream_idle_timeout_s=config.api_stream_idle_timeout or None,
+                    # A budget of 0 turns retries off, the stall retry included.
                     retry_max_elapsed_time_s=config.api_retry_max_elapsed_time,
-                    cwd=cwd,
-                    workspace_roots=workspace_roots,
+                    enable_system_trust_store=config.enable_system_trust_store,
+                    workspace=workspace_slot.workspace,
                     # The library environment goes on top: a plugin that declares a
                     # Python or Node library is only usable if the search paths
                     # materialization computed reach the process that runs a
                     # command. Materialization already folded the inherited
                     # PYTHONPATH and NODE_PATH into those values, so overriding is
                     # prepending, not discarding.
-                    env={**os.environ, **plugins.materialized.process_environment},
+                    # In a sandbox, commands run with the sandbox's own
+                    # environment: these search paths name host directories.
+                    env=(
+                        {
+                            **os.environ,
+                            **session_plugins.materialized.process_environment,
+                            **VIBE_SESSION_ENV,
+                        }
+                        if sandbox is None
+                        else {}
+                    ),
                     command_environment=command_environment_mode,
                     shell=getattr(
-                        derived_tools.get_tool_config(
-                            "bash"
-                            if command_environment_mode == "unix"
-                            else command_environment_mode
-                        ),
-                        "shell",
-                        None,
+                        derived_tools.get_tool_config(command_tool_name), "shell", None
                     ),
-                    process_authority="host_shell",
+                    process_authority=(
+                        "host_shell" if workspace.path_space == "host" else "sandbox"
+                    ),
                     bypass_approval=bypass_approval,
                     tool_modes=_rust_tool_modes(
                         available_tools,
                         lambda name: derived_tools.get_tool_config(name).permission,
+                        lambda name: derived_tools.get_tool_config(name).allowlist,
                         gate=gate,
                     ),
                     provided_tool_mode=_rust_provided_tool_mode(gate),
                     permission_resolver=permission_resolver.resolve,
-                    skills=skills.payloads,
+                    skills=skills.model_payloads,
                     correlation_id_sink=correlation.record,
-                    request_sent_sink=request_sent.record,
+                    request_sent_sink=subagent_steps.counting(request_sent.record),
+                    malformed_tool_calls_sink=malformed_tool_calls.record,
+                    model_request_sink=model_requests.record,
+                    sandbox=sandbox,
+                    helper_crashes=helper_crashes,
                 ),
             )
 
@@ -1508,9 +2466,13 @@ class HarnessProcess:
             return derive_config(config_orchestrator.config, settings)
 
         async def preflight(
-            candidate: VibeConfigSchema, settings: UnifiedSessionSettings
-        ) -> None:
-            derivation = await asyncio.to_thread(derive_config, candidate, settings)
+            config: VibeConfigSchema,
+            settings: UnifiedSessionSettings,
+            candidate: UnifiedConfigCandidate | None = None,
+        ) -> UnifiedRuntimeDerivation:
+            derivation = await asyncio.to_thread(
+                derive_config, config, settings, candidate
+            )
 
             def validate_core_config() -> None:
                 core = HarnessSession.create(
@@ -1519,6 +2481,7 @@ class HarnessProcess:
                 core.close()
 
             await asyncio.to_thread(validate_core_config)
+            return derivation
 
         # Compile the discovered hooks into Core bindings + Runtime handlers. The
         # catalogue provider is lazy: it only runs the native call when a hook
@@ -1531,14 +2494,31 @@ class HarnessProcess:
         hooks = await asyncio.to_thread(
             compile_foreign_hooks,
             _foreign_hook_definitions(
-                hook_result, harness_files=harness_files, cwd=cwd
+                hook_result,
+                harness_files=harness_files,
+                cwd=cwd,
+                plugin_hooks=plugin_hooks,
+                session_plugins=plugin_provider.first_bound,
             ),
             tool_catalog=lambda: tool_catalog_for_config(core_config_json),
         )
+        # Builtin hooks that the Core must bind for every unified session; the
+        # lazy AGENTS.md injection restores the legacy read_file's discovery of
+        # subdirectory docs (see _agents_md_hooks). The handler is registered
+        # Host-globally, so only the binding rides the session here.
+        hooks = merge_agents_md_hook(hooks)
+        scoped_post_agent_hooks, main_post_agent_hooks = _post_agent_hook_counts(
+            hook_result, plugin_hooks
+        )
+        session_hooks = _session_hooks(
+            hook_result, harness_files=harness_files, plugin_hooks=plugin_hooks
+        )
+        hooks = _with_session_start_context(hooks, session_hooks)
         return UnifiedSessionContext(
-            storage_root=config.session_logging.save_dir,
-            legacy_source_loader=load_legacy_source,
-            legacy_source_resolver=resolve_legacy_source,
+            storage_root=self._unified_storage_root(config.session_logging),
+            session_logging_enabled=config.session_logging.enabled,
+            legacy_source_loader=legacy_store.loader(),
+            legacy_source_resolver=legacy_store.resolver(),
             plugins=plugins,
             plugin_provider=plugin_provider,
             plugin_mcp=plugin_mcp,
@@ -1546,9 +2526,29 @@ class HarnessProcess:
             config_orchestrator=config_orchestrator,
             harness_files=harness_files,
             agents=agents,
+            org_config_service=self.services.org_config,
+            experiments_service=self.services.experiments,
+            skill_store=self.services.skill_store,
+            keep_awake=self.services.keep_awake,
+            model_catalog_service=self.services.model_catalog,
+            config_changes=self.services.config_changes,
+            org_config_key=OrgConfigKeySlot(session_config.org_config_key),
+            completion_budget=completion_budget,
+            workspace=workspace_slot,
             derive=derive,
             permissions=permission_resolver,
+            sandbox_skills=sandbox_skills,
+            provided_names=provided_names,
+            client_tools=self._client_tools,
+            session_spawner=session_spawner,
+            session_peers=session_peers,
+            reply_route=reply_route,
             hooks=hooks,
+            post_agent_scoped_hooks_count=scoped_post_agent_hooks,
+            post_agent_main_hooks_count=main_post_agent_hooks,
+            hook_type_counts=_hook_type_counts(hook_result, plugin_hooks),
+            session_hooks=session_hooks,
+            session_start_contexts=self.session_start_contexts,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
             mcp_authentication=self.mcp_authentication,
@@ -1558,162 +2558,164 @@ class HarnessProcess:
                 / "mcp-descriptors"
                 / "unified"
             ),
+            mcp_discovery_flights=self.services.mcp_discovery.flights(),
             mcp_enable_system_trust_store=config.enable_system_trust_store,
             connector_catalog=connector_catalog,
             connector_selection=connector_selection,
             connector_catalog_service=self.connector_catalog,
             connector_base_url=connector_base_url,
-            connector_api_key=connector_api_key,
+            # The gateway resolves the connection's credential per call.
+            platform_credentials=self.credentials,
+            provider_credentials=credentials_for,
+            utility_credentials=self.utility_credentials,
             preflight=preflight,
-            # Built here rather than defaulted on the context: the default
-            # ``ExperimentManager`` has no eval URL, so every resolution would
-            # be a silent no-op.
-            experiment_manager=ExperimentManager(
-                client=RemoteEvalClient.from_settings(
-                    api_host=config.experiments.api_host,
-                    client_key=config.experiments.client_key,
-                )
-            ),
             correlation=correlation,
             request_sent=request_sent,
+            malformed_tool_calls=malformed_tool_calls,
+            subagent_steps=subagent_steps,
+            model_requests=model_requests,
+            saved_catalogue=saved_catalogue,
         )
 
-    async def _build_session_config(self, options: SessionOptions) -> _SessionConfig:
-        cwd = Path(options.cwd or Path.cwd()).expanduser().resolve()
-        workspace_roots = [
-            Path(root).expanduser().resolve() for root in options.workspace_roots
-        ]
-        harness_files = self.harness_files.for_session(
-            cwd, workspace_roots=workspace_roots
-        )
-        if options.trust_workspace:
-            harness_files.trust_store.trust_for_session(cwd)
-        overrides = _session_config_overrides(options)
-        config_orchestrator = await build_default_orchestrator(
-            overrides, harness_files=harness_files
-        )
-        await _apply_cached_experiment_variants(config_orchestrator)
-        return _SessionConfig(
-            config_orchestrator=config_orchestrator, harness_files=harness_files
-        )
+    def _session_cwd(self, options: SessionOptions) -> Path:
+        if self._sandbox is not None:
+            from mistralai_vibe_local_harness.vibe import sandbox_path
 
-    async def build_root_blueprint(
+            workspace = self._sandbox.workspace
+            return sandbox_path(options.cwd or workspace, cwd=workspace)
+        return Path(options.cwd or Path.cwd()).expanduser().resolve()
+
+    async def _build_session_config(
         self,
         options: SessionOptions,
-        client_info: ClientInfo,
-        client_capabilities: ClientCapabilities | None = None,
-    ) -> _RootRuntimeBlueprint:
-        session_config = await self._build_session_config(options)
-        config_orchestrator = session_config.config_orchestrator
-        harness_files = session_config.harness_files
-        hook_config_result = await asyncio.to_thread(
-            load_hooks_from_fs, harness_files=harness_files
+        *,
+        org_config: OrgConfigSource = OrgConfigSource.CACHED,
+        check_process_settings: bool = True,
+    ) -> _SessionConfig:
+        """``check_process_settings=False`` leaves the process-settings check to
+        the caller: a session build runs it where it can fall back.
+        """
+        if self._agent_socket is not None:
+            self._agent_socket.check()
+        cwd = self._session_cwd(options)
+        overrides = _session_config_overrides(options)
+        if self._sandbox is None:
+            workspace_roots = [
+                Path(root).expanduser().resolve() for root in options.workspace_roots
+            ]
+            # The cwd and any worktree the agent entered are never opened as
+            # projects (see ``session_harness_files``).
+            harness_files = session_harness_files(
+                self.harness_files,
+                cwd,
+                workspace_roots,
+                (Path(root) for root in options.access_roots),
+            )
+            if options.trust_workspace:
+                harness_files.trust_store.trust_for_session(cwd)
+        else:
+            # Only user-level files load: the project's own config, skills and
+            # hooks are in the sandbox, and the host's disk at the same path is
+            # not them.
+            harness_files = self.harness_files.for_session(cwd)
+        # A session start applies the org config the process holds, and only
+        # waits for one when it holds none: an old one is refreshed in the
+        # background, and each open session applies the answer at its next
+        # turn boundary. Reads outside a session never fetch, except the
+        # picker's config reads when the cache holds nothing.
+        org_service = (
+            None if org_config is OrgConfigSource.NONE else self.services.org_config
         )
-        await asyncio.to_thread(self._configure_process, config_orchestrator.config)
-        return _RootRuntimeBlueprint(
+        fetch_outcome = None
+
+        async def build() -> BuiltSessionConfig:
+            nonlocal fetch_outcome
+            config_orchestrator = await build_default_orchestrator(
+                overrides, harness_files=harness_files
+            )
+            pre_org_config = config_orchestrator.config
+            if org_config is OrgConfigSource.ENSURED:
+                ensured_key = await org_config_key(
+                    config_orchestrator, self.credentials
+                )
+                fetch_outcome = (
+                    OIDC_TENANT_UNRESOLVED
+                    if ensured_key is None
+                    and oidc_tenant_unresolved(
+                        config_orchestrator.config, self.credentials
+                    )
+                    else await self.services.org_config.ensure(ensured_key)
+                )
+            org_key, tried, saved_failure = await apply_cached_layers(
+                config_orchestrator,
+                org_service,
+                self.credentials,
+                model_catalog=self.services.model_catalog,
+            )
+            return BuiltSessionConfig(
+                config_orchestrator,
+                pre_org_config=pre_org_config,
+                org_config_key=org_key,
+                org_config_tried=tried,
+                org_config_failure=saved_failure,
+            )
+
+        try:
+            # A start can wait on its org config, so it is never answered
+            # from a build made without that wait.
+            built = (
+                await build()
+                if org_config is OrgConfigSource.ENSURED
+                else await self._session_configs.get(
+                    SessionConfigKey.of(
+                        cwd, overrides, org_config=org_service is not None
+                    ),
+                    harness_files,
+                    org_service,
+                    build,
+                    self.credentials,
+                )
+            )
+        except ValidationError as exc:
+            raise InvalidConfigError.from_validation_error(exc) from exc
+        config_orchestrator = built.config_orchestrator
+        # What the build set the process's TLS to, before the org config, set
+        # again for a reused build: the process follows the latest config.
+        configure_ssl_context(
+            enable_system_trust_store=built.pre_org_config.enable_system_trust_store
+        )
+        org_key = built.org_config_key
+        tried = built.org_config_tried
+        saved_failure = built.org_config_failure
+        # After the org config: it can set the process-wide trust store too.
+        if check_process_settings and self._process_settings is not None:
+            self._process_settings.check(config_orchestrator.config)
+        # Every session crosses this config build, and the unified harness
+        # never constructs the legacy agent loop, so the sweep starts here.
+        start_restrict_session_log_permissions(
+            config_orchestrator.config.session_logging
+        )
+        return _SessionConfig(
             config_orchestrator=config_orchestrator,
             harness_files=harness_files,
-            options=options,
-            client_info=client_info,
-            client_capabilities=client_capabilities or ClientCapabilities(),
-            hook_config_result=hook_config_result,
-            cache_store=self.cache_store,
-            mcp_registry=(
-                None
-                if self._experimental_harness_host is not None
-                else await self._build_legacy_mcp_registry(config_orchestrator)
-            ),
-            connector_registry=(
-                None
-                if self._experimental_harness_host is not None
-                else await self._build_connector_registry(config_orchestrator)
+            org_config_key=org_key,
+            org_config=OrgConfigAttempt(
+                org_config,
+                saved=tried if saved_failure is None else None,
+                fetch_outcome=fetch_outcome,
+                saved_failure=saved_failure,
+                considered=tried,
             ),
         )
-
-    async def open_root(self, request: RootOpenRequest) -> AgentLoop:
-        if self._experimental_harness_host is not None:
-            raise RuntimeConfigurationError(
-                "The Unified Harness backend owns its sessions and never opens a "
-                "legacy runtime."
-            )
-        try:
-            if request.session_id is not None:
-                staged = await self._claim_staged_root(request.session_id)
-                if staged is not None:
-                    return staged
-            blueprint = await self.build_root_blueprint(
-                request.options, request.client_info, request.client_capabilities
-            )
-            session_id = request.session_id
-            if request.continue_latest:
-                session_id = _find_session_to_continue(
-                    blueprint.config, cwd=blueprint.cwd
-                )
-            if session_id is not None:
-                session_id = await asyncio.to_thread(
-                    _resolve_resume_session_id, blueprint.config, session_id
-                )
-                lease = await asyncio.to_thread(
-                    _acquire_session_lease, blueprint.config, session_id
-                )
-                try:
-                    return await self.runtime_factory.resume_blueprint(
-                        blueprint, session_id, lease
-                    )
-                except BaseException:
-                    if lease is not None:
-                        await asyncio.to_thread(lease.release)
-                    raise
-            session_id = generate_session_id()
-            lease = await asyncio.to_thread(
-                _acquire_session_lease, blueprint.config, session_id
-            )
-            try:
-                return blueprint.build(session_id=session_id, session_lease=lease)
-            except BaseException:
-                if lease is not None:
-                    await asyncio.to_thread(lease.release)
-                raise
-        except MissingAPIKeyError as exc:
-            raise RuntimeAuthenticationError(exc.provider_name) from exc
-        except (ValidationError, ValueError) as exc:
-            raise RuntimeConfigurationError(str(exc)) from exc
-
-    async def _build_legacy_mcp_registry(
-        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
-    ) -> MCPRegistry:
-        from vibe.app_server._legacy_session_backend import (
-            configure_legacy_mcp_registry,
-        )
-        from vibe.core.tools.mcp.registry import MCPRegistry
-
-        # Bound in the registry's name, not the orchestrator's: this is the
-        # blueprint's orchestrator and the session's loop is handed a copy of
-        # it, so nothing holds this one once the blueprint has been consumed,
-        # while the registry it arms here goes on resolving through the
-        # binding. The registry is how long that binding is needed for.
-        registry = MCPRegistry()
-        configuration = await self.mcp_catalog.resolve_catalog(
-            orchestrator, owner=registry
-        )
-        cache_root = (
-            Path(orchestrator.config.session_logging.save_dir)
-            .expanduser()
-            .resolve()
-            .parent
-            / "mcp-descriptors"
-            / "legacy"
-        )
-        configure_legacy_mcp_registry(
-            registry,
-            configuration,
-            self.mcp_authentication,
-            descriptor_cache_root=cache_root,
-        )
-        return registry
 
     async def _build_plugins(
-        self, session_config: _SessionConfig, cwd: Path
+        self,
+        session_config: _SessionConfig,
+        cwd: Path,
+        *,
+        agents: AgentManager,
+        subagent_permissions: SubagentPermissions,
+        completion_route: Callable[[Mapping[str, Any]], DeclaredCompletionRoute | None],
     ) -> tuple[SessionPlugins, UnifiedPluginProvider, PluginMCPCatalog]:
         """The Host's own resolve, and the provider the Runtime binds through.
 
@@ -1721,13 +2723,14 @@ class HarnessProcess:
         and building them twice would open two MCP client pools for one session.
         """
         from vibe.app_server._plugins import (
-            AgentToolCatalogue,
             UnifiedPluginProvider,
             installed_plugin_scopes,
             resolve_session_plugins,
         )
+        from vibe.core.plugins.remote import refresh_remote_plugins
 
         config = session_config.config_orchestrator.config
+        await refresh_remote_plugins(config, self.credentials, trigger="session_start")
         plugin_mcp = self._build_plugin_mcp_catalog(config)
         connector_registry = await self._build_connector_registry(
             session_config.config_orchestrator
@@ -1737,6 +2740,8 @@ class HarnessProcess:
             config_orchestrator=session_config.config_orchestrator,
             plugin_mcp=plugin_mcp,
             connector_registry=connector_registry,
+            builtin_plugin_roots=self._builtin_plugin_roots,
+            credentials=self.credentials,
         )
 
         def agent_tools() -> AgentToolCatalogue:
@@ -1753,28 +2758,38 @@ class HarnessProcess:
             return AgentToolCatalogue(
                 available=frozenset(tools.available_tools),
                 permission_of=lambda name: tools.get_tool_config(name).permission,
+                permission_resolver=subagent_permissions.resolver_for,
+                completion_route=completion_route,
             )
 
-        return (
-            plugins,
-            UnifiedPluginProvider(
-                storage_root=Path(config.session_logging.save_dir),
-                workdir=session_config.harness_files.cwd or cwd,
-                installed_roots={
-                    plugin.name: plugin.root
-                    for plugin in plugins.materialized.resolution.plugins
-                },
-                installed_scopes=installed_plugin_scopes(plugins),
-                config_orchestrator=session_config.config_orchestrator,
-                plugin_mcp=plugin_mcp,
-                connector_registry=connector_registry,
-                # Kept so ``plugin/reload`` repeats this resolve. A rescan that
-                # walked elsewhere would report the session's plugins uninstalled.
-                harness_files=session_config.harness_files,
-                agent_tools=agent_tools,
-            ),
-            plugin_mcp,
+        provider = UnifiedPluginProvider(
+            storage_root=Path(config.session_logging.save_dir),
+            workdir=session_config.harness_files.cwd or cwd,
+            installed_roots={
+                plugin.name: plugin.root
+                for plugin in plugins.materialized.resolution.plugins
+            },
+            installed_scopes=installed_plugin_scopes(plugins),
+            config_orchestrator=session_config.config_orchestrator,
+            plugin_mcp=plugin_mcp,
+            connector_registry=connector_registry,
+            # Kept so ``plugin/reload`` repeats this resolve. A rescan that
+            # walked elsewhere would report the session's plugins uninstalled.
+            harness_files=session_config.harness_files,
+            agent_tools=agent_tools,
+            builtin_plugin_roots=self._builtin_plugin_roots,
+            # Read per bind for the same reason as the catalogue above: an
+            # agent file edited mid-session reaches the next bind.
+            agent_types=lambda: workspace_agent_types(agents),
+            agent_rejections=lambda: workspace_agent_rejections(agents),
+            sandbox_skills=self._sandbox_skills,
+            client_tool_groups=self._client_tool_groups,
+            credentials=self.credentials,
         )
+        # The process-wide runner checks the caller's session against these.
+        provider.observe_bind_commits(self._remember_bound_plugins)
+        provider.observe_releases(self._forget_bound_plugins)
+        return (plugins, provider, plugin_mcp)
 
     def _build_plugin_mcp_catalog(self, config: VibeConfigSchema) -> PluginMCPCatalog:
         # Its own registry and descriptor cache: plugin sources are discovered
@@ -1797,27 +2812,20 @@ class HarnessProcess:
     async def _build_connector_registry(
         self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
     ) -> ConnectorRegistry | None:
+        from vibe.core.platform_auth._mistral import mistral_credentials
         from vibe.core.tools.connectors.connector_registry import (
             ConnectorAuthAction,
             ConnectorCatalogEntry,
             ConnectorRegistry,
             ConnectorToolDefinition,
         )
-        from vibe.utils.http import get_server_url_from_api_base
 
-        provider = orchestrator.config.get_mistral_provider()
-        if provider is None:
+        if mistral_credentials(orchestrator.config, self.credentials) is None:
             return None
-        api_key_env = provider.api_key_env_var or "MISTRAL_API_KEY"
-        api_key = resolve_api_key(api_key_env)
-        if not api_key:
-            return None
-        server_url = get_server_url_from_api_base(provider.api_base)
-        try:
-            catalog = await self.connector_catalog.resolve_catalog(orchestrator)
-        except ConnectorCatalogError:
-            logger.warning("Connector catalog is unavailable during session startup")
-            catalog = None
+        # The cache only: opening a session never waits on the connector
+        # service. With nothing cached, plugin connectors resolve as unavailable,
+        # as an unreachable service does.
+        catalog = await self.connector_catalog.read_cached_catalog(orchestrator)
         entries = (
             tuple(
                 ConnectorCatalogEntry(
@@ -1845,84 +2853,24 @@ class HarnessProcess:
             if catalog is not None
             else ()
         )
-        return ConnectorRegistry(
-            api_key=api_key, server_url=server_url, catalog_entries=entries
-        )
-
-    async def _claim_staged_root(self, session_id: str) -> AgentLoop | None:
-        async with self._staged_roots_lock:
-            if self._closed:
-                raise RuntimeError("The app-server harness process is closed")
-            return self._staged_roots.pop(session_id, None)
-
-    def _configure_process(self, config: VibeConfigSchema) -> None:
-        with self._configuration_lock:
-            if self._configured:
-                return
-            setup_tracing(config)
-            warm_session_index(config.session_logging)
-            set_config_log_level(config.log_level)
-            self._configured = True
-
-
-def _load_rollout_cache() -> EvalResponse | None:
-    """Read the rollout variant from the eval cache.
-
-    The cache file (``~/.vibe/experiment_eval_cache.json``) is a JSON object
-    keyed by the hashed Mistral API key. Each value is an eval response with a
-    timestamp and 7-day TTL.
-
-    This function scans all entries and returns the first non-expired one
-    containing the rollout experiment. It does not need the API key, the
-    config, or the orchestrator: the cache is a local file written by a
-    previous session's eval, and the rollout decision applies regardless of
-    which key was used.
-    """
-    import json
-    import time
-
-    from vibe.core.experiments.cache import _EVAL_CACHE_TTL_SECONDS
-    from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
-
-    try:
-        with EXPERIMENT_EVAL_CACHE_FILE.path.open(encoding="utf-8") as f:
-            entries = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(entries, dict):
-        return None
-    now = int(time.time())
-    for entry in entries.values():
-        if not isinstance(entry, dict):
-            continue
-        stored_at = entry.get("stored_at_timestamp")
-        payload = entry.get("payload")
-        if not isinstance(stored_at, int) or not isinstance(payload, dict):
-            continue
-        if stored_at <= now - _EVAL_CACHE_TTL_SECONDS:
-            continue
-        try:
-            from vibe.core.experiments.models import EvalResponse
-
-            response = EvalResponse.model_validate(payload)
-        except Exception:
-            continue
-        if "vibe_cli_unified_harness_rollout" in response.features:
-            return response
-    return None
+        return ConnectorRegistry(entries)
 
 
 async def create_harness_server(
     transport: JsonRpcTransport,
     *,
     transport_kind: TransportKind,
-    process: HarnessProcess | None = None,
-    experimental_harness: bool = False,
-    legacy_harness: bool = False,
+    process: HarnessProcess,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    open_sessions: OpenSessions | None = None,
+    left_turns: LeftTurns | None = None,
+    open_left_turn_channel: OpenLeftTurnChannel | None = None,
+    list_on_own_channel: ListOnOwnChannel | None = None,
+    left_turn_session: str | None = None,
 ) -> HarnessServer:
-    """Build a server over ``transport``.
+    """Build a server over ``transport``. With ``open_sessions``, a session
+    still running when its channel closes is parked there for another channel.
 
     ``account_gateway``/``identity_gateway`` reach the platform API and are left
     unset in production, where ``AppServer`` builds the HTTP ones. They exist so
@@ -1931,25 +2879,34 @@ async def create_harness_server(
     """
     from vibe.app_server.server import AppServer
 
-    if process is not None and experimental_harness:
-        raise ValueError(
-            "experimental_harness cannot be combined with an existing HarnessProcess"
-        )
-    process = process or HarnessProcess(
-        experimental_harness=experimental_harness, legacy_harness=legacy_harness
+    server = AppServer(
+        transport,
+        transport_kind=transport_kind,
+        host_handler=process.host_handler,
+        session_backend_host_factory=process.create_session_backend_host,
+        mcp_catalog_service=process.mcp_catalog,
+        connector_catalog_service=process.connector_catalog,
+        plugin_catalog_service=process.plugin_catalog,
+        imports_service=process.imports,
+        storage_usage=process.services.storage_usage,
+        config_changes=process.services.config_changes,
+        vibe_bot_sessions=process.services.vibe_bot_sessions,
+        account_gateway=account_gateway,
+        identity_gateway=identity_gateway,
+        oidc_tenants=process.services.oidc_tenants,
+        platform_credential_lenders=process.services.platform_credential_lenders,
+        configure_agent_plugins=process.configure_agent_plugins,
+        open_sessions=open_sessions,
+        left_turns=left_turns,
+        open_left_turn_channel=open_left_turn_channel,
+        list_on_own_channel=list_on_own_channel,
+        left_turn_session=left_turn_session,
     )
+    # One process per channel, except the in-process host, which every
+    # connection of one entry point shares: the selection is the same for all.
+    process.credentials.bind(server.session_link.platform_credentials)
     return HarnessServer(
-        _server=AppServer(
-            transport,
-            transport_kind=transport_kind,
-            host_handler=process.host_handler,
-            session_backend_host_factory=process.create_session_backend_host,
-            mcp_catalog_service=process.mcp_catalog,
-            connector_catalog_service=process.connector_catalog,
-            plugin_catalog_service=process.plugin_catalog,
-            account_gateway=account_gateway,
-            identity_gateway=identity_gateway,
-        ),
+        _server=server,
         _transport=transport,
         _reconnectable=transport_kind == "in_process",
     )
@@ -1960,8 +2917,7 @@ def _hook_config_issues(result: HookConfigResult) -> list[ConfigIssue]:
 
     ``load_hooks_from_fs`` skips an invalid or conflicting file's hooks and records why
     on ``result.issues``. Surfacing them as session notices (rather than dropping them
-    silently) matches the legacy loop, which projects ``hook_config_issues``, and the
-    design's failure table ("CLI logs a diagnostic; that file's hooks are skipped").
+    silently) matches the legacy loop, which projects ``hook_config_issues``.
     """
     return [
         ConfigIssue(file=str(issue.file), message=issue.message)
@@ -1989,36 +2945,233 @@ def _user_hook_names(harness_files: HarnessFilesManager) -> set[str]:
 
 
 def _foreign_hook_definitions(
-    result: HookConfigResult, *, harness_files: HarnessFilesManager, cwd: Path
+    result: HookConfigResult,
+    *,
+    harness_files: HarnessFilesManager,
+    cwd: Path,
+    plugin_hooks: Sequence[RuntimeHookDefinition] = (),
+    session_plugins: Callable[[str], SessionPlugins | None] | None = None,
 ) -> list[Any]:
-    """Map discovered project/user hook declarations to harness hook definitions.
+    """Map the session's hook declarations to harness hook definitions, in run order.
 
-    Consumes ``result.hooks`` (the parsed ``[[hooks]]`` from ``hooks.toml``), the
-    same field the legacy loop uses -- not ``result.runtime_hooks``, which only the
-    plugin loader populates.
+    ``result.hooks`` are the parsed ``[[hooks]]`` of the project and user
+    ``hooks.toml``; ``plugin_hooks`` are those native plugins ship. They run project
+    file, project plugins, user file, then global plugins (``HookSource`` order).
 
     ``source`` scopes the binding id (``f"{source}:{name}"``). A user hook is labelled
     ``"user"`` and a project hook the session cwd, so a persisted project binding cannot be
     matched by a same-named user hook on a resume where project trust has since been lost.
+    A plugin hook is named ``<plugin>:<hook>`` and labelled ``plugin:user`` when the plugin
+    is global, ``plugin:<cwd>`` when it ships with the project, for the same reason.
+
+    A plugin hook runs against the plugin files the session pinned, like the plugin's
+    MCP servers: ``session_plugins`` names them per run, from the session id. It is
+    the set the session started with, so a hook's files stay those of the command it
+    was compiled from after a ``/reload-plugins``. The installed plugin is only the
+    fallback for a session with no plugins bound.
     """
-    from mistralai_vibe_local_harness.vibe import ForeignHookDefinition
+    from mistralai_vibe_local_harness.vibe import ForeignHookDefinition, HookProcess
+    from vibe.app_server._plugins import pinned_plugin_hook
 
     user_names = _user_hook_names(harness_files)
     cwd_source = str(cwd)
 
-    return [
-        ForeignHookDefinition(
+    def from_file(hook: HookConfig) -> Any:
+        source = "user" if hook.name in user_names else cwd_source
+        return ForeignHookDefinition(
             name=hook.name,
             point=hook.type.value,
             command=hook.command,
-            source="user" if hook.name in user_names else cwd_source,
+            source=source,
             match=hook.match,
-            order=index,
             timeout_s=hook.timeout if hook.timeout is not None else 60.0,
             strict=hook.strict,
         )
-        for index, hook in enumerate(result.hooks)
+
+    def from_plugin(hook: RuntimeHookDefinition) -> Any:
+        scope = cwd_source if hook.source is HookSource.PROJECT_PLUGIN else "user"
+
+        def process(context: HookContext) -> Any:
+            # A subagent that runs without integrations binds no plugins of its own;
+            # its hooks then follow the parent's.
+            bound = None
+            if session_plugins is not None:
+                bound = session_plugins(context.session_id)
+                if bound is None and context.parent_session_id:
+                    bound = session_plugins(context.parent_session_id)
+            pinned = pinned_plugin_hook(bound, hook)
+            return HookProcess(cwd=pinned.cwd, env=dict(pinned.environment))
+
+        return ForeignHookDefinition(
+            name=hook.config.name,
+            point=hook.config.type.value,
+            command=hook.config.command,
+            source=f"plugin:{scope}",
+            match=hook.config.match,
+            timeout_s=hook.config.timeout if hook.config.timeout is not None else 60.0,
+            strict=hook.config.strict,
+            process=process,
+        )
+
+    # The Host runs its own hooks (see ``_host_hooks``).
+    file_hooks = [
+        from_file(hook) for hook in result.hooks if hook.type not in HOST_HOOK_TYPES
     ]
+    turn_plugin_hooks = [
+        h for h in plugin_hooks if h.config.type not in HOST_HOOK_TYPES
+    ]
+    ordered = [
+        *(hook for hook in file_hooks if hook.source == cwd_source),
+        *(
+            from_plugin(h)
+            for h in turn_plugin_hooks
+            if h.source is HookSource.PROJECT_PLUGIN
+        ),
+        *(hook for hook in file_hooks if hook.source == "user"),
+        *(
+            from_plugin(h)
+            for h in turn_plugin_hooks
+            if h.source is HookSource.GLOBAL_PLUGIN
+        ),
+    ]
+    return [replace(hook, order=index) for index, hook in enumerate(ordered)]
+
+
+def _with_session_start_context(hooks: Any, session_hooks: SessionHooks) -> Any:
+    """Bind the builtin hook that hands session_start context to the next message.
+
+    Only when the session has session_start hooks. Bound after the user's own
+    pre_agent hooks, so the context lands after whatever they did to the message.
+    """
+    if not session_hooks.session_start:
+        return hooks
+    order = max((binding.order for binding in hooks.bindings), default=-1) + 1
+    return replace(
+        hooks, bindings=(*hooks.bindings, session_start_context_binding(order))
+    )
+
+
+def _session_hooks(
+    result: HookConfigResult,
+    *,
+    harness_files: HarnessFilesManager,
+    plugin_hooks: Sequence[RuntimeHookDefinition] = (),
+) -> SessionHooks:
+    """The hooks the Host fires itself, by type, in the same order as turn hooks."""
+    user_names = _user_hook_names(harness_files)
+
+    def from_config(hook: HookConfig) -> HostHook:
+        return HostHook(
+            name=hook.name,
+            command=hook.command,
+            match=hook.match,
+            timeout_s=hook.timeout if hook.timeout is not None else 60.0,
+        )
+
+    def from_plugin(hook: RuntimeHookDefinition) -> HostHook:
+        return replace(
+            from_config(hook.config),
+            cwd=hook.cwd,
+            env=dict(hook.environment),
+            plugin_hook=hook,
+        )
+
+    def of_type(hook_type: HookType) -> tuple[HostHook, ...]:
+        declared = [h for h in result.hooks if h.type is hook_type]
+        shipped = [h for h in plugin_hooks if h.config.type is hook_type]
+        return (
+            *(from_config(h) for h in declared if h.name not in user_names),
+            *(from_plugin(h) for h in shipped if h.source is HookSource.PROJECT_PLUGIN),
+            *(from_config(h) for h in declared if h.name in user_names),
+            *(from_plugin(h) for h in shipped if h.source is HookSource.GLOBAL_PLUGIN),
+        )
+
+    return SessionHooks(
+        notification=of_type(HookType.NOTIFICATION),
+        session_start=of_type(HookType.SESSION_START),
+        session_end=of_type(HookType.SESSION_END),
+    )
+
+
+def _hook_type_counts(
+    result: HookConfigResult, plugin_hooks: Sequence[RuntimeHookDefinition] = ()
+) -> dict[HookType, int]:
+    """How many hooks of each type the session runs, ``hooks.toml`` and plugins."""
+    counts = dict.fromkeys(HookType, 0)
+    for hook in [*result.hooks, *(h.config for h in plugin_hooks)]:
+        counts[hook.type] += 1
+    return counts
+
+
+def _runnable_plugin_hooks(
+    plugins: SessionPlugins,
+) -> tuple[list[RuntimeHookDefinition], list[ConfigIssue]]:
+    """The plugin hooks Vibe can run, and a notice for each one it cannot.
+
+    Only hooks written for Vibe run: a hook a Claude Code or Kimi plugin declared speaks
+    that tool's protocol (exit code 2 to block, camelCase fields), and running it as a
+    Vibe hook would let a blocking guard silently allow everything.
+    """
+    runnable: list[RuntimeHookDefinition] = []
+    skipped: dict[tuple[str, HookProtocol], list[RuntimeHookDefinition]] = {}
+    for hook in plugins.materialized.resolution.runtime_hooks:
+        if hook.protocol is HookProtocol.VIBE:
+            runnable.append(hook)
+            continue
+        skipped.setdefault((hook.plugin_name or "", hook.protocol), []).append(hook)
+    issues = [
+        ConfigIssue(
+            file=next(
+                (str(hook.config_file) for hook in hooks if hook.config_file), plugin
+            ),
+            message=(
+                f"Plugin {plugin!r} declares {len(hooks)} hook(s) written for "
+                f"{protocol.value}; they do not run in Vibe yet"
+            ),
+        )
+        for (plugin, protocol), hooks in skipped.items()
+    ]
+    return runnable, issues
+
+
+def _post_agent_hook_counts(
+    result: HookConfigResult, plugin_hooks: Sequence[RuntimeHookDefinition] = ()
+) -> tuple[int, int]:
+    """Count the scoped post_agent hooks (a ``match`` other than ``*``), and those
+    selecting ``main``, across ``hooks.toml`` files and runnable plugin hooks.
+
+    ``main`` is tested the way the Runtime tests a main session with no agent name, so a
+    broad pattern such as ``re:.*`` counts in both.
+    """
+    from mistralai_vibe_local_harness.vibe._hook_matcher import (
+        is_unscoped,
+        selects_agent,
+    )
+
+    configs = [*result.hooks, *(hook.config for hook in plugin_hooks)]
+    scoped = [
+        hook.match
+        for hook in configs
+        if hook.type is HookType.POST_AGENT and not is_unscoped(hook.match)
+    ]
+    targeting_main = [
+        match for match in scoped if selects_agent(match, None, main=True)
+    ]
+    return len(scoped), len(targeting_main)
+
+
+def _effective_bypass_tool_permissions(
+    config: VibeConfigSchema, requested: bool
+) -> bool:
+    """Resolve the tool-approval bypass from the session flag and the config.
+
+    ``requested`` is the session-wide ``--auto-approve``/``--yolo`` option and
+    ``config.bypass_tool_permissions`` covers the config path (including the
+    auto-approve agent's profile override). A policy setting that disables the
+    auto-approve mode (``enable_auto_approve = false``) clamps both: the flag is
+    a request, not a right.
+    """
+    return (requested or config.bypass_tool_permissions) and config.enable_auto_approve
 
 
 def build_runtime_snapshot(
@@ -2028,11 +3181,11 @@ def build_runtime_snapshot(
     *,
     issues: Sequence[ConfigIssue] = (),
 ) -> RuntimeSnapshot:
-    config = config_orchestrator.config
     agents = AgentManager(
         config_orchestrator,
-        options.agent or config.resolve_default_agent(),
+        options.agent,
         harness_files=harness_files,
+        initial_policy=options.approval_policy,
     )
     return build_unified_runtime_snapshot(
         config_orchestrator, agents, issues=issues, auto_approve=options.auto_approve
@@ -2046,9 +3199,9 @@ def build_unified_runtime_snapshot(
     issues: Sequence[ConfigIssue] = (),
     skills: Iterable[SkillInfo] = (),
     tools: Iterable[str] = (),
-    custom_tool_names: frozenset[str] = frozenset(),
     hooks_count: int = 0,
     auto_approve: bool = False,
+    compaction_threshold: int | None = None,
 ) -> RuntimeSnapshot:
     """Project the layered config into the runtime state the client observes.
 
@@ -2056,37 +3209,63 @@ def build_unified_runtime_snapshot(
     executable tool modes. ``skills`` and ``issues`` are supplied by the caller
     because they come from discovery and plugin resolution, not from the layered
     config. ``hooks_count`` is supplied by the caller because hook discovery
-    happens outside the layered config. Integration projections are filled by
-    their owning adapters.
+    happens outside the layered config. ``compaction_threshold`` is the active
+    route's compiled one, which the client shows context use against; a caller
+    that has not compiled the route yet leaves it unset to compile it here.
+    Integration projections are filled by their owning adapters.
     """
     config = config_orchestrator.config
     active_model = config.get_active_model()
-    active, available = project_unified_agent_summaries(
-        agents.active_profile, agents.available_agents.values()
-    )
+    selection = project_selection(agents)
+    runtime_issues = [
+        *issues,
+        *(
+            ConfigIssue(file="approval policy", message=warning)
+            for warning in agents.restore_warnings
+        ),
+    ]
+    if auto_approve and not config.enable_auto_approve:
+        runtime_issues.append(
+            ConfigIssue(
+                file="--auto-approve",
+                message=(
+                    "Auto-approve was requested (--auto-approve/--yolo) but the mode "
+                    "is disabled (enable_auto_approve = false); approval prompts stay "
+                    "on."
+                ),
+            )
+        )
+    if compaction_threshold is None:
+        from vibe.app_server._completion_facts import compile_agent_compaction_threshold
+
+        compaction_threshold = compile_agent_compaction_threshold(
+            config.get_provider_for_model(active_model), active_model
+        )
     return RuntimeSnapshot(
         config=project_config_view(
-            config, active_model_pinned=active_model_is_pinned(config_orchestrator)
+            config,
+            active_model_pinned=active_model_is_pinned(config_orchestrator),
+            image_fallback=True,
         ),
-        active_agent=active,
-        agents=available,
+        active_agent=selection.active,
+        agents=selection.agents,
+        active_approval_policy=selection.active_approval_policy,
+        approval_policies=selection.approval_policies,
         skills=project_skill_summaries(skills),
-        tools=[
-            ToolSummary(name=name, is_custom=name in custom_tool_names)
-            for name in tools
-        ],
+        tools=[ToolSummary(name=name) for name in tools],
         stats=AgentStatsSnapshot(
             input_price_per_million=active_model.input_price,
             output_price_per_million=active_model.output_price,
             cached_input_price_per_million=active_model.cached_input_price,
         ),
-        context_window=active_model.auto_compact_threshold,
-        issues=list(issues),
+        context_window=compaction_threshold,
+        issues=runtime_issues,
         hooks_count=hooks_count,
         connectors=ConnectorCounts(),
         mcp=MCPState(),
-        bypass_tool_permissions=auto_approve or config.bypass_tool_permissions,
-        experimental_harness=True,
+        bypass_tool_permissions=_effective_bypass_tool_permissions(
+            config, auto_approve
+        ),
     )
 
 
@@ -2115,6 +3294,7 @@ class ToolGate(StrEnum):
 def _rust_tool_modes(
     available_tools: set[str],
     permission_of: Callable[[str], ToolPermission],
+    allowlist_of: Callable[[str], Sequence[str]],
     *,
     gate: ToolGate,
 ) -> dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny", "classify"]]:
@@ -2129,10 +3309,12 @@ def _rust_tool_modes(
     Following main's per-call model, a builtin that would ``allow`` is lowered to
     ``ask`` so the Host's permission resolver applies its rules (the ``.env``
     prompt, path/command denylists, allowlist grants) per call; ``BYPASS`` keeps
-    ``allow`` and retires the resolver. Under ``CLASSIFIER`` (smart approve) every
-    builtin that would ``ask`` becomes ``classify``: the classify gate runs the
-    resolver first and only classifies its ``ask`` residue. ``classify`` rides the
-    mutable adapter config, so switching modes flips it live.
+    ``allow`` and retires the resolver. ``never`` is raised to ``ask`` for the same
+    reason when an allowlist is the exception to it (see ``_allowlist_exempts``).
+    Under ``CLASSIFIER``
+    (smart approve) every builtin that would ``ask`` becomes ``classify``: the
+    classify gate runs the resolver first and only classifies its ``ask`` residue.
+    ``classify`` rides the mutable adapter config, so switching modes flips it live.
     """
     from vibe.app_server._unified_permissions import RUST_BUILTIN_TOOL_SOURCES
 
@@ -2151,7 +3333,11 @@ def _rust_tool_modes(
                 for permission in _PERMISSION_STRICTNESS
                 if permission in permissions
             )
-            configured[builtin] = _RUST_MODE_BY_PERMISSION[strictest]
+            configured[builtin] = (
+                "ask"
+                if _allowlist_exempts(builtin, present, permission_of, allowlist_of)
+                else _RUST_MODE_BY_PERMISSION[strictest]
+            )
 
     # A builtin that would `allow` becomes `ask` so the per-call resolver applies
     # its rules; `deny`/`ask` stand.
@@ -2161,24 +3347,12 @@ def _rust_tool_modes(
         builtin: "ask" if mode == "allow" and not bypass_approval else mode
         for builtin, mode in configured.items()
     }
-    # No Vibe tool stands behind `process.start`, so the resolver has no rule to
-    # scope it; it follows the shell's configured mode rather than the downgraded
-    # one.
-    modes["process.start"] = configured["file_system.bash"]
-    for builtin in ("process.output", "process.write", "process.list", "process.stop"):
-        modes[builtin] = "allow"
     # Smart approve layers the classifier on the resolver: every builtin that would
     # `ask` becomes `classify`. The classify gate runs the resolver first, so
     # main's per-call rules still apply beneath it. `allow`/`deny` stand.
     if gate is ToolGate.CLASSIFIER:
-        # `process.start` is executed outside the classify gate, so a `classify`
-        # mode there is not honored and falls through to a plain prompt (no
-        # deny-and-continue). Keep it on its resolver mode until process starts are
-        # classified through the gate (follow-up).
         modes = {
-            builtin: (
-                "classify" if mode == "ask" and builtin != "process.start" else mode
-            )
+            builtin: "classify" if mode == "ask" else mode
             for builtin, mode in modes.items()
         }
     return modes
@@ -2187,12 +3361,14 @@ def _rust_tool_modes(
 def _rust_provided_tool_mode(
     gate: ToolGate,
 ) -> Literal["allow", "ask", "deny", "classify"]:
-    """Mode gating provided/MCP tools, which have no per-name entry in tool_modes.
-
-    Smart approve classifies them per call; every other gate leaves them at their
-    pre-smart-approve behaviour of running unconditionally (``allow``).
-    """
-    return "classify" if gate is ToolGate.CLASSIFIER else "allow"
+    """Mode gating provided/MCP tools, which have no per-name entry in tool_modes."""
+    match gate:
+        case ToolGate.PROMPT:
+            return "ask"
+        case ToolGate.CLASSIFIER:
+            return "classify"
+        case ToolGate.BYPASS:
+            return "allow"
 
 
 def rust_agent_tool_ceiling(
@@ -2202,35 +3378,88 @@ def rust_agent_tool_ceiling(
 ) -> dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]]:
     # A ceiling, never a grant: the Runtime keeps the stricter of this and the mode
     # the parent holds, so the worst a wrong answer here does is deny a child
-    # something it was allowed. ``allowlist``/``denylist`` are deliberately not read
-    # — they are per-call path and command policy only Vibe's live resolver can
-    # answer, and the child runs under that resolver rather than a snapshot of it.
+    # something it was allowed. ``allowlist``/``denylist`` are not carried as
+    # patterns: they are per-call path and command policy, which the child's own
+    # resolver answers under the profile's rules (``SubagentPermissions``).
+    # ``_rust_tool_modes``' ``never``-plus-allowlist lift has no counterpart here.
+    # Under an auto-approve parent the child's ``ask`` runs unasked, so the lift
+    # would turn the refusal the profile asked for into an unattended write
+    # anywhere.
+    narrowed = _profile_tools(available_tools, overrides)
+    per_tool = overrides.get("tools")
+    per_tool = per_tool if isinstance(per_tool, Mapping) else {}
+
+    def permission(name: str) -> ToolPermission:
+        return _declared_permission(per_tool.get(name), name, permission_of)
+
+    # The ceiling encodes what the profile *permits* (allow/ask/deny), not what
+    # the session's approval mode would do. The Runtime takes the stricter of
+    # this and the parent's mode, so ``allow`` here is safe: under PROMPT the
+    # parent's ``ask`` is stricter and the resolver still runs; under BYPASS the
+    # parent's ``allow`` lets the child bypass — the user's explicit choice, not
+    # something a plugin profile can grant on its own. A ceiling never classifies.
+    from vibe.app_server._unified_permissions import RUST_BUILTIN_TOOL_SOURCES
+
+    ceiling: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = {}
+    for builtin, sources in RUST_BUILTIN_TOOL_SOURCES.items():
+        present = sources & narrowed
+        if not present:
+            ceiling[builtin] = "deny"
+        else:
+            permissions = {permission(name) for name in present}
+            strictest = next(
+                perm for perm in _PERMISSION_STRICTNESS if perm in permissions
+            )
+            ceiling[builtin] = _RUST_MODE_BY_PERMISSION[strictest]
+
+    return ceiling
+
+
+def _profile_tools(available_tools: set[str], overrides: Mapping[str, Any]) -> set[str]:
+    """The tools a profile leaves its child, before permissions are read."""
     enabled = _glob_patterns(overrides.get("enabled_tools"))
     disabled = _glob_patterns(overrides.get("disabled_tools"))
-    narrowed = {
+    return {
         name
         for name in available_tools
         if (not enabled or name_matches(name, enabled))
         and not (disabled and name_matches(name, disabled))
     }
-    per_tool = overrides.get("tools")
-    per_tool = per_tool if isinstance(per_tool, Mapping) else {}
 
-    def permission(name: str) -> ToolPermission:
-        entry = per_tool.get(name)
-        declared = entry.get("permission") if isinstance(entry, Mapping) else None
-        if not isinstance(declared, str):
-            return permission_of(name)
-        try:
-            return ToolPermission(declared)
-        except ValueError:
-            return permission_of(name)
 
-    # Never bypasses: a profile is not a place to retire the resolver, and PROMPT
-    # is what turns a declared `always` into `ask`. A ceiling never classifies, so
-    # narrow the PROMPT result (only allow/ask/deny) to the profile's 3-value type.
-    modes = _rust_tool_modes(narrowed, permission, gate=ToolGate.PROMPT)
-    return {name: mode for name, mode in modes.items() if mode != "classify"}
+def _declared_permission(
+    entry: Any, name: str, permission_of: Callable[[str], ToolPermission]
+) -> ToolPermission:
+    declared = entry.get("permission") if isinstance(entry, Mapping) else None
+    if not isinstance(declared, str):
+        return permission_of(name)
+    try:
+        return ToolPermission(declared)
+    except ValueError:
+        return permission_of(name)
+
+
+def _allowlist_exempts(
+    builtin: RustRuntimeBuiltinToolName,
+    present: AbstractSet[str],
+    permission_of: Callable[[str], ToolPermission],
+    allowlist_of: Callable[[str], Sequence[str]],
+) -> bool:
+    """Whether a ``never`` still has to reach the resolver instead of denying here.
+
+    The Runtime's ``deny`` short-circuits the permission resolver, and the allowlist
+    that excuses a call lives inside it, so collapsing ``never`` to ``deny`` turns
+    "never, except these paths" into an absolute refusal. ``ask`` puts the resolver
+    back in the path, and it denies everything the allowlist does not cover.
+    """
+    from vibe.app_server._unified_permissions import ALLOWLIST_EXEMPTED_BUILTINS
+
+    if builtin not in ALLOWLIST_EXEMPTED_BUILTINS:
+        return False
+    return any(
+        permission_of(name) is ToolPermission.NEVER and allowlist_of(name)
+        for name in present
+    )
 
 
 def _glob_patterns(value: Any) -> list[str]:
@@ -2261,7 +3490,8 @@ def _project_session_mcp_server(server: SessionMCPServer) -> MCPServer:
             return MCPStdio(
                 transport="stdio",
                 name=server.name,
-                command=server.command,
+                # The session protocol already separates the executable from its args.
+                command=[server.command],
                 args=server.args,
                 env=server.env,
                 cwd=server.cwd,
@@ -2270,23 +3500,18 @@ def _project_session_mcp_server(server: SessionMCPServer) -> MCPServer:
             raise TypeError(f"Unsupported session MCP server: {type(server).__name__}")
 
 
-async def _apply_cached_experiment_variants(
-    config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
-) -> None:
-    """Apply the last cached experiment variants to config before first render."""
-    cached = load_cached_eval_response(config_orchestrator.config)
-    if cached is None:
-        return
-    variants = config_variants_from_response(cached)
-    if not variants:
-        return
-    try:
-        layer = config_orchestrator.get_layer(GrowthbookLayer.NAME)
-    except KeyError:
-        return
-    if isinstance(layer, GrowthbookLayer):
-        layer.set_variants(variants)
-        await config_orchestrator.reload()
+async def _accept_org_config(context: UnifiedSessionContext) -> None:
+    """Check the org config a context was built under.
+
+    Built is not enough: the Core must accept the config too, or the failure
+    would only surface when the session starts, past every fallback. Raises
+    when the Core rejects it.
+    """
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    orchestrator = context.config_orchestrator
+    if enforced_keys(orchestrator) and context.preflight is not None:
+        await context.preflight(orchestrator.config, UnifiedSessionSettings())
 
 
 def _session_config_overrides(options: SessionOptions) -> dict[str, object]:
@@ -2303,244 +3528,3 @@ def _session_config_overrides(options: SessionOptions) -> dict[str, object]:
             for server in options.mcp_servers
         ]
     return overrides
-
-
-def _require_session_logging(config: VibeConfigSchema) -> None:
-    if config.session_logging.enabled:
-        return
-    raise RuntimeSessionNotFoundError(
-        "Session logging is disabled. Enable it in config to use --continue or --resume"
-    )
-
-
-def _find_session_to_continue(config: VibeConfigSchema, *, cwd: Path) -> str:
-    cwd = cwd.resolve()
-    pointer_session_id = last_session_pointer.load(config.session_logging)
-    if pointer_session_id is not None:
-        session = SessionLoader.find_session_by_id(
-            pointer_session_id, config.session_logging, working_directory=cwd
-        )
-        if session is not None:
-            return pointer_session_id
-
-    session = SessionLoader.find_latest_session(
-        config.session_logging, working_directory=cwd
-    )
-    if session is not None:
-        _, metadata = SessionLoader.load_session(session)
-        session_id = metadata.get("session_id")
-        if isinstance(session_id, str) and session_id:
-            return session_id
-        raise RuntimeSessionNotFoundError(f"Saved session has no session ID: {session}")
-
-    message = (
-        f"No previous sessions found in {config.session_logging.save_dir} for cwd={cwd}"
-    )
-    if cwd.is_relative_to(WORKTREES_DIR.path.resolve()):
-        message = (
-            f"{message}. This worktree has no sessions yet; start a new one or "
-            "use --resume <ID> to continue an existing session here"
-        )
-    raise RuntimeSessionNotFoundError(message)
-
-
-def _load_session(
-    config: VibeConfigSchema, session_id: str
-) -> tuple[Path, list[LLMMessage], dict[str, object]]:
-    session_path = SessionLoader.find_session_by_id(session_id, config.session_logging)
-    if session_path is None:
-        raise RuntimeSessionNotFoundError(session_id)
-    loaded_messages, metadata = SessionLoader.load_session(session_path)
-    return session_path, loaded_messages, metadata
-
-
-def _resolve_resume_session_id(config: VibeConfigSchema, session_id: str) -> str:
-    legacy = resolve_legacy_session_reference(session_id, config.session_logging)
-    if legacy is not None:
-        return legacy.session_id
-    return _resolve_unified_session_id(config, session_id) or session_id
-
-
-def _resolve_unified_session_id(
-    config: VibeConfigSchema, session_id: str
-) -> str | None:
-    unified_root = Path(config.session_logging.save_dir) / "unified"
-    exact = unified_root / session_id
-    if (exact / "CURRENT").is_file():
-        return session_id
-    if not unified_root.exists() or len(session_id) > _SHORT_SESSION_ID_LENGTH:
-        return None
-    matches = sorted(
-        path.name
-        for path in unified_root.iterdir()
-        if path.is_dir()
-        and path.name[:_SHORT_SESSION_ID_LENGTH] == session_id
-        and (path / "CURRENT").is_file()
-    )
-    if len(matches) > 1:
-        raise RuntimeConfigurationError(
-            f"Unified session ID is ambiguous: {session_id}"
-        )
-    return matches[0] if matches else None
-
-
-def _acquire_session_lease(
-    config: VibeConfigSchema, session_id: str
-) -> SessionLease | None:
-    if not config.session_logging.enabled:
-        return None
-    return SessionLease(Path(config.session_logging.save_dir), session_id).acquire()
-
-
-def _load_unified_import(
-    config: VibeConfigSchema, session_id: str
-) -> _ImportedSession | None:
-    try:
-        legacy_source = export_legacy_committed_history(
-            session_id, config.session_logging
-        )
-    except InvalidLegacyInteropSourceError as exc:
-        raise RuntimeConfigurationError(str(exc)) from exc
-    if legacy_source is not None:
-        raise RuntimeConfigurationError(
-            f"Legacy session exists but could not be resumed: {session_id}"
-        )
-    session_id = _resolve_unified_session_id(config, session_id) or session_id
-    session_root = Path(config.session_logging.save_dir) / "unified" / session_id
-    if not (session_root / "CURRENT").is_file():
-        return None
-    try:
-        from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
-    except ImportError as exc:
-        raise RuntimeInvalidMigrationSourceError(
-            session_id,
-            "unified",
-            "The Unified Harness package is required to import this session",
-        ) from exc
-    try:
-        stored = UnifiedSessionStore(
-            Path(config.session_logging.save_dir), session_id
-        ).load()
-    except Exception as exc:
-        raise RuntimeInvalidMigrationSourceError(
-            session_id,
-            "unified",
-            f"Unified session store is invalid: {session_id}: {exc}",
-        ) from exc
-    export = stored.interop_export
-    if not stored.runtime_state.quiescent or stored.journal or export is None:
-        raise RuntimeUnfinishedMigrationError(session_id, "unified")
-    try:
-        messages, provenance = import_unified_committed_history(
-            export.model_dump(mode="json", by_alias=True)
-        )
-    except (TypeError, ValueError) as exc:
-        raise RuntimeInvalidMigrationSourceError(
-            session_id,
-            "unified",
-            f"Unified committed history is invalid: {session_id}: {exc}",
-        ) from exc
-    provenance["imported_at"] = (
-        datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    )
-    metadata = stored.runtime_state.session_metadata
-    return _ImportedSession(
-        session_id=stored.manifest.session_id,
-        cwd=metadata.cwd,
-        root_session_id=metadata.root_session_id,
-        parent_session_id=metadata.parent_session_id,
-        messages=messages,
-        provenance=dict(provenance),
-        active_model=metadata.active_model,
-    )
-
-
-async def _restore_session_active_model(
-    orchestrator: ConfigOrchestrator[VibeConfigSchema],
-    active_model: str | None,
-    *,
-    clear_existing: bool = False,
-) -> None:
-    if active_model is not None:
-        failures = await set_session_active_model_override(
-            orchestrator, active_model, reason="restore session active model"
-        )
-    elif clear_existing:
-        failures = await clear_session_active_model_override(
-            orchestrator, reason="clear previous session active model"
-        )
-    else:
-        return
-    if failures:
-        raise RuntimeConfigurationError(
-            f"Failed to restore session active model: {failures[0]}"
-        )
-
-
-def _parent_session_id(metadata: dict[str, object]) -> str | None:
-    value = metadata.get("parent_session_id")
-    return value if isinstance(value, str) else None
-
-
-def _build_stats(loop: AgentLoop, metadata: dict[str, object]) -> AgentStats | None:
-    if not isinstance(raw_stats := metadata.get("stats"), dict):
-        return None
-    stats = AgentStats.model_validate(raw_stats)
-    if stats.cached_input_price_per_million is None:
-        try:
-            stats.cached_input_price_per_million = (
-                loop.config.get_active_model().cached_input_price
-            )
-        except ValueError:
-            pass
-    return stats
-
-
-def _apply_stored_stats(loop: AgentLoop, metadata: dict[str, object]) -> None:
-    stats = _build_stats(loop, metadata)
-    if stats is not None:
-        loop.stats = stats
-
-
-def _messages_for_fork(source: AgentLoop, message_id: str | None) -> list[LLMMessage]:
-    messages = [
-        message for message in source.messages if message.role is not Role.system
-    ]
-    if message_id is None:
-        return [message.model_copy(deep=True) for message in messages]
-
-    anchor = next(
-        (
-            index
-            for index, message in enumerate(messages)
-            if message.message_id == message_id
-        ),
-        None,
-    )
-    if anchor is None:
-        raise ValueError(f"Cannot fork from unknown message_id: {message_id}")
-    if messages[anchor].role is not Role.user:
-        raise ValueError("Fork from message_id is only supported for user messages")
-
-    end = next(
-        (
-            index
-            for index, message in enumerate(messages[anchor + 1 :], start=anchor + 1)
-            if message.role is Role.user
-        ),
-        len(messages),
-    )
-    return [message.model_copy(deep=True) for message in messages[:end]]
-
-
-async def close_agent_loop(agent_loop: AgentLoop) -> None:
-    errors: list[BaseException] = []
-    for cleanup in (agent_loop.aclose, agent_loop.telemetry_client.aclose):
-        try:
-            await cleanup()
-        except BaseException as exc:
-            errors.append(exc)
-    if len(errors) == 1:
-        raise errors[0]
-    if errors:
-        raise BaseExceptionGroup("Failed to close agent runtime", errors)

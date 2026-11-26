@@ -1,0 +1,34 @@
+[
+ {
+  "method": "workspace/trust/folders/list",
+  "params": {}
+ },
+ {
+  "method": "workspace/trust/folders/inspect",
+  "params": {
+   "cwd": "<cwd>",
+   "path": "<cwd>/"
+  }
+ },
+ {
+  "method": "workspace/trust/folders/inspect",
+  "params": {
+   "cwd": "<cwd>",
+   "path": ""
+  }
+ },
+ {
+  "method": "workspace/trust/folders/inspect",
+  "params": {
+   "cwd": "<cwd>",
+   "path": "/srv/nope"
+  }
+ },
+ {
+  "method": "workspace/trust/folders/add",
+  "params": {
+   "cwd": "<cwd>",
+   "path": "/srv"
+  }
+ }
+]

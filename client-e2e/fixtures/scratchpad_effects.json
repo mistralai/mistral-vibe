@@ -1,0 +1,131 @@
+{
+  "write": {
+    "title": "vibe.unified_harness_scratchpad",
+    "detail": {
+      "toolName": "vibe.unified_harness_scratchpad",
+      "display": {
+        "summary": "Saving findings.md",
+        "content": null,
+        "suffix": "",
+        "verb": "Saving",
+        "message": "findings.md",
+        "settledVerb": "Saved",
+        "settledMessage": "findings.md",
+        "statusText": "Using the scratchpad"
+      },
+      "kind": "scratchpad",
+      "input": {
+        "action": "write",
+        "path": "findings.md",
+        "content": "# Findings\n\n- `ScratchpadEffectOutput` replaces the MCP envelope\n- Rust renders the note like a written file\n"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "path": "findings.md",
+        "content": "# Findings\n\n- `ScratchpadEffectOutput` replaces the MCP envelope\n- Rust renders the note like a written file\n",
+        "files": []
+      },
+      "outputText": "{\"verb\": \"Wrote\", \"path\": \"findings.md\", \"content\": null, \"files\": [], \"message\": \"Wrote findings.md\"}",
+      "durationMs": 0.0,
+      "display": {
+        "success": true,
+        "verb": "Wrote",
+        "message": "findings.md",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": null,
+      "approvalType": null,
+      "approvalSource": null
+    }
+  },
+  "read": {
+    "title": "vibe.unified_harness_scratchpad",
+    "detail": {
+      "toolName": "vibe.unified_harness_scratchpad",
+      "display": {
+        "summary": "Reading plan.py",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "plan.py",
+        "settledVerb": "Read",
+        "settledMessage": "plan.py",
+        "statusText": "Using the scratchpad"
+      },
+      "kind": "scratchpad",
+      "input": {
+        "action": "read",
+        "path": "plan.py"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "path": "plan.py",
+        "content": "def ship():\n    return 'it'\n",
+        "files": []
+      },
+      "outputText": "{\"verb\": \"Read\", \"path\": \"plan.py\", \"content\": \"def ship():\\n    return 'it'\\n\", \"files\": [], \"message\": \"Read plan.py\"}",
+      "durationMs": 0.0,
+      "display": {
+        "success": true,
+        "verb": "Read",
+        "message": "plan.py",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": null,
+      "approvalType": null,
+      "approvalSource": null
+    }
+  },
+  "list": {
+    "title": "vibe.unified_harness_scratchpad",
+    "detail": {
+      "toolName": "vibe.unified_harness_scratchpad",
+      "display": {
+        "summary": "Listing the scratchpad",
+        "content": null,
+        "suffix": "",
+        "verb": "Listing",
+        "message": "the scratchpad",
+        "settledVerb": "Listed",
+        "settledMessage": "the scratchpad",
+        "statusText": "Using the scratchpad"
+      },
+      "kind": "scratchpad",
+      "input": {
+        "action": "list"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "path": null,
+        "content": null,
+        "files": [
+          "findings.md",
+          "research/api-notes.md"
+        ]
+      },
+      "outputText": "{\"verb\": \"Listed\", \"path\": null, \"content\": null, \"files\": [\"findings.md\", \"research/api-notes.md\"], \"message\": \"Listed 2 files\"}",
+      "durationMs": 0.0,
+      "display": {
+        "success": true,
+        "verb": "Listed",
+        "message": "2 files",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": null,
+      "approvalType": null,
+      "approvalSource": null
+    }
+  }
+}

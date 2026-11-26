@@ -26,9 +26,9 @@ def find_remote_url(repo: Repo) -> str | None:
     """The repository this checkout points at, normalised to an https URL.
 
     Host-agnostic: GitHub, GitLab including its subgroups, Bitbucket and a
-    self-hosted server all answer the same way. Only teleport cares which host
-    it is, because only teleport has to clone it from the other side, and that
-    is a teleport policy rather than a fact about the checkout.
+    self-hosted server all answer the same way. Only Vibe Code cares which host
+    it is, because only Vibe Code has to clone it from the other side, and that
+    is a Vibe Code policy rather than a fact about the checkout.
 
     Normalised rather than reported as configured, because ssh and https spell
     the same repository differently and a caller matching this against a
@@ -58,7 +58,7 @@ def normalise_remote_url(url: str) -> str | None:
 def find_github_remote(repo: Repo) -> GitHubRemoteInfo | None:
     """The first remote pointing at GitHub specifically, or None.
 
-    Narrower than `find_remote_url` on purpose: teleport builds a cloud session
+    Narrower than `find_remote_url` on purpose: Vibe Code projects are built
     from this and the cloud can only clone GitHub, so a GitLab remote has to
     read as no remote there even though it is a perfectly good one here.
     """

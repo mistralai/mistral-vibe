@@ -25,6 +25,3 @@ VERTEX_STREAM_PREDICT_PATH = (
 
 REASONING_BASE_URL = "https://api.reasoning.test"
 REASONING_COMPLETIONS_PATH = "/chat/completions"
-
-TELEPORT_SESSIONS_PATH = "/api/v1/code/sessions"
-TELEPORT_COMPLETE_URL = "https://chat.example.com/code/project-id/web-session-id"

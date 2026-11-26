@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum, auto
 
@@ -9,6 +10,7 @@ from vibe.core.checkpoints import (
     Decision,
     FileState,
     FileStore,
+    History,
     HunkSide,
     OpaqueChange,
     OpaqueReason,
@@ -227,10 +229,21 @@ class ReviewManager:
     """
 
     def __init__(
-        self, checkpointer: Checkpointer, files: FileStore | None = None
+        self,
+        checkpointer: Checkpointer,
+        files: FileStore | None = None,
+        *,
+        carried_pre: Callable[[], dict[str, FileState]] | None = None,
     ) -> None:
         self._checkpointer = checkpointer
         self._files = files or FileStore()
+        # Held-back turn-start states, folded into mid-turn reads so command
+        # writes show before the turn seals. None for eager recorders.
+        self._carried_pre = carried_pre
+
+    def _view(self, current: dict[str, FileState]) -> History:
+        carried = self._carried_pre() if self._carried_pre is not None else None
+        return self._checkpointer.view(current, carried_pre=carried)
 
     def review_state(self) -> ReviewState:
         current = self._current_states()
@@ -238,7 +251,7 @@ class ReviewManager:
         # last look before projecting the review.
         for path in current:
             self._checkpointer.reconcile(path, current[path])
-        history = self._checkpointer.view(current)
+        history = self._view(current)
         views = {path: history.regions(path) for path in history.tracked_paths}
         files = [
             review_file
@@ -261,7 +274,7 @@ class ReviewManager:
 
     def baseline_text(self, path: str) -> str:
         cur = self._files.read(path)
-        baseline = self._checkpointer.view({path: cur}).accepted_baseline(path)
+        baseline = self._view({path: cur}).accepted_baseline(path)
         if baseline.data is None:
             return ""
         return decode_safe(baseline.data).text
@@ -272,7 +285,7 @@ class ReviewManager:
         yields an empty diff.
         """
         cur = self._files.read(path)
-        pair = self._checkpointer.view({path: cur}).scope_pending_diff(path, owner)
+        pair = self._view({path: cur}).scope_pending_diff(path, owner)
         if pair is None:
             return TurnFileDiff(ReviewFileStatus.MODIFIED, "", "")
         baseline, current = pair
@@ -302,9 +315,7 @@ class ReviewManager:
                 line=anchor.line,
                 regions=tuple((r.version_index, r.ordinal) for r in anchor.regions),
             )
-            for anchor in self._checkpointer.view({path: current}).pending_hunks(
-                path, owner
-            )
+            for anchor in self._view({path: current}).pending_hunks(path, owner)
         ]
 
     # -- Private helpers -------------------------------------------------------
@@ -388,7 +399,7 @@ class ReviewManager:
         affected: list[str] = []
         for path in self._checkpointer.view().tracked_paths:
             current = self._files.read(path)
-            view = self._checkpointer.view({path: current}).regions(path)
+            view = self._view({path: current}).regions(path)
             if any(tr.owner == owner for tr in view):
                 self._checkpointer.decide_scope(path, owner, decision)
                 affected.append(path)
@@ -405,7 +416,7 @@ class ReviewManager:
 
     def _persist(self, path: str) -> None:
         current = self._files.read(path)
-        content = self._checkpointer.view({path: current}).content(path)
+        content = self._view({path: current}).content(path)
         if content != current:
             self._write_state(path, content)
 

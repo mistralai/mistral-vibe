@@ -172,15 +172,13 @@ async def test_agent_profile_layer_replaces_full_payload() -> None:
     assert fingerprint is not None
     await layer.apply(
         ConfigPatch(
-            ReplaceOperationPatch(
-                path="", value={"disabled_tools": ["exit_plan_mode"]}
-            ),
+            ReplaceOperationPatch(path="", value={"disabled_tools": ["bash"]}),
             fingerprint=fingerprint,
             reason="agent profile changed",
         )
     )
 
-    assert (await layer.load()).model_dump() == {"disabled_tools": ["exit_plan_mode"]}
+    assert (await layer.load()).model_dump() == {"disabled_tools": ["bash"]}
 
 
 @pytest.mark.asyncio

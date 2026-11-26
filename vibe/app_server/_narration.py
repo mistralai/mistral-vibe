@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vibe.app_server.protocol import NarrationSummarizeParams
 from vibe.core.config import ModelConfig, VibeConfigSchema
-from vibe.core.llm.backend.factory import create_backend
+from vibe.core.llm.completion import CompletionTransport, complete_once
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.telemetry.types import LaunchContext
-from vibe.core.types import Backend, LLMMessage, Role
+from vibe.core.types import LLMMessage, Role
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import get_user_agent
+
+if TYPE_CHECKING:
+    from mistralai_vibe_local_harness.vibe import ProviderCredentialProvider
 
 _NARRATION_MODEL = ModelConfig(
     name="mistral-vibe-cli-fast",
@@ -29,6 +32,8 @@ class NarrationContext:
     launch_context: LaunchContext | None
     parent_session_id: str | None
     user_plan: str | None
+    # The session's credential for a provider by name; None reads the API key.
+    credentials: Callable[[str], ProviderCredentialProvider] | None = None
 
 
 class NarrationService:
@@ -48,7 +53,14 @@ class NarrationService:
         )
         if provider is None:
             return None
-        if provider.api_key_env_var and not resolve_api_key(provider.api_key_env_var):
+        credentials = (
+            context.credentials(provider.name) if context.credentials else None
+        )
+        if (
+            credentials is None
+            and provider.api_key_env_var
+            and not resolve_api_key(provider.api_key_env_var)
+        ):
             return None
 
         sections = [f"## User Request\n{params.user_message}"]
@@ -68,27 +80,18 @@ class NarrationService:
             message_id=params.message_id,
             user_plan=context.user_plan,
         ).model_dump(exclude_none=True)
-        backend = create_backend(
-            provider=provider,
-            timeout=config.api_timeout,
-            retry_max_elapsed_time=config.api_retry_max_elapsed_time,
-            connect_timeout=config.api_connect_timeout,
-            write_timeout=config.api_write_timeout,
-            pool_timeout=config.api_pool_timeout,
-        )
         try:
-            async with backend:
-                result = await backend.complete(
-                    model=_NARRATION_MODEL,
-                    messages=messages,
-                    temperature=0.0,
-                    tools=None,
-                    tool_choice=None,
-                    max_tokens=512,
-                    extra_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
-                    metadata=metadata,
-                )
+            result = await complete_once(
+                provider=provider,
+                model=_NARRATION_MODEL,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=512,
+                metadata=metadata,
+                transport=CompletionTransport.from_config(config),
+                credentials=credentials,
+            )
         except Exception as exc:
             logger.warning("Turn summary generation failed", exc_info=exc)
             return None
-        return result.message.content or ""
+        return result.text

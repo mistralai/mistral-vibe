@@ -16,9 +16,9 @@ from vibe.core.tools.builtins.windows_shell import (
 
 
 @pytest.mark.parametrize("tool_class", [ExperimentalGitBash, ExperimentalWindowsShell])
-def test_inherited_run_annotation_resolves_against_the_defining_module(tool_class):
-    # These subclasses live in another module than the `run` they inherit, so
-    # the annotation only resolves if it is looked up where it was written.
+def test_subclass_inherits_base_tool_parameters_from_its_parent(tool_class):
+    # These subclasses do not parametrize BaseTool themselves; the models come
+    # from ExperimentalBash, which lives in another module.
     assert tool_class._get_tool_args_results() == (
         ExperimentalBashArgs,
         ExperimentalBashResult,

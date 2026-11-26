@@ -1,0 +1,21 @@
+[
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/deleteLocal",
+  "params": {
+   "path": "/repo/.vibe/skills/lint/SKILL.md",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

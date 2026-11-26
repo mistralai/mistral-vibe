@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 import json
 import sys
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
 class InvalidJsonRpcMessage(RuntimeError):
@@ -17,6 +17,13 @@ class JsonRpcTransport(Protocol):
     def messages(self) -> AsyncIterator[dict[str, Any]]: ...
 
     async def close(self) -> None: ...
+
+
+@runtime_checkable
+class ClientLossAwareTransport(Protocol):
+    """A transport that can end while its client is still there."""
+
+    client_lost: bool
 
 
 class BinaryLineReader(Protocol):
@@ -59,7 +66,7 @@ class StdioJsonRpcTransport:
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         while raw := await asyncio.to_thread(self._reader.readline):
-            yield _decode_message(raw)
+            yield decode_json_rpc_message(raw)
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -88,6 +95,11 @@ class StdioJsonRpcTransport:
         allow_writer_exit: bool = False,
     ) -> None:
         self._check_writer(writer_task, allow_stopped=allow_writer_exit)
+        try:
+            self._outbox.put_nowait(item)
+            return
+        except asyncio.QueueFull:
+            pass
         put_task = asyncio.create_task(self._outbox.put(item))
         try:
             done, _ = await asyncio.wait(
@@ -119,12 +131,26 @@ class StdioJsonRpcTransport:
             raise RuntimeError("JSON-RPC writer stopped unexpectedly")
 
     async def _write_messages(self) -> None:
-        while (line := await self._outbox.get()) is not None:
-            await asyncio.to_thread(self._write_line, line)
+        while True:
+            # One write per burst keeps a thread hop per streamed event off the loop.
+            batch = [await self._outbox.get()]
+            while batch[-1] is not None and not self._outbox.empty():
+                batch.append(self._outbox.get_nowait())
+            lines = b"".join(line for line in batch if line is not None)
+            if lines and not await asyncio.to_thread(self._write, lines):
+                return
+            if batch[-1] is None:
+                return
 
-    def _write_line(self, line: bytes) -> None:
-        self._writer.write(line)
-        self._writer.flush()
+    def _write(self, lines: bytes) -> bool:
+        try:
+            self._writer.write(lines)
+            self._writer.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # The peer went away (e.g. client hit Ctrl-C). Stop the writer
+            # cleanly so shutdown can complete instead of surfacing the error.
+            return False
+        return True
 
 
 class MemoryJsonRpcTransport:
@@ -142,7 +168,7 @@ class MemoryJsonRpcTransport:
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         while (raw := await self._incoming.get()) is not None:
-            yield _decode_message(raw)
+            yield decode_json_rpc_message(raw)
 
     async def close(self) -> None:
         if self._closed:
@@ -160,7 +186,8 @@ def memory_transport_pair() -> tuple[MemoryJsonRpcTransport, MemoryJsonRpcTransp
     )
 
 
-def _decode_message(raw: str | bytes) -> dict[str, Any]:
+def decode_json_rpc_message(raw: str | bytes) -> dict[str, Any]:
+    """One framed line as a JSON-RPC message object."""
     try:
         value = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

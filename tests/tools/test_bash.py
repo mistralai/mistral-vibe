@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-import asyncio
-import json
+import shlex
+import shutil
 import subprocess
 import sys
-from typing import cast
 
 from pydantic import ValidationError
 import pytest
 
-from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
+from vibe.core.tools.base import BaseToolState, ToolPermission
+from vibe.core.tools.builtins._shell_command_policy import (
+    _COMMAND_POLICIES,
+    analyze_shell_command_policy,
+    has_option_guardrails,
+)
+from vibe.core.tools.builtins._shell_permission_analysis import (
+    analyze_shell_command,
+    redirect_writes,
+)
 import vibe.core.tools.builtins.bash as bash_module
 from vibe.core.tools.builtins.bash import (
     Bash,
@@ -22,43 +29,26 @@ from vibe.core.tools.builtins.bash import (
     default_read_only_commands,
 )
 from vibe.core.tools.builtins.experimental_bash import (
-    BashLogFile,
     BashLogFileArgs,
     BashLogFileConfig,
-    BashLogFileResult,
-    BashOutput,
     BashOutputArgs,
     BashOutputConfig,
-    BashOutputResult,
-    BashSessions,
     BashSessionsArgs,
     BashSessionsConfig,
-    BashSessionsResult,
-    BashStdin,
     BashStdinArgs,
-    BashStdinConfig,
-    BashStdinResult,
     ExperimentalBash,
     ExperimentalBashArgs,
     ExperimentalBashResult,
     ExperimentalBashToolConfig,
-    ManagedShellError,
-    OutputChunk,
-    SessionInfo,
-    TerminalSession,
-    TerminalSessionManager,
-    _ForegroundStream,
 )
-from vibe.core.tools.builtins.managed_shell.backend import (
-    UNKNOWN_EXIT_CODE,
-    ManagedShellBackend,
-    ManagedShellBackendError,
+from vibe.core.tools.models import ApprovedRule, PermissionScope
+from vibe.core.tools.permissions import (
+    PermissionContext,
+    PermissionStore,
+    RequiredPermission,
 )
-from vibe.core.tools.permissions import PermissionContext
-from vibe.core.tools.terminal_runtime import TerminalRuntime
-from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
+from vibe.permissions import PathGrantScope, path_grant_pattern
 
 
 @pytest.fixture
@@ -90,953 +80,6 @@ def test_managed_shell_returncode_alias_is_zero_while_the_exit_code_is_unknown()
 
     assert dumped["exit_code"] is None
     assert dumped["returncode"] == 0
-
-
-@pytest.mark.asyncio
-async def test_runs_echo_successfully(bash):
-    result = await collect_result(bash.run(BashArgs(command="echo hello")))
-
-    assert result.exit_code == 0
-    assert result.stdout == "hello\n"
-    assert result.stderr == ""
-
-
-@pytest.mark.asyncio
-async def test_fails_cat_command_with_missing_file(bash):
-    with pytest.raises(ToolError) as err:
-        await collect_result(bash.run(BashArgs(command="cat missing_file.txt")))
-
-    message = str(err.value)
-    assert "Command failed" in message
-    assert "Return code: 1" in message
-    assert "No such file or directory" in message
-
-
-@pytest.mark.asyncio
-async def test_uses_effective_workdir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    config = BashToolConfig()
-    bash_tool = Bash(config_getter=lambda: config, state=BaseToolState())
-
-    result = await collect_result(bash_tool.run(BashArgs(command="pwd")))
-
-    assert result.stdout.strip() == str(tmp_path)
-
-
-@pytest.mark.asyncio
-async def test_handles_timeout(bash):
-    with pytest.raises(ToolError) as err:
-        await collect_result(bash.run(BashArgs(command="sleep 2", timeout=1)))
-
-    assert "Command timed out after 1s" in str(err.value)
-
-
-@pytest.mark.asyncio
-async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
-    _hide_standard_git_installs(monkeypatch)
-    monkeypatch.setenv(
-        "COMSPEC", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-    )
-    monkeypatch.setenv("SystemRoot", "C:\\Windows")
-    monkeypatch.setattr(
-        "vibe.utils.platform.shutil.which", lambda name, path=None: None
-    )
-
-    proc = object()
-    calls = []
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        calls.append((args, kwargs))
-        return proc
-
-    async def fake_create_subprocess_shell(*args, **kwargs):
-        raise AssertionError("cmd fallback must not use COMSPEC-backed shell mode")
-
-    monkeypatch.setattr(
-        bash_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
-    )
-    monkeypatch.setattr(
-        bash_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
-    )
-
-    result = await bash_module.spawn_shell_command("echo hello")
-
-    assert result is proc
-    assert calls[0][0][:4] == (
-        "C:\\Windows\\System32\\cmd.exe",
-        "/d",
-        "/c",
-        "echo hello",
-    )
-
-
-@pytest.mark.asyncio
-async def test_truncates_output_to_max_bytes(bash):
-    config = BashToolConfig(max_output_bytes=5)
-    bash_tool = Bash(config_getter=lambda: config, state=BaseToolState())
-
-    result = await collect_result(
-        bash_tool.run(BashArgs(command="printf 'abcdefghij'"))
-    )
-
-    assert result.stdout == "abcde"
-    assert result.stderr == ""
-    assert result.exit_code == 0
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_experimental_bash_projects_merged_pty_stream_as_stdout():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-
-    result = await collect_result(
-        tool.run(ExperimentalBashArgs(command="printf err >&2"))
-    )
-
-    assert result.output == "err"
-    assert ExperimentalBash.project_result(result) == {
-        "stdout": "err",
-        "stderr": "",
-        "output": "err",
-        "truncated": False,
-    }
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_experimental_bash_serializes_command_output_only_once():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-
-    # Split so the echoed command line does not itself contain the payload.
-    result = await collect_result(
-        tool.run(ExperimentalBashArgs(command="printf 'MARKER%s' PAYLOAD"))
-    )
-
-    dumped = result.model_dump(mode="json")
-    assert dumped["output"] == "MARKERPAYLOAD"
-    assert [key for key, value in dumped.items() if value == "MARKERPAYLOAD"] == [
-        "output"
-    ]
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_experimental_bash_streams_foreground_output_before_the_result():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-
-    streamed: list[str] = []
-    result = None
-    async for item in tool.run(
-        ExperimentalBashArgs(command="printf first; sleep 0.5; printf second"),
-        InvokeContext(tool_call_id="call-1"),
-    ):
-        if isinstance(item, ToolStreamEvent):
-            assert item.tool_name == "bash"
-            assert item.tool_call_id == "call-1"
-            streamed.append(item.message)
-        else:
-            result = item
-
-    assert result is not None
-    assert len(streamed) > 1
-    assert "first" in "".join(streamed)
-    assert "second" in "".join(streamed)
-    assert "first" in result.output
-    assert "second" in result.output
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_experimental_bash_keeps_carriage_return_redraws_in_the_result():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-
-    # The PTY rewrites the trailing \n as \r\n; both survive to the result.
-    result = await collect_result(
-        tool.run(ExperimentalBashArgs(command="printf '10%%\\r100%%\\n'"))
-    )
-
-    assert result.output == "10%\r100%\r\n"
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_streamed_chunks_reassemble_into_the_result_output():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-    command = "printf 'a\\r\\nb'; sleep 0.5; printf '\\r\\n10%%\\r100%%\\n'"
-
-    streamed: list[str] = []
-    result = None
-    async for item in tool.run(
-        ExperimentalBashArgs(command=command), InvokeContext(tool_call_id="call-1")
-    ):
-        if isinstance(item, ToolStreamEvent):
-            streamed.append(item.message)
-        else:
-            result = item
-
-    assert result is not None
-    assert len(streamed) > 1
-    # A CRLF landing across two reads must not shift the len(delivered) offset.
-    assert "".join(streamed) == result.output
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_soft_timeout_streams_the_whole_output_before_handing_over():
-    terminal_runtime = TerminalRuntime()
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-
-    streamed: list[str] = []
-    result = None
-    async for item in tool.run(
-        ExperimentalBashArgs(command="printf first; sleep 30", timeout_seconds=0.5),
-        InvokeContext(tool_call_id="call-2"),
-    ):
-        if isinstance(item, ToolStreamEvent):
-            streamed.append(item.message)
-        else:
-            result = item
-
-    assert result is not None
-    assert result.background is True
-    assert "".join(streamed) == result.output
-    terminal_runtime.get().kill(result.session_id)
-
-
-def _fake_session_info(status):
-    return SessionInfo(
-        session_id="s",
-        command="printf accents",
-        cwd=".",
-        shell="/bin/bash",
-        status=status,
-        exit_code=0 if status == "completed" else None,
-        output_path="/tmp/s.log",
-        created_at="2026-01-01T00:00:00+00:00",
-        updated_at="2026-01-01T00:00:00+00:00",
-    )
-
-
-class _ChunkedManager:
-    def __init__(self, chunks, tail=""):
-        self._chunks = list(chunks)
-        self._log = "".join(chunks) + tail
-        self.reads = 0
-
-    def read_output(self, *, session_id, cursor, wait_seconds, max_bytes):
-        self.reads += 1
-        output = (
-            self._chunks.pop(0)
-            if self._chunks
-            else self._log.encode()[cursor:].decode()
-        )
-        status = "running" if self._chunks else "completed"
-        return (
-            _fake_session_info(status),
-            OutputChunk(
-                output=output,
-                next_cursor=cursor + len(output.encode()),
-                truncated=False,
-            ),
-        )
-
-
-def _foreground_stream(
-    manager, *, tool_call_id: str | None = "call-1", max_bytes: int = 1_000
-):
-    return _ForegroundStream(
-        cast(TerminalSessionManager, manager),
-        session_id="s",
-        tool_name="bash",
-        tool_call_id=tool_call_id,
-        max_bytes=max_bytes,
-    )
-
-
-@pytest.mark.asyncio
-async def test_experimental_bash_caps_streamed_output_by_encoded_bytes():
-    manager = _ChunkedManager(["é" * 8, "é" * 8, "é" * 8])
-    # Odd cap against 2-byte characters forces the second clip to cut mid-character.
-    max_bytes = 21
-    stream = _foreground_stream(manager, max_bytes=max_bytes)
-
-    events = [event async for event in stream.pump(timeout=5)]
-
-    streamed = "".join(event.message for event in events)
-    assert [event.message for event in events] == ["é" * 8, "é" * 2]
-    assert len(streamed.encode()) <= max_bytes
-    assert "\ufffd" not in streamed
-    assert manager.reads == 3
-
-
-@pytest.mark.asyncio
-async def test_experimental_bash_streams_every_byte_when_under_the_cap():
-    manager = _ChunkedManager(["héllo ", "wörld"])
-    stream = _foreground_stream(manager)
-
-    events = [event async for event in stream.pump(timeout=5)]
-
-    assert "".join(event.message for event in events) == "héllo wörld"
-    assert stream.completed is True
-
-
-@pytest.mark.asyncio
-async def test_draining_resumes_where_the_pump_stopped():
-    manager = _ChunkedManager(["first ", "second "], tail="third")
-    stream = _foreground_stream(manager)
-
-    pumped = [event async for event in stream.pump(timeout=5)]
-    drained = await stream.drain()
-
-    assert [event.message for event in pumped] == ["first ", "second "]
-    assert drained is not None
-    assert drained.message == "third"
-    # A second drain has nothing left to send: the cursor moved with the first.
-    assert await stream.drain() is None
-
-
-@pytest.mark.asyncio
-async def test_draining_notices_an_exit_the_pump_timed_out_on():
-    manager = _ChunkedManager(["done"])
-    stream = _foreground_stream(manager)
-
-    pumped = [event async for event in stream.pump(timeout=0)]
-    assert pumped == []
-    assert stream.completed is False
-
-    drained = await stream.drain()
-
-    assert drained is not None
-    assert drained.message == "done"
-    assert stream.completed is True
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_experimental_bash_keeps_failure_output_out_of_the_display():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-
-    with pytest.raises(ToolError) as err:
-        async for _ in tool.run(
-            ExperimentalBashArgs(command="echo boom; exit 3"),
-            InvokeContext(tool_call_id="call-1"),
-        ):
-            pass
-
-    assert "boom" in str(err.value)
-    assert err.value.display == "Command failed: 'echo boom; exit 3'\nReturn code: 3"
-    # What the client shows is always the head of what the model reads.
-    assert str(err.value).startswith(err.value.display)
-
-
-@pytest.mark.asyncio
-async def test_foreground_stream_emits_nothing_without_a_tool_call():
-    manager = _ChunkedManager(["héllo ", "wörld"])
-    stream = _foreground_stream(manager, tool_call_id=None)
-
-    events = [event async for event in stream.pump(timeout=5)]
-
-    assert events == []
-    assert stream.completed is True
-    assert stream._cursor == len("héllo wörld".encode())
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
-@pytest.mark.asyncio
-async def test_experimental_bash_skips_streaming_without_an_invoke_context():
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-    )
-
-    items = [item async for item in tool.run(ExperimentalBashArgs(command="echo hi"))]
-
-    assert not any(isinstance(item, ToolStreamEvent) for item in items)
-    assert len(items) == 1
-    result = items[0]
-    assert isinstance(result, ExperimentalBashResult)
-    # A PTY turns the newline into CRLF and the decoder keeps it verbatim.
-    assert result.output == "hi\r\n"
-
-
-@pytest.mark.asyncio
-async def test_cat_preserves_accents_from_latin1_encoded_file(bash, tmp_path):
-    file = tmp_path / "menu.txt"
-    file.write_bytes("café au lait\nthé glacé\n".encode("latin-1"))
-
-    result = await collect_result(bash.run(BashArgs(command=f"cat {file.name}")))
-
-    assert result.exit_code == 0
-    assert "\ufffd" not in result.stdout
-    assert result.stdout == "café au lait\nthé glacé\n"
-
-
-class _SplitReadTerminal:
-    def __init__(self, fragments: list[bytes]) -> None:
-        self._fragments = fragments
-        self.pid = 1
-        self.pty_backend = "fake"
-
-    @property
-    def returncode(self) -> int | None:
-        return 0
-
-    def poll(self) -> int:
-        return 0
-
-    def wait(self, timeout: float | None = None) -> int:
-        return 0
-
-    def wait_readable(self, timeout_seconds: float) -> bool:
-        return bool(self._fragments)
-
-    def read(self, size: int) -> bytes:
-        return self._fragments.pop(0) if self._fragments else b""
-
-    def write(self, data: bytes) -> int:
-        return len(data)
-
-    def close(self) -> None:
-        pass
-
-
-class _UnusedBackend:
-    def request_termination(self, terminal) -> None:
-        pass
-
-    def force_terminate_terminal(self, terminal, *, timeout_seconds: float) -> None:
-        pass
-
-
-class _CompletedTerminal:
-    pid = 1
-    pty_backend = "fake"
-
-    @property
-    def returncode(self) -> int:
-        return 0
-
-    def poll(self) -> int:
-        return 0
-
-    def wait(self, timeout: float | None = None) -> int:
-        return 0
-
-    def wait_readable(self, timeout_seconds: float) -> bool:
-        return False
-
-    def read(self, size: int) -> bytes:
-        return b""
-
-    def write(self, data: bytes) -> int:
-        return len(data)
-
-    def close(self) -> None:
-        pass
-
-
-class _RunningTerminal:
-    pid = 1
-    pty_backend = "fake"
-
-    @property
-    def returncode(self) -> int | None:
-        return None
-
-    def poll(self) -> int | None:
-        return None
-
-    def wait(self, timeout: float | None = None) -> int:
-        raise subprocess.TimeoutExpired("running", timeout or 0)
-
-    def wait_readable(self, timeout_seconds: float) -> bool:
-        return False
-
-    def read(self, size: int) -> bytes:
-        return b""
-
-    def write(self, data: bytes) -> int:
-        return len(data)
-
-    def close(self) -> None:
-        pass
-
-
-class _UnreapableTerminal:
-    pid = 1
-    pty_backend = "fake"
-
-    @property
-    def returncode(self) -> int | None:
-        return None
-
-    def poll(self) -> int | None:
-        return None
-
-    def wait(self, timeout: float | None = None) -> int | None:
-        return None
-
-    def wait_readable(self, timeout_seconds: float) -> bool:
-        return True
-
-    def read(self, size: int) -> bytes:
-        raise OSError("pty vanished")
-
-    def write(self, data: bytes) -> int:
-        return len(data)
-
-    def close(self) -> None:
-        pass
-
-
-class _ControllableTerminal:
-    pid = 1
-    pty_backend = "fake"
-
-    def __init__(self, name: str, *, exits_on_request: bool) -> None:
-        self.name = name
-        self.exits_on_request = exits_on_request
-        self.alive = True
-
-    @property
-    def returncode(self) -> int | None:
-        return None if self.alive else 0
-
-    def poll(self) -> int | None:
-        return None if self.alive else 0
-
-    def wait(self, timeout: float | None = None) -> int:
-        if self.alive:
-            raise subprocess.TimeoutExpired(self.name, timeout or 0)
-        return 0
-
-    def wait_readable(self, timeout_seconds: float) -> bool:
-        return False
-
-    def read(self, size: int) -> bytes:
-        return b""
-
-    def write(self, data: bytes) -> int:
-        return len(data)
-
-    def close(self) -> None:
-        pass
-
-
-class _RecordingTerminationBackend:
-    def __init__(self) -> None:
-        self.events: list[tuple[str, str]] = []
-
-    def request_termination(self, terminal: _ControllableTerminal) -> None:
-        self.events.append(("request", terminal.name))
-        if terminal.exits_on_request:
-            terminal.alive = False
-
-    def force_terminate_terminal(
-        self, terminal: _ControllableTerminal, *, timeout_seconds: float
-    ) -> None:
-        self.events.append(("force", terminal.name))
-        terminal.alive = False
-
-
-def _fake_session(tmp_path, name: str, terminal) -> TerminalSession:
-    output_path = tmp_path / f"{name}.log"
-    output_path.touch()
-    return TerminalSession(
-        session_id=name,
-        command="fake",
-        cwd=tmp_path,
-        shell="fake",
-        terminal=terminal,
-        output_path=output_path,
-        manifest_path=tmp_path / f"{name}.json",
-        created_at=0,
-    )
-
-
-def test_manager_does_not_force_process_that_exits_during_grace(tmp_path):
-    backend = _RecordingTerminationBackend()
-    terminal = _ControllableTerminal("first", exits_on_request=True)
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, backend), session_prefix="test"
-    )
-
-    manager._terminate_sessions([_fake_session(tmp_path, "first", terminal)])
-
-    assert backend.events == [("request", "first")]
-
-
-def test_manager_requests_all_terminations_before_forcing_survivors(
-    tmp_path, monkeypatch
-):
-    backend = _RecordingTerminationBackend()
-    first = _ControllableTerminal("first", exits_on_request=False)
-    second = _ControllableTerminal("second", exits_on_request=False)
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, backend), session_prefix="test"
-    )
-    monkeypatch.setattr(
-        "vibe.core.tools.builtins.experimental_bash.KILL_GRACE_SECONDS", 0
-    )
-
-    manager._terminate_sessions([
-        _fake_session(tmp_path, "first", first),
-        _fake_session(tmp_path, "second", second),
-    ])
-
-    assert backend.events == [
-        ("request", "first"),
-        ("request", "second"),
-        ("force", "first"),
-        ("force", "second"),
-    ]
-
-
-class _UnkillableBackend:
-    def request_termination(self, terminal: _ControllableTerminal) -> None:
-        pass
-
-    def force_terminate_terminal(
-        self, terminal: _ControllableTerminal, *, timeout_seconds: float
-    ) -> None:
-        raise ManagedShellBackendError("taskkill failed")
-
-
-def _install_unkillable_manager(tmp_path, monkeypatch, name: str):
-    monkeypatch.setattr(
-        "vibe.core.tools.builtins.experimental_bash.KILL_GRACE_SECONDS", 0
-    )
-    monkeypatch.setattr(
-        "vibe.core.tools.builtins.experimental_bash.FORCE_TERMINATION_TIMEOUT_SECONDS",
-        0,
-    )
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnkillableBackend()), session_prefix="test"
-    )
-    session = _fake_session(
-        tmp_path, name, _ControllableTerminal(name, exits_on_request=False)
-    )
-    manager._sessions[session.session_id] = session
-    return manager, session
-
-
-def test_kill_restores_running_status_when_termination_fails(tmp_path, monkeypatch):
-    manager, session = _install_unkillable_manager(tmp_path, monkeypatch, "stuck")
-
-    with pytest.raises(ManagedShellBackendError):
-        manager.kill(session.session_id)
-
-    assert session.status == "running"
-    assert manager.info(session.session_id).status == "running"
-
-
-def test_reset_restores_running_status_when_termination_fails(tmp_path, monkeypatch):
-    manager, session = _install_unkillable_manager(tmp_path, monkeypatch, "stuck")
-
-    with pytest.raises(ManagedShellBackendError):
-        manager.reset(clear_logs=False)
-
-    assert session.status == "running"
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-def test_posix_shell_resolution_prefers_zsh_fallback_but_honors_overrides(monkeypatch):
-    from vibe.core.tools.builtins.managed_shell import _posix
-
-    backend = _posix.PosixManagedShellBackend()
-    calls: list[str] = []
-    resolved_shells = {
-        "requested": "/mock/requested",
-        "configured": "/mock/configured",
-        "/bin/zsh": "/bin/zsh",
-        "bash": "/mock/bash",
-    }
-
-    def fake_resolve_executable(candidate: str) -> str | None:
-        calls.append(candidate)
-        return resolved_shells.get(candidate)
-
-    monkeypatch.setattr(_posix, "_resolve_executable", fake_resolve_executable)
-
-    assert backend.resolve_shell("requested", "configured") == "/mock/requested"
-    assert calls == ["requested"]
-
-    calls.clear()
-    assert backend.resolve_shell(None, "configured") == "/mock/configured"
-    assert calls == ["configured"]
-
-    calls.clear()
-    assert backend.resolve_shell(None, None) == "/bin/zsh"
-    assert calls == ["zsh", "/bin/zsh"]
-
-
-def test_reader_loop_preserves_multibyte_split_across_chunks(tmp_path):
-    snowman = "☃".encode()
-    terminal = _SplitReadTerminal([snowman[:2], snowman[2:]])
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend())
-    )
-    output_path = tmp_path / "out.log"
-    output_path.touch()
-    session = TerminalSession(
-        session_id="split",
-        command="cmd",
-        cwd=tmp_path,
-        shell="/bin/sh",
-        terminal=terminal,
-        output_path=output_path,
-        manifest_path=tmp_path / "split.json",
-        created_at=0.0,
-        pty_backend=terminal.pty_backend,
-    )
-
-    manager._reader_loop(session)
-
-    chunk = manager._read_file_chunk(output_path, cursor=0, max_bytes=64)
-    assert chunk.output == "☃"
-    assert "\ufffd" not in chunk.output
-
-
-def test_reader_loop_reports_an_exit_code_when_the_terminal_cannot_be_reaped(tmp_path):
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend())
-    )
-    output_path = tmp_path / "out.log"
-    output_path.touch()
-    session = TerminalSession(
-        session_id="unreapable",
-        command="cmd",
-        cwd=tmp_path,
-        shell="/bin/sh",
-        terminal=_UnreapableTerminal(),
-        output_path=output_path,
-        manifest_path=tmp_path / "unreapable.json",
-        created_at=0.0,
-    )
-
-    manager._reader_loop(session)
-
-    assert session.status == "completed"
-    assert session.exit_code == UNKNOWN_EXIT_CODE
-
-
-def test_read_file_chunk_does_not_split_multibyte_at_page_boundary(tmp_path):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    # "a" * 4 then a 3-byte snowman then "b": with max_bytes=5 the window ends
-    # one byte into the snowman.
-    output_path.write_bytes(b"aaaa" + "☃".encode() + b"b")
-
-    first = manager._read_file_chunk(output_path, cursor=0, max_bytes=5)
-    assert first.output == "aaaa"
-    assert "\ufffd" not in first.output
-    assert first.truncated is True
-
-    second = manager._read_file_chunk(
-        output_path, cursor=first.next_cursor, max_bytes=5
-    )
-    assert second.output == "☃b"
-    assert "\ufffd" not in second.output
-    assert second.truncated is False
-
-
-def test_running_read_output_defers_incomplete_utf8_at_current_eof(tmp_path):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    snowman = "☃".encode()
-    output_path.write_bytes(b"a" + snowman[:2])
-    session = TerminalSession(
-        session_id="running",
-        command="cmd",
-        cwd=tmp_path,
-        shell="/bin/sh",
-        terminal=_RunningTerminal(),
-        output_path=output_path,
-        manifest_path=tmp_path / "running.json",
-        created_at=0.0,
-    )
-    manager._sessions[session.session_id] = session
-
-    _info, first = manager.read_output(
-        session_id="running", cursor=0, wait_seconds=0, max_bytes=64
-    )
-
-    assert first.output == "a"
-    assert "\ufffd" not in first.output
-    assert first.next_cursor == 1
-    assert first.truncated is True
-
-    output_path.write_bytes(b"a" + snowman + b"z")
-    _info, second = manager.read_output(
-        session_id="running", cursor=first.next_cursor, wait_seconds=0, max_bytes=64
-    )
-
-    assert second.output == "☃z"
-    assert "\ufffd" not in second.output
-    assert second.next_cursor == output_path.stat().st_size
-    assert second.truncated is False
-
-
-def test_read_file_chunk_keeps_every_carriage_return(tmp_path):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    output_path.write_bytes(b"10%\r55%\r100%\r\ndone\r\n")
-
-    chunk = manager._read_file_chunk(output_path, cursor=0, max_bytes=64)
-
-    assert chunk.output == "10%\r55%\r100%\r\ndone\r\n"
-
-
-_CRLF_PAYLOAD = b"one\r\ntwo\r\n50%\rdone\r\n"
-
-
-@pytest.mark.parametrize("max_bytes", range(1, len(_CRLF_PAYLOAD) + 1))
-def test_read_file_chunk_reassembles_the_file_at_every_split_boundary(
-    tmp_path, max_bytes
-):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    output_path.write_bytes(_CRLF_PAYLOAD)
-
-    cursor = 0
-    parts: list[str] = []
-    while cursor < len(_CRLF_PAYLOAD):
-        chunk = manager._read_file_chunk(
-            output_path, cursor=cursor, max_bytes=max_bytes, more_output_expected=True
-        )
-        assert chunk.next_cursor > cursor
-        cursor = chunk.next_cursor
-        parts.append(chunk.output)
-
-    assert "".join(parts) == _CRLF_PAYLOAD.decode()
-
-
-def _running_session(tmp_path, output_path) -> TerminalSession:
-    return TerminalSession(
-        session_id="running",
-        command="cmd",
-        cwd=tmp_path,
-        shell="/bin/sh",
-        terminal=_RunningTerminal(),
-        output_path=output_path,
-        manifest_path=tmp_path / "running.json",
-        created_at=0.0,
-    )
-
-
-def test_running_read_output_hands_back_a_lone_carriage_return(tmp_path):
-    # A progress bar writes `Progress: 50%\r` and pauses; the next poll is empty.
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    output_path.write_bytes(b"Progress: 50%\r")
-    session = _running_session(tmp_path, output_path)
-    manager._sessions[session.session_id] = session
-
-    _info, first = manager.read_output(
-        session_id="running", cursor=0, wait_seconds=0, max_bytes=64
-    )
-
-    assert first.output == "Progress: 50%\r"
-    assert first.next_cursor == output_path.stat().st_size
-    assert first.truncated is False
-
-    _info, second = manager.read_output(
-        session_id="running", cursor=first.next_cursor, wait_seconds=0, max_bytes=64
-    )
-
-    assert second.output == ""
-    assert second.next_cursor == first.next_cursor
-
-
-def test_running_read_output_splits_a_crlf_without_losing_a_byte(tmp_path):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    output_path.write_bytes(b"a\r")
-    session = _running_session(tmp_path, output_path)
-    manager._sessions[session.session_id] = session
-
-    _info, first = manager.read_output(
-        session_id="running", cursor=0, wait_seconds=0, max_bytes=64
-    )
-
-    assert first.output == "a\r"
-
-    output_path.write_bytes(b"a\r\nb")
-    _info, second = manager.read_output(
-        session_id="running", cursor=first.next_cursor, wait_seconds=0, max_bytes=64
-    )
-
-    assert second.output == "\nb"
-    assert first.output + second.output == "a\r\nb"
-
-
-def test_completed_read_output_keeps_a_final_carriage_return(tmp_path):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    output_path.write_bytes(b"50%\r")
-    session = TerminalSession(
-        session_id="done",
-        command="cmd",
-        cwd=tmp_path,
-        shell="/bin/sh",
-        terminal=_CompletedTerminal(),
-        output_path=output_path,
-        manifest_path=tmp_path / "done.json",
-        created_at=0.0,
-        status="completed",
-        exit_code=0,
-    )
-    manager._sessions[session.session_id] = session
-
-    _info, chunk = manager.read_output(
-        session_id="done", cursor=0, wait_seconds=0, max_bytes=64
-    )
-
-    assert chunk.output == "50%\r"
-    assert chunk.next_cursor == output_path.stat().st_size
-    assert chunk.truncated is False
-
-
-def test_inspect_session_does_not_split_multibyte_at_tail_boundary(tmp_path):
-    manager = TerminalSessionManager()
-    output_path = tmp_path / "out.log"
-    output_path.write_bytes(b"aa" + "☃".encode() + b"z")
-    session = TerminalSession(
-        session_id="tail",
-        command="cmd",
-        cwd=tmp_path,
-        shell="/bin/sh",
-        terminal=_CompletedTerminal(),
-        output_path=output_path,
-        manifest_path=tmp_path / "tail.json",
-        created_at=0.0,
-        status="completed",
-        exit_code=0,
-    )
-    manager._sessions[session.session_id] = session
-
-    _info, chunk = manager.inspect_session("tail", max_bytes=3)
-
-    assert chunk.output == "z"
-    assert "\ufffd" not in chunk.output
-    assert chunk.next_cursor == output_path.stat().st_size
-    assert chunk.truncated is False
 
 
 def test_bash_stdin_requires_exactly_one_input_source():
@@ -1094,112 +137,6 @@ def test_bash_config_models_accept_legacy_max_inline_chars_alias():
     )
 
 
-def test_bash_output_display_describes_polling_and_running_result():
-    adapter = ToolUIDataAdapter(BashOutput)
-    call = adapter.get_call_display(
-        ToolCallEvent(
-            tool_call_id="call",
-            tool_name="bash_output",
-            tool_class=BashOutput,
-            args=BashOutputArgs(session_id="bash_1", wait_seconds=1),
-        )
-    )
-    result = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="bash_output",
-            tool_class=BashOutput,
-            result=BashOutputResult(
-                session_id="bash_1",
-                status="running",
-                output="",
-                next_cursor=0,
-                truncated=True,
-                output_path="/tmp/bash_1.log",
-            ),
-        )
-    )
-
-    assert call.summary == "Waiting for bash session bash_1"
-    assert call.verb == "Waiting for"
-    assert call.message == "bash session bash_1"
-    assert result.success is True
-    assert result.verb == "Polled"
-    assert result.message == "session bash_1 is still running"
-    assert result.suffix == "truncated"
-
-
-def test_bash_stdin_display_describes_bytes_written():
-    adapter = ToolUIDataAdapter(BashStdin)
-    call = adapter.get_call_display(
-        ToolCallEvent(
-            tool_call_id="call",
-            tool_name="bash_stdin",
-            tool_class=BashStdin,
-            args=BashStdinArgs(session_id="bash_1", text="ok\n"),
-        )
-    )
-    result = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="bash_stdin",
-            tool_class=BashStdin,
-            result=BashStdinResult(
-                session_id="bash_1", bytes_written=3, status="running"
-            ),
-        )
-    )
-
-    assert call.summary == "Sending input to bash session bash_1"
-    assert call.verb == "Sending"
-    assert call.message == "input to bash session bash_1"
-    assert result.success is True
-    assert result.verb == "Sent"
-    assert result.message == "3 bytes to running session bash_1"
-
-    completed = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="bash_stdin",
-            tool_class=BashStdin,
-            result=BashStdinResult(
-                session_id="bash_1", bytes_written=3, status="completed"
-            ),
-        )
-    )
-
-    assert completed.success is True
-    assert completed.verb == "Sent"
-    assert completed.message == "3 bytes to completed session bash_1"
-
-
-def test_bash_sessions_display_describes_actions():
-    adapter = ToolUIDataAdapter(BashSessions)
-    call = adapter.get_call_display(
-        ToolCallEvent(
-            tool_call_id="call",
-            tool_name="bash_sessions",
-            tool_class=BashSessions,
-            args=BashSessionsArgs(action="kill", session_id="bash_1"),
-        )
-    )
-    result = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="bash_sessions",
-            tool_class=BashSessions,
-            result=BashSessionsResult(action="reset", sessions=[]),
-        )
-    )
-
-    assert call.summary == "Killing one bash session bash_1"
-    assert call.verb == "Killing"
-    assert call.message == "one bash session bash_1"
-    assert result.success is True
-    assert result.verb == "Reset"
-    assert result.message == "all bash sessions; stopped 0 sessions"
-
-
 def test_bash_sessions_schema_distinguishes_kill_from_reset():
     schema = BashSessionsArgs.model_json_schema()
 
@@ -1209,436 +146,6 @@ def test_bash_sessions_schema_distinguishes_kill_from_reset():
     assert "terminates exactly that one session" in action_description
     assert "stops every session in this tool family" in action_description
     assert "`kill` affects exactly this one session" in session_id_description
-
-
-def test_bash_log_file_display_describes_actions_and_truncation():
-    adapter = ToolUIDataAdapter(BashLogFile)
-    call = adapter.get_call_display(
-        ToolCallEvent(
-            tool_call_id="call",
-            tool_name="bash_log_file",
-            tool_class=BashLogFile,
-            args=BashLogFileArgs(action="read", session_id="bash_1"),
-        )
-    )
-    result = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="bash_log_file",
-            tool_class=BashLogFile,
-            result=BashLogFileResult(
-                action="read",
-                path="/tmp/bash_1.log",
-                content="output",
-                next_cursor=10,
-                truncated=True,
-            ),
-        )
-    )
-
-    assert call.summary == "Reading bash log bash_1"
-    assert call.verb == "Reading"
-    assert call.message == "bash log bash_1"
-    assert result.success is True
-    assert result.verb == "Read"
-    assert result.message == "bash log bash_1.log"
-    assert result.suffix == "truncated"
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-@pytest.mark.asyncio
-async def test_foreground_killed_session_is_reported_as_failure():
-    terminal_runtime = TerminalRuntime()
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    started = await collect_result(
-        tool.run(ExperimentalBashArgs(command="sleep 30", background=True))
-    )
-    sessions = BashSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    await collect_result(
-        sessions.run(BashSessionsArgs(action="kill", session_id=started.session_id))
-    )
-
-    with pytest.raises(ToolError):
-        await tool._result_from_session(
-            started.session_id, background=False, max_bytes=1000, enforce_success=True
-        )
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-@pytest.mark.asyncio
-async def test_cancelling_foreground_run_kills_the_session():
-    terminal_runtime = TerminalRuntime()
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    streamed = asyncio.Event()
-
-    async def consume() -> None:
-        async for _ in tool.run(
-            ExperimentalBashArgs(command="printf ready; sleep 30"),
-            InvokeContext(tool_call_id="call-cancel"),
-        ):
-            streamed.set()
-
-    task = asyncio.create_task(consume())
-    await asyncio.wait_for(streamed.wait(), timeout=10)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    sessions = terminal_runtime.get().list_sessions()
-    assert [info.status for info in sessions] == ["killed"]
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-@pytest.mark.asyncio
-async def test_closing_the_generator_mid_stream_kills_the_session():
-    terminal_runtime = TerminalRuntime()
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    gen = tool.run(
-        ExperimentalBashArgs(command="printf ready; sleep 30"),
-        InvokeContext(tool_call_id="call-aclose"),
-    )
-
-    assert isinstance(await anext(gen), ToolStreamEvent)
-    await gen.aclose()
-
-    sessions = terminal_runtime.get().list_sessions()
-    assert [info.status for info in sessions] == ["killed"]
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-@pytest.mark.asyncio
-async def test_closing_the_generator_keeps_a_background_session_running():
-    terminal_runtime = TerminalRuntime()
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    manager = terminal_runtime.get()
-    gen = tool.run(ExperimentalBashArgs(command="sleep 30", background=True))
-
-    result = await anext(gen)
-    await gen.aclose()
-
-    assert not isinstance(result, ToolStreamEvent)
-    assert manager.info(result.session_id).status == "running"
-    manager.kill(result.session_id)
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-@pytest.mark.asyncio
-async def test_closing_the_generator_keeps_a_soft_timeout_session_running():
-    terminal_runtime = TerminalRuntime()
-    tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    manager = terminal_runtime.get()
-    gen = tool.run(ExperimentalBashArgs(command="sleep 30", timeout_seconds=0.5))
-
-    result = await anext(gen)
-    await gen.aclose()
-
-    assert not isinstance(result, ToolStreamEvent)
-    assert result.status == "running"
-    assert manager.info(result.session_id).status == "running"
-    manager.kill(result.session_id)
-
-
-@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
-def test_reset_clear_logs_kills_running_sessions(tmp_path):
-    manager = TerminalSessionManager()
-    shell = manager.resolve_shell(None, None)
-    session = manager.start(
-        command="sleep 30", cwd=tmp_path, env=None, shell=shell, background=True
-    )
-
-    killed = manager.reset(clear_logs=True)
-
-    assert any(info.session_id == session.session_id for info in killed)
-    assert manager._sessions == {}
-    assert session.terminal.poll() is not None
-
-
-def test_manager_does_not_list_orphans_from_previous_vibe_session(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-    sessions_dir = tmp_path / "bash-tool" / "sessions"
-    sessions_dir.mkdir(parents=True)
-    output_path = sessions_dir / "old.log"
-    manifest_path = sessions_dir / "old.json"
-    output_path.write_text("old output", encoding="utf-8")
-    manifest_path.write_text(
-        json.dumps({
-            "session_id": "old",
-            "command": "echo old",
-            "cwd": str(tmp_path),
-            "shell": "/bin/sh",
-            "status": "orphaned",
-            "exit_code": None,
-            "output_path": str(output_path),
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-            "reader_error": None,
-        }),
-        encoding="utf-8",
-    )
-
-    manager = TerminalSessionManager()
-
-    assert manager.list_sessions() == []
-    assert output_path.exists()
-    assert manifest_path.exists()
-
-
-def test_manager_lists_only_own_family_orphaned_manifests(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-    sessions_dir = tmp_path / "shell-tool" / "sessions"
-    sessions_dir.mkdir(parents=True)
-
-    for session_id in ("bash_old", "powershell_old"):
-        output_path = sessions_dir / f"{session_id}.log"
-        output_path.write_text(f"{session_id} output", encoding="utf-8")
-        (sessions_dir / f"{session_id}.json").write_text(
-            json.dumps({
-                "session_id": session_id,
-                "command": "echo old",
-                "cwd": str(tmp_path),
-                "shell": "/bin/sh",
-                "status": "running",
-                "exit_code": None,
-                "output_path": str(output_path),
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "reader_error": None,
-            }),
-            encoding="utf-8",
-        )
-
-    bash_manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()), session_prefix="bash"
-    )
-    windows_manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()),
-        shell_family="powershell",
-        session_prefix="powershell",
-    )
-
-    bash_sessions = bash_manager.list_sessions()
-    windows_sessions = windows_manager.list_sessions()
-
-    assert [session.session_id for session in bash_sessions] == ["bash_old"]
-    assert bash_sessions[0].status == "orphaned"
-    assert [session.session_id for session in windows_sessions] == ["powershell_old"]
-    assert windows_sessions[0].status == "orphaned"
-
-
-def test_manager_log_relative_path_stays_within_own_session_family(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-    sessions_dir = tmp_path / "shell-tool" / "sessions"
-    sessions_dir.mkdir(parents=True)
-
-    for session_id in ("bash_old", "powershell_old"):
-        (sessions_dir / f"{session_id}.log").write_text(
-            f"{session_id} output", encoding="utf-8"
-        )
-
-    bash_manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()), session_prefix="bash"
-    )
-    windows_manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()),
-        shell_family="powershell",
-        session_prefix="powershell",
-    )
-
-    assert (
-        bash_manager.resolve_log_path(
-            session_id=None, relative_path="sessions/bash_old.log"
-        )
-        == (sessions_dir / "bash_old.log").resolve()
-    )
-    with pytest.raises(ManagedShellError):
-        bash_manager.resolve_log_path(
-            session_id=None, relative_path="sessions/powershell_old.log"
-        )
-
-    assert (
-        windows_manager.resolve_log_path(
-            session_id=None, relative_path="sessions/powershell_old.log"
-        )
-        == (sessions_dir / "powershell_old.log").resolve()
-    )
-    with pytest.raises(ManagedShellError):
-        windows_manager.resolve_log_path(
-            session_id=None, relative_path="sessions/bash_old.log"
-        )
-
-
-def test_reset_clear_logs_deletes_only_own_family_files(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-    sessions_dir = tmp_path / "shell-tool" / "sessions"
-    sessions_dir.mkdir(parents=True)
-
-    for session_id in ("bash_old", "powershell_old"):
-        (sessions_dir / f"{session_id}.log").write_text(
-            f"{session_id} output", encoding="utf-8"
-        )
-        (sessions_dir / f"{session_id}.json").write_text("{}", encoding="utf-8")
-
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()), session_prefix="bash"
-    )
-
-    manager.reset(clear_logs=True)
-
-    assert not (sessions_dir / "bash_old.log").exists()
-    assert not (sessions_dir / "bash_old.json").exists()
-    assert (sessions_dir / "powershell_old.log").exists()
-    assert (sessions_dir / "powershell_old.json").exists()
-
-
-def test_resolve_timeout_uses_shared_bash_default_timeout():
-    config = ExperimentalBashToolConfig(default_timeout=300, max_timeout_seconds=600)
-    bash_tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
-
-    assert bash_tool._resolve_timeout(None) == 300
-    assert bash_tool._resolve_timeout(50) == 50
-    assert bash_tool._resolve_timeout(10_000) == 600
-
-
-def test_build_env_neutralizes_pagers_but_keeps_interactive_term(monkeypatch):
-    monkeypatch.delenv("TERM", raising=False)
-    manager = TerminalSessionManager()
-
-    env = manager._build_env(None)
-
-    assert env["GIT_PAGER"] == "cat"
-    assert env["PAGER"] == "cat"
-    assert env["LESS"] == "-FX"
-    assert env["TERM"] == "xterm-256color"
-
-
-@pytest.mark.asyncio
-async def test_background_session_can_be_polled_and_killed():
-    terminal_runtime = TerminalRuntime()
-    managed_bash = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    result = await collect_result(
-        managed_bash.run(
-            ExperimentalBashArgs(command="printf ready; sleep 30", background=True)
-        )
-    )
-    output_tool = BashOutput(
-        config_getter=lambda: BashOutputConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    sessions_tool = BashSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-
-    try:
-        assert result.session_id
-        assert result.background is True
-        assert result.status == "running"
-
-        output = await collect_result(
-            output_tool.run(
-                BashOutputArgs(session_id=result.session_id, cursor=0, wait_seconds=1)
-            )
-        )
-
-        assert output.session_id == result.session_id
-        assert "ready" in output.output
-    finally:
-        killed = await collect_result(
-            sessions_tool.run(
-                BashSessionsArgs(action="kill", session_id=result.session_id)
-            )
-        )
-        assert killed.session is not None
-        assert killed.session.status in {"killed", "completed"}
-
-
-@pytest.mark.asyncio
-async def test_stdin_can_drive_interactive_session():
-    terminal_runtime = TerminalRuntime()
-    managed_bash = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    result = await collect_result(
-        managed_bash.run(
-            ExperimentalBashArgs(
-                command='read value; printf "answer=$value\\n"', background=True
-            )
-        )
-    )
-    stdin_tool = BashStdin(
-        config_getter=lambda: BashStdinConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    output_tool = BashOutput(
-        config_getter=lambda: BashOutputConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    sessions_tool = BashSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-
-    try:
-        await collect_result(
-            stdin_tool.run(BashStdinArgs(session_id=result.session_id, text="ok\n"))
-        )
-        output = await collect_result(
-            output_tool.run(
-                BashOutputArgs(
-                    session_id=result.session_id,
-                    cursor=result.next_cursor,
-                    wait_seconds=1,
-                )
-            )
-        )
-
-        assert output.status == "completed"
-        assert "answer=ok" in output.output
-    finally:
-        await collect_result(
-            sessions_tool.run(
-                BashSessionsArgs(action="kill", session_id=result.session_id)
-            )
-        )
 
 
 @pytest.mark.parametrize("predicate", ["-exec", "-execdir", "-ok", "-okdir"])
@@ -1729,6 +236,637 @@ def _resolve_default_shell_permission(
     return tool.resolve_permission(ExperimentalBashArgs(command=command))
 
 
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "cat x#y {outside}",
+        "ls x#y {outside}",
+        "find . -name x#y -o -delete",
+        r"cat x\ #y {outside}",
+        r"cat \"x {outside} \"",
+        r"cat \'x {outside} \'",
+    ],
+)
+def test_legacy_bash_guardrail_sees_the_tokens_git_bash_runs(
+    command_template, tmp_path, monkeypatch
+):
+    # On Windows, legacy bash only judges commands when Git Bash runs them.
+    monkeypatch.setattr(bash_module, "uses_posix_shell", lambda: True)
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "secret.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(
+        "legacy", command_template.format(outside=outside.as_posix())
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .env",
+        "head .env.local",
+        "grep --file=.envrc input.txt",
+        "od -c config/.env.production",
+    ],
+)
+def test_allowlisted_readers_require_sensitive_file_approval(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    sensitive = [
+        required
+        for required in permission.required_permissions
+        if required.scope.value == "file_pattern"
+    ]
+    assert len(sensitive) == 1
+    assert sensitive[0].label == "accessing sensitive files"
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_sensitive_file_approval_overrides_always_permission(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(permission=ToolPermission.ALWAYS),
+            state=BaseToolState(),
+        )
+        permission = tool.resolve_permission(BashArgs(command="cat .env"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(
+                permission=ToolPermission.ALWAYS
+            ),
+            state=BaseToolState(),
+        )
+        permission = tool.resolve_permission(ExperimentalBashArgs(command="cat .env"))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_reader_uses_configured_sensitive_file_patterns(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        config = BashToolConfig(sensitive_file_patterns=["**/*.secret"])
+        tool = Bash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(BashArgs(command="cat credentials.secret"))
+    else:
+        config = ExperimentalBashToolConfig(sensitive_file_patterns=["**/*.secret"])
+        tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(
+            ExperimentalBashArgs(command="cat credentials.secret")
+        )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .e??",
+        "cat .e* > /dev/null",
+        "cat .e* 2>&1",
+        "cat .[!x]nv",
+        "cat .[^x]nv",
+        "cat .e[[:alpha:]]v",
+        "cat .[[=e=]]nv",
+        "shopt -s nocaseglob; cat .EN?",
+    ],
+)
+def test_shell_reader_expands_globs_before_checking_sensitive_files(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    # Bracket forms Python's glob cannot evaluate, and globs after a glob
+    # option change, are approved as the exact command instead of a file.
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        or (required.literal and required.session_pattern == command)
+        for required in permission.required_permissions
+    )
+    store = _store_after_granting(shell_kind, command)
+    assert _uncovered(store, shell_kind, "cat .env.local")
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat '.env.a[1]'",
+        'cat ".env.a[1]"',
+        r"cat .env.a\[1\]",
+        "cat .env'.a[1]'",
+        "cat '.env.a[1]' > /dev/null",
+        "cat '.env.a[1]' 2>&1",
+        "cat '.env.a[1]' \"$(printf ordinary.txt)\"",
+        "grep -f'.env.a[1]' ordinary.txt",
+        'grep --file=".env.a[1]" ordinary.txt',
+    ],
+)
+def test_quoted_sensitive_file_grants_do_not_expand_literal_globs(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    literal.touch()
+    (tmp_path / ".env.a1").touch()
+    (tmp_path / "ordinary.txt").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    sensitive = [
+        required
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [required.invocation_pattern for required in sensitive] == [str(literal)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_unrelated_glob_does_not_expand_a_quoted_sensitive_operand(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    for name in [".env.a[1]", ".env.a1", "prefix.env.a1"]:
+        (tmp_path / name).touch()
+
+    permission = _resolve_default_shell_permission(
+        shell_kind, "cat prefix*.env.a[1] '.env.a[1]'"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    sensitive = [
+        required
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [required.invocation_pattern for required in sensitive] == [str(literal)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["grep .env.a[1] '.env.a[1]'", "grep -e .env.a[1] '.env.a[1]'"]
+)
+def test_grep_pattern_glob_does_not_expand_an_equal_literal_file(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    literal.touch()
+    (tmp_path / ".env.a1").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    sensitive = [
+        required.invocation_pattern
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert sensitive == [str(literal)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["cat .env.a[1] '.env.a[1]'", "grep -f .env.a[1] '.env.a[1]'"]
+)
+def test_repeated_sensitive_file_operands_keep_each_occurrences_glob_policy(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    expanded = tmp_path / ".env.a1"
+    literal.touch()
+    expanded.touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    sensitive = {
+        required.invocation_pattern
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    }
+    assert sensitive == {str(literal), str(expanded)}
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat '.env.a[1]'*",
+        "grep -f'.env.a[1]'* ordinary.txt",
+        "grep --file='.env.a[1]'* ordinary.txt",
+        "file -m '.env.a[1]'*:.env.b[2] ordinary.txt",
+    ],
+)
+def test_mixed_literal_and_live_globs_preserve_policy_option_operations(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    for name in [".env.a[1]suffix", ".env.a1suffix", ".env.b2", "ordinary.txt"]:
+        (tmp_path / name).touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    sensitive = {
+        required.invocation_pattern
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    }
+    expected = {str(tmp_path / ".env.a[1]suffix")}
+    if command.startswith("file"):
+        expected.add(str(tmp_path / ".env.b2"))
+    assert sensitive == expected
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["grep -f.e?? ordinary.txt", "grep --file=.e?? ordinary.txt"]
+)
+def test_attached_sensitive_file_options_expand_unquoted_globs(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / ".env"
+    target.touch()
+    (tmp_path / "ordinary.txt").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        and required.invocation_pattern == str(target)
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_reader_checks_symlink_target_for_sensitive_files(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("secret=value\n")
+    (tmp_path / "ordinary.txt").symlink_to(tmp_path / ".env")
+
+    permission = _resolve_default_shell_permission(shell_kind, "cat ordinary.txt")
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat README.md",
+        "grep .env README.md",
+        "grep --reg=.env README.md",
+        "grep --regex .env README.md",
+        "grep --context .env README.md",
+        "grep --context=0 .env README.md",
+        "grep --con .env README.md",
+        "grep --la ordinary-label .env README.md",
+        "grep --exclude ignored.txt .env README.md",
+        "grep --exclude-dir=cache .env README.md",
+    ],
+)
+def test_non_sensitive_allowlisted_read_remains_allowed(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--reg=token", ".env"],
+        ["--regex=token", ".env"],
+        ["--regexp=token", ".env"],
+        ["--reg", "token", ".env"],
+        ["--regex", "token", ".env"],
+        ["--regexp", "token", ".env"],
+        ["--context", "token", ".env"],
+        ["--context=0", "token", ".env"],
+        ["--con", "token", ".env"],
+        ["--file=patterns.txt", ".env"],
+        ["--file", "patterns.txt", ".env"],
+        ["-e", "token", ".env"],
+        ["-etoken", ".env"],
+        ["-f", "patterns.txt", ".env"],
+        ["-fpatterns.txt", ".env"],
+    ],
+)
+def test_actual_grep_option_syntax_keeps_sensitive_operands_gated(
+    shell_kind, arguments, tmp_path, monkeypatch
+):
+    grep = shutil.which("grep")
+    if grep is None:
+        pytest.skip("native grep is unavailable")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("token=synthetic\n")
+    (tmp_path / "patterns.txt").write_text("token\n")
+
+    result = subprocess.run(
+        [grep, *arguments], capture_output=True, text=True, timeout=5, check=False
+    )
+    version = subprocess.run(
+        [grep, "--version"], capture_output=True, text=True, timeout=5, check=False
+    )
+    if "GNU grep" in version.stdout and arguments[0] in {"--context", "--con"}:
+        # GNU requires a number here; BSD permits an omitted context count.
+        assert result.returncode == 2, result.stderr
+        assert result.stdout == ""
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "token=synthetic\n"
+    permission = _resolve_default_shell_permission(
+        shell_kind, shlex.join(["grep", *arguments])
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep --fil=patterns.txt .env",
+        "grep --fil patterns.txt .env",
+        "grep --l token .env",
+        "grep --ex token .env",
+    ],
+)
+def test_ambiguous_grep_pattern_option_keeps_possible_file_operands_gated(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep token .env",
+        "grep -e token .env",
+        "grep --color token .env",
+        "grep --colour token .env",
+        "grep --color=always token .env",
+    ],
+)
+def test_grep_sensitive_file_operands_require_approval(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -r token .",
+        "grep -R token",
+        "grep --recursive token .",
+        "grep --recurs token .",
+        "grep --dereference-recursive token .",
+        "grep --directories=recurse token .",
+        "grep --directories=rec token .",
+        "grep --directories recurse token .",
+        "grep -d recurse token .",
+        "grep -drec token .",
+        "diff -r . other",
+        "diff --recursive . other",
+        "diff --recurs . other",
+    ],
+)
+def test_recursive_readers_require_approval(shell_kind, command, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("token=secret\n")
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "command_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("permission", [ToolPermission.ASK, ToolPermission.ALWAYS])
+@pytest.mark.parametrize("command", ["grep -rn TODO .", "diff -r . other"])
+def test_recursive_readers_follow_disabled_sensitive_file_patterns(
+    shell_kind, permission, command, tmp_path, monkeypatch
+):
+    """``sensitive_file_patterns = []`` turns the recursive-reader gate off too."""
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        config = BashToolConfig(permission=permission, sensitive_file_patterns=[])
+        tool = Bash(config_getter=lambda: config, state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        managed_config = ExperimentalBashToolConfig(
+            permission=permission, sensitive_file_patterns=[]
+        )
+        managed = ExperimentalBash(
+            config_getter=lambda: managed_config, state=BaseToolState()
+        )
+        result = managed.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "escalated"),
+    [
+        ("cat {a,b}.txt", "cat .e{n,}v"),
+        ("cat {a,b}.txt", "cat {.e,x}nv"),
+        ("sh -c 'cat a.txt'", "sh -c 'cat .env'"),
+        ("bash -c 'cat a.txt'", "bash -c 'cat .env'"),
+        ("env cat a.txt", "env cat .env"),
+        ("env FOO=1 cat a.txt", "env FOO=1 cat .env"),
+        ("env -C sub cat a.txt", "env -C sub cat .env"),
+        ("command cat a.txt", "command cat .env"),
+        ("nice cat a.txt", "nice cat .env"),
+        ("nice -n 5 cat a.txt", "nice -n 5 cat .env"),
+        ("nohup cat a.txt", "nohup cat .env"),
+        ("setsid cat a.txt", "setsid cat .env"),
+        ("stdbuf -o0 cat a.txt", "stdbuf -o0 cat .env"),
+        ("time -p cat a.txt", "time -p cat .env"),
+        ("timeout 5 cat a.txt", "timeout 5 cat .env"),
+        ("timeout -s KILL 5 cat a.txt", "timeout -s KILL 5 cat .env"),
+        ("echo a.txt | xargs cat", "echo .env | xargs cat"),
+        ("xargs cat < a.txt", "xargs cat < .env.list"),
+        ("xargs -a a.txt cat", "xargs -a .env.list cat"),
+    ],
+)
+def test_a_wrapper_grant_does_not_cover_a_sensitive_read(
+    shell_kind, granted, escalated, tmp_path, monkeypatch
+):
+    """A session grant on a wrapper, ``cat *`` or ``nice *``, is never the
+    approval for a sensitive file the wrapped reader opens.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("secret\n")
+    (tmp_path / "a.txt").write_text("ordinary\n")
+    (tmp_path / "sub").mkdir()
+    store = _store_after_granting(shell_kind, granted)
+
+    assert _uncovered(store, shell_kind, escalated)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env cat .env",
+        "env -i cat .env",
+        "nice -n 5 cat .env",
+        "nohup cat .env",
+        "stdbuf -o0 cat .env",
+        "time -p cat .env",
+        "timeout 5 cat .env",
+    ],
+)
+def test_a_recognized_wrapper_binds_the_sensitive_file_it_runs(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert [
+        rp.invocation_pattern
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ] == [str(tmp_path / ".env")]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env --chdir=sub cat .env",
+        "env -S 'cat .env'",
+        "nice --adj=5 cat .env",
+        "timeout --sig=KILL 5 cat .env",
+        "nice $LEVEL cat .env",
+        "echo .env | xargs cat",
+        "xargs -I{} cat {} < list.txt",
+    ],
+)
+def test_an_unreadable_wrapper_requires_the_exact_command(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    """Options outside a wrapper's grammar, abbreviations included, leave the
+    command it runs unknown, so no file or wrapper pattern is granted.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN
+        for rp in permission.required_permissions
+    )
+    assert [
+        rp.session_pattern
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+    ] == [command]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("command", ["eval cat .env", "exec cat .env"])
+def test_wrapped_sensitive_reader_requires_approval(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
 @pytest.mark.parametrize(
     "command",
@@ -1738,25 +876,384 @@ def _resolve_default_shell_permission(
         "sort --out=sorted.txt input.txt",
         "sort --temporary-directory=. input.txt",
         "sort --compress-program=gzip input.txt",
+        "sort --files0-from=input-files.txt",
+        "sort --files0-f=input-files.txt",
+        "file --files-from=input-files.txt",
+        "file --files-f=input-files.txt",
+        "file -f input-files.txt",
+        "file -C",
+        "file --compile",
+        "file -z archive.gz",
+        "file -Z archive.gz",
+        "du --files0-from=input-files.txt",
+        "du --files0-f=input-files.txt",
+        "wc --files0-from=input-files.txt",
+        "wc --files0-f=input-files.txt",
         "find . -delete",
         "find . -fprint matches.txt",
+        "find -files0-from input-files.txt",
         r"find . -exec echo {} \;",
+        "md5sum --check checksums.txt",
+        "sha1sum -c checksums.txt",
+        "sha256sum --check checksums.txt",
+        "shasum -c checksums.txt",
         "less -o less.log input.txt",
         "less -Noless.log input.txt",
         "less --LOG-FILE=less.log input.txt",
         "tree -o tree.txt .",
         "tree -aotree.txt .",
+        "tree -Xo ignored tree.txt .",
+        "tree -Ho ignored tree.txt .",
+        "tree -Io ignored tree.txt .",
+        "tree -Lo 2 tree.txt .",
+        "tree -Po ignored tree.txt .",
+        "tree -To ignored tree.txt .",
+        "uniq input.txt output.txt",
+        "uniq input.txt +output.txt",
+        "uniq -f 1 input.txt output.txt",
         "git diff --output=diff.txt",
         "git diff --out=diff.txt",
         "git log --output=log.txt",
         "git diff --ext-diff",
+        "git log --remerge-diff -1",
+        "git log -p --diff-merges=remerge",
+        "git log -p --diff-merges=r",
         "date -s 2020-01-01",
         "date -us 2020-01-01",
         "date --set=2020-01-01",
         "date --se=2020-01-01",
+        "date 010112002026",
+        "date -f %Y 2026",
     ],
 )
 def test_side_effecting_allowlisted_options_require_approval(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "--lesskey-src=keys",
+        "--lesskey-src keys",
+        "--lesskey-sr=keys",
+        "--lesskey-sr keys",
+        "--lesskey-context=keys",
+        "--lesskey-context keys",
+        "--lesskey-contex=keys",  # typos:disable-line
+        "--lesskey-contex keys",  # typos:disable-line
+        "--lesskey-content=keys",
+        "--lesskey-content keys",
+        "--lesskey-conten=keys",  # typos:disable-line
+        "--lesskey-conten keys",  # typos:disable-line
+        "--lesskey-con=keys",
+        "--lesskey-con keys",
+        "--lesskey-file=keys",
+        "--lesskey-file keys",
+        "--lesskey-fi=keys",
+        "--lesskey-fi keys",
+        "--Lesskey-src=keys",
+        "--LESSKEY-CONTEXT keys",
+        "--Lesskey-Fi=keys",
+        "--+LESSKEY-SRC=keys",
+        "--+lesskey-src=keys",
+        "--+lesskey-src keys",
+        "--+lesskey-content=keys",
+        "--+lesskey-content keys",
+        "--+lesskey-file=keys",
+        "--+lesskey-file keys",
+        "--+lesskey-sr=keys",
+        "--+lesskey-conten keys",  # typos:disable-line
+        "--+lesskey-fi=keys",
+        "-kkeys",
+        "-k keys",
+        "-Nkkeys",
+        "-Nk keys",
+        "-+kkeys",
+        "-+k keys",
+    ],
+)
+def test_lesskey_configuration_options_require_approval(shell_kind, pager, arguments):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "non_consuming_option",
+    [
+        "--header",
+        "--intr",
+        "--match-shift",
+        "--modelines",
+        "--search-options",
+        "--line-num-width",
+        "--status-col-width",
+        "--wheel-lines",
+        "--ma",
+        "--p",
+        "--s",
+        "--w",
+    ],
+)
+@pytest.mark.parametrize("lesskey_option", ["-kkeys", "-k keys", "--lesskey-src=keys"])
+def test_non_consuming_less_options_do_not_hide_lesskey_options(
+    shell_kind, pager, non_consuming_option, lesskey_option
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {non_consuming_option} {lesskey_option} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize("numeric_option", ["#", "b", "h", "j", "x", "y", "z"])
+@pytest.mark.parametrize(
+    "suffix",
+    ["-kkeys", "kkeys", "-olog.txt", "tlabel", "--lesskey-src=keys", "+!harmless"],
+)
+def test_short_numeric_less_options_do_not_hide_following_options(
+    shell_kind, pager, numeric_option, suffix
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} -{numeric_option}8{suffix} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "numeric_option",
+    [
+        "--buffers",
+        "--jump-target",
+        "--max-back-scroll",
+        "--max-forw-scroll",
+        "--shift",
+        "--tab",
+        "--tabs",
+        "--window",
+        "--header",
+        "--line-num-width",
+        "--match-shift",
+        "--modelines",
+        "--status-col-width",
+        "--wheel-lines",
+    ],
+)
+@pytest.mark.parametrize(
+    "suffix",
+    ["-kkeys", "kkeys", "-olog.txt", "tlabel", "--lesskey-src=keys", "+!harmless"],
+)
+def test_long_numeric_less_options_do_not_hide_following_options(
+    shell_kind, pager, numeric_option, suffix
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {numeric_option}=8{suffix} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        r"'-Pprompt$kkeys'",
+        r"'--prompt=prompt$kkeys'",
+        r"'-Dsr$kkeys'",
+        r"'--color=sr$kkeys'",
+        "'-\"ab$kkeys'",
+        r"'--quotes=ab$kkeys'",
+        r"'-Pprompt$+!harmless'",
+        r"'--prompt=prompt$--lesskey-src=keys'",
+        r"'--emouse=mask$-kkeys'",
+        r"'--end-prompt=prompt$-kkeys'",
+        r"'--autosave=history$-kkeys'",
+    ],
+)
+def test_attached_less_string_terminator_cannot_hide_lesskey_options(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "'--lesskey-src keys'",
+        "'+/needle$-kkeys'",
+        "'-Dsr -kkeys'",
+        "'--color=sr -kkeys'",
+        "'-b+1!harmless'",
+        "-8+!harmless",
+        "-8+v",
+        "-n8+!harmless",
+        "-N+!harmless",
+        "'-$+!harmless'",
+        "'-Pprompt$$+!harmless'",
+        "-N--cmd=harmless",
+    ],
+)
+def test_less_embedded_option_resumption_requires_approval(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "'safe -- -kkeys'",
+        "'safe -- --lesskey-src=keys'",
+        "'-Pprompt text$kkeys'",
+        "'--prompt=prompt text$--lesskey-src=keys'",
+    ],
+)
+def test_quoted_less_arguments_cannot_hide_lesskey_options(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "+!harmless",
+        "+#harmless",
+        "+|harmless",
+        "+sharmless",
+        "+v",
+        "+:e harmless.txt",
+        "--cmd=harmless",
+        "--cmd harmless",
+        "--cm=harmless",
+        "--cm harmless",
+        "--+cmd=harmless",
+        "--+cmd harmless",
+        "--+cm=harmless",
+        "-t harmless",
+        "--tag=harmless",
+        "--tag harmless",
+        "-Tharmless.tags",
+        "-T harmless.tags",
+        "--tag-file=harmless.tags",
+        "--tag-file harmless.tags",
+    ],
+)
+def test_less_startup_commands_and_tag_options_require_approval(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize("prefix", ["+/", "++/"])
+@pytest.mark.parametrize(
+    "control",
+    ["\x07", "\x08", "\x1b", "\x7f", "\r", "\n"],
+    ids=["bell", "backspace", "escape", "delete", "carriage-return", "newline"],
+)
+def test_less_startup_search_control_characters_require_approval(
+    shell_kind, pager, prefix, control
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} '{prefix}needle{control}v' input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "LESSOPEN=harmless",
+        "LESSCLOSE=harmless",
+        "LESSKEYIN=harmless.lesskey",
+        "LESSKEY_CONTENT=harmless",
+    ],
+)
+def test_less_environment_assignments_require_approval(shell_kind, assignment):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{assignment} less input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+def test_managed_less_environment_override_requires_approval():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    permission = tool.resolve_permission(
+        ExperimentalBashArgs(command="less input.txt", env={"LESSOPEN": "harmless"})
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert [required.label for required in permission.required_permissions] == [
+        "custom environment (LESSOPEN)"
+    ]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "less input.txt && less -kkeys input.txt",
+        "exec less -kkeys input.txt",
+        "eval 'less --lesskey-src keys input.txt'",
+    ],
+)
+def test_shell_wrappers_do_not_hide_lesskey_options(shell_kind, command):
     permission = _resolve_default_shell_permission(shell_kind, command)
 
     assert isinstance(permission, PermissionContext)
@@ -1768,15 +1265,39 @@ def test_side_effecting_allowlisted_options_require_approval(shell_kind, command
     "command",
     [
         "sort -r input.txt",
+        "md5sum input.txt",
+        "shasum -a 256 input.txt",
         "find . -name '*.py'",
         "less -N input.txt",
+        "less -Pkey input.txt",
+        "less -P -k input.txt",
+        "less --prompt -k input.txt",
+        "less -# -k input.txt",
+        "less -x8Pprompt-k input.txt",
+        "less --tabs=8Pprompt-k input.txt",
+        "less +G input.txt",
+        "less +42 input.txt",
+        "less +/needle input.txt",
+        "less -- --lesskey-src=ordinary-filename",
+        "less -- -kordinary-filename",
+        "less -- --+lesskey-content=ordinary-filename",
+        "less -- +G",
+        "more -N input.txt",
+        "more +10 input.txt",
+        "more +/needle input.txt",
+        "more -- --lesskey-src=ordinary-filename",
+        "more -- -kordinary-filename",
+        "more -- --+lesskey-content=ordinary-filename",
         "tree -L 2 .",
-        "git diff --stat",
-        "git log --oneline",
         "sort -- --output=ordinary-filename",
         "date -d yesterday",
         "date -Iseconds",
+        "date -j -f %Y 2026",
         "date -- -s",
+        "grep --directories=read token input.txt",
+        "grep --directories=skip token input.txt",
+        "grep -dread token input.txt",
+        "grep -ds token input.txt",
     ],
 )
 def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
@@ -1795,6 +1316,12 @@ def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
         "git diff --no-index {outside} other.txt",
         "sort --random-source={outside} input.txt",
         "sort --random={outside} input.txt",
+        "git diff -O{outside}",
+        "git diff --pathspec-from-file={outside}",
+        "git log -O{outside}",
+        "git log --pathspec-from-file={outside}",
+        "git status --pathspec-from-file={outside}",
+        "tree --gitfile={outside} .",
     ],
 )
 def test_allowlisted_option_paths_outside_workspace_require_approval(
@@ -1812,7 +1339,7 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -1825,6 +1352,7 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
         "grep --file={outside} input.txt",
         "grep --fil={outside} input.txt",
         "grep -if{outside} input.txt",
+        "grep --exclude-from={outside} input.txt",
         "file --files-from={outside}",
         "file --files-f={outside}",
         "file -f{outside}",
@@ -1834,6 +1362,8 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
         "file -m{outside}:magic.mgc input.txt",
         "du --files0-from={outside}",
         "du --files0-f={outside}",
+        "du --exclude-from={outside}",
+        "du -X{outside}",
         "wc --files0-from={outside}",
         "wc --files0-f={outside}",
         "date --file={outside}",
@@ -1841,6 +1371,8 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
         "date -uf{outside}",
         "diff --from-file={outside} input.txt",
         "diff --to={outside} input.txt",
+        "diff --exclude-from={outside} input.txt",
+        "diff -X{outside} input.txt",
     ],
 )
 def test_read_only_option_paths_outside_workspace_require_approval(
@@ -1858,7 +1390,7 @@ def test_read_only_option_paths_outside_workspace_require_approval(
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -1868,12 +1400,13 @@ def test_read_only_option_paths_outside_workspace_require_approval(
     "command",
     [
         "grep --file=patterns.txt input.txt",
-        "file -f names.txt",
+        "grep --exclude-from=patterns.txt input.txt",
         "file --magic-file=magic.mgc input.txt",
-        "du --files0-from=names.txt",
-        "wc --files0-from=names.txt",
+        "du -Xpatterns.txt .",
         "date -f dates.txt",
         "diff --from-file=base.txt input.txt",
+        "diff -Xpatterns.txt input.txt",
+        "tree --gitfile=.gitignore .",
     ],
 )
 def test_read_only_option_paths_inside_workspace_remain_allowed(shell_kind, command):
@@ -1881,6 +1414,122 @@ def test_read_only_option_paths_inside_workspace_remain_allowed(shell_kind, comm
 
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_shell_path_scope_root_does_not_widen_file_targets(
+    shell_kind, target_exists, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    target = outside / "target.txt"
+    workdir.mkdir()
+    outside.mkdir()
+    if target_exists:
+        target.write_text("content", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(shell_kind, f"cat {target}")
+
+    assert isinstance(permission, PermissionContext)
+    [required] = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert required.path_scope_root is None
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_path_scope_root_does_not_widen_unreadable_targets(
+    shell_kind, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    target = outside / "target"
+    workdir.mkdir()
+    outside.mkdir()
+    target.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setattr("vibe.core.tools.utils.os.access", lambda *_args: False)
+
+    permission = _resolve_default_shell_permission(shell_kind, f"cat {target}")
+
+    assert isinstance(permission, PermissionContext)
+    [required] = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert required.path_scope_root is None
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_path_scope_root_identifies_existing_directories(
+    shell_kind, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    target = tmp_path / "outside"
+    workdir.mkdir()
+    target.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(shell_kind, f"ls {target}")
+
+    assert isinstance(permission, PermissionContext)
+    [required] = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert required.path_scope_root == str(target)
+
+
+@pytest.mark.skipif(is_windows(), reason="uses POSIX symlinks")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_recursive_folder_grant_does_not_cover_symlink_target(
+    shell_kind, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    approved = tmp_path / "approved"
+    unapproved = tmp_path / "unapproved"
+    workdir.mkdir()
+    approved.mkdir()
+    unapproved.mkdir()
+    secret = unapproved / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    (approved / "link").symlink_to(unapproved, target_is_directory=True)
+    monkeypatch.chdir(workdir)
+    grant = path_grant_pattern(
+        str(approved.resolve()), PathGrantScope.DIRECTORY_RECURSIVE
+    )
+
+    if shell_kind == "legacy":
+        config = BashToolConfig()
+        config.allowlist.append(grant)
+        tool = Bash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(
+            BashArgs(command=f"cat {approved / 'link' / 'secret.txt'}")
+        )
+    else:
+        config = ExperimentalBashToolConfig()
+        config.allowlist.append(grant)
+        tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(
+            ExperimentalBashArgs(command=f"cat {approved / 'link' / 'secret.txt'}")
+        )
+
+    assert isinstance(permission, PermissionContext)
+    outside = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert [item.invocation_pattern for item in outside] == [str(secret.resolve())]
 
 
 @pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
@@ -1897,7 +1546,7 @@ def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -1918,7 +1567,7 @@ def test_experimental_bash_quoted_outside_path_requires_approval(tmp_path, monke
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -2267,6 +1916,7 @@ def test_new_read_only_commands_are_allowlisted():
         "{ echo harmless; }",
         "harmless() { echo harmless; }",
         "echo harmless &",
+        "echo harmless\\\n#;echo hidden",
     ],
     ids=[
         "ansi-c-string",
@@ -2305,6 +1955,7 @@ def test_new_read_only_commands_are_allowlisted():
         "group",
         "function-definition",
         "background",
+        "line-continuation",
     ],
 )
 def test_shell_permission_analysis_fails_closed(shell_kind, command):
@@ -2329,7 +1980,6 @@ def test_shell_permission_analysis_fails_closed(shell_kind, command):
         "echo harmless > output.txt",
         "echo harmless >> output.txt",
         "cat < input.txt",
-        "echo harmless 2>&1",
         "echo harmless &> output.txt",
         "cat <<'EOF'\nharmless\nEOF",
         "cat <<< harmless",
@@ -2343,7 +1993,6 @@ def test_shell_permission_analysis_fails_closed(shell_kind, command):
         "output",
         "append",
         "input",
-        "fd-duplication",
         "combined-output",
         "heredoc",
         "here-string",
@@ -2372,6 +2021,61 @@ def test_shell_redirections_require_approval(shell_kind, command):
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
 @pytest.mark.parametrize(
     "command",
+    [
+        "echo harmless 2>&1",
+        "echo harmless >/dev/null",
+        "echo harmless 2>/dev/null",
+        "echo harmless &>/dev/null",
+        "echo harmless >/dev/null 2>&1",
+        "ls -la ./x.md 2>&1 | head -1",
+    ],
+    ids=[
+        "fd-duplication",
+        "discard-stdout",
+        "discard-stderr",
+        "discard-both",
+        "discard-and-duplicate",
+        "pipeline-with-duplication",
+    ],
+)
+def test_redirections_that_cannot_reach_a_file_are_auto_approved(shell_kind, command):
+    """A descriptor duplication or a write to /dev/null creates nothing.
+
+    Approval exists to gate a command writing or reading a path the user did not
+    authorise. ``2>&1`` renumbers a descriptor and ``/dev/null`` is discarded by the
+    kernel, so charging a prompt to the ordinary "run it and drop the noise" shape
+    buys no safety and trains the user to click through prompts.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert result is None or result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A benign redirect beside a real one must not launder it.
+        "echo harmless > output.txt 2>&1",
+        "echo harmless >/dev/null 2>err.txt",
+        # ``>&word`` is "both streams into that file", not a duplication.
+        "echo harmless >&output.txt",
+        # Only the exact device is discarded.
+        "echo harmless >/dev/nullx",
+        "echo harmless >/dev/stdout",
+    ],
+)
+def test_a_benign_redirect_does_not_clear_the_rest_of_the_command(shell_kind, command):
+    """Each redirect is judged on its own, so one discard cannot cover a write."""
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
     ["cat <(printf harmless > marker.txt)", "cat <<EOF\n$(printf harmless)\nEOF"],
     ids=["process-substitution-with-nested-redirect", "unquoted-heredoc-substitution"],
 )
@@ -2391,15 +2095,21 @@ def test_nested_dynamic_redirections_require_approval(shell_kind, command):
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
-def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_kind):
+@pytest.mark.parametrize("command", ["git diff", "git log", "git status"])
+def test_git_readers_remain_allowed_for_an_ordinary_repository(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    monkeypatch.chdir(tmp_path)
     if shell_kind == "legacy":
         tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
-        result = tool.resolve_permission(BashArgs(command="git status"))
+        result = tool.resolve_permission(BashArgs(command=command))
     else:
         tool = ExperimentalBash(
             config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
         )
-        result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
 
     assert isinstance(result, PermissionContext)
     assert result.permission is ToolPermission.ALWAYS
@@ -2407,20 +2117,46 @@ def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_k
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
 @pytest.mark.parametrize(
-    ("command", "expected_reason"),
+    ("command", "config"),
     [
-        ("echo $(id)", "command substitution"),
-        ("echo $HOME", "variable expansion"),
-        ("cat < input.txt", "redirection"),
-        ("(PATH=/tmp; git status)", "environment assignments, subshell"),
-        ("&&", "a syntax error"),
+        ("git status", "[core]\n\tfsmonitor = ./monitor\n"),
+        ("git status", '[filter "unsafe"]\n\tclean = ./clean\n'),
+        ("git diff", '[filter "unsafe"]\n\tprocess = ./filter\n'),
+        ("git diff", "[diff]\n\texternal = ./external-diff\n"),
+        ("git diff", "[diff.unsafe]\n\ttextconv = ./textconv\n"),
+        ("git log -p", "[diff.unsafe]\n\ttextconv = ./textconv\n"),
+        ("git status -v", "[diff]\n\texternal = ./external-diff\n"),
+        ("git diff", "[core]\n\tpager = ./pager\n"),
+        ("git log", "[pager]\n\tlog = ./pager\n"),
+        ("git status", "[pager]\n\tstatus = ./pager\n"),
+        ("git status", "[include]\n\tpath = ./included-config\n"),
+        ("git log", "[gpg]\n\tprogram = ./fake-gpg\n"),
+        ("git log", '[gpg "ssh"]\n\tprogram = ./fake-gpg\n'),
+        ("git log", '[merge "unsafe"]\n\tdriver = ./merge-driver\n'),
     ],
-    ids=["substitution", "expansion", "redirection", "multiple", "parse-error"],
+    ids=[
+        "fsmonitor",
+        "clean-filter",
+        "process-filter",
+        "external-diff",
+        "old-style-textconv",
+        "log-textconv",
+        "status-external-diff",
+        "core-pager",
+        "log-pager",
+        "status-pager",
+        "include",
+        "signature-program",
+        "ssh-signature-program",
+        "merge-driver",
+    ],
 )
-def test_shell_approval_prompt_names_the_offending_syntax(
-    shell_kind, command, expected_reason
+def test_git_readers_require_approval_for_executable_repository_config(
+    shell_kind, command, config, tmp_path, monkeypatch
 ):
-    """The prompt must say which construct blocked auto-approval, not just that one did."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
     if shell_kind == "legacy":
         tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = tool.resolve_permission(BashArgs(command=command))
@@ -2432,10 +2168,583 @@ def test_shell_approval_prompt_names_the_offending_syntax(
 
     assert isinstance(result, PermissionContext)
     assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_git_reader_approval_is_scoped_to_the_repository(
+    shell_kind, tmp_path, monkeypatch
+):
+    repositories = [tmp_path / "first", tmp_path / "second"]
+    for repository in repositories:
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text("[core]\n\tfsmonitor = ./monitor\n")
+
+    monkeypatch.chdir(repositories[0])
+    first = _resolve_default_shell_permission(shell_kind, "git status")
+    assert isinstance(first, PermissionContext)
+    assert first.permission is ToolPermission.ASK
+    assert len(first.required_permissions) == 1
+    granted = first.required_permissions[0]
+    store = PermissionStore()
+    store.add_rule(
+        ApprovedRule(
+            tool_name="bash",
+            scope=granted.scope,
+            session_pattern=granted.session_pattern,
+        )
+    )
+
+    same = _resolve_default_shell_permission(shell_kind, "git status")
+    assert isinstance(same, PermissionContext)
+    assert store.covers("bash", same.required_permissions[0])
+
+    monkeypatch.chdir(repositories[1])
+    second = _resolve_default_shell_permission(shell_kind, "git status")
+    assert isinstance(second, PermissionContext)
+    assert second.permission is ToolPermission.ASK
+    assert not store.covers("bash", second.required_permissions[0])
+    assert granted.session_pattern != second.required_permissions[0].session_pattern
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("config", ["", "[core]\n\tfsmonitor = ./monitor\n"])
+def test_git_reader_inspects_repository_reached_by_cd(
+    shell_kind, config, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    nested = tmp_path / "nested"
+    (nested / ".git").mkdir(parents=True)
+    (nested / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="cd nested && git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(
+            ExperimentalBashArgs(command="cd nested && git status")
+        )
+
+    assert isinstance(result, PermissionContext)
+    expected = ToolPermission.ASK if config else ToolPermission.ALWAYS
+    assert result.permission is expected
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_repeated_git_reader_inspects_every_repository_reached_by_cd(
+    shell_kind, tmp_path, monkeypatch
+):
+    clean = tmp_path / "clean"
+    evil = clean / "evil"
+    for repository in (tmp_path, clean, evil):
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+        )
+    (evil / ".git" / "config").write_text("[diff]\n\texternal = ./evil-diff\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = _resolve_default_shell_permission(
+        shell_kind, "cd clean && git diff && cd evil && git diff"
+    )
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    git_permissions = [
+        permission
+        for permission in result.required_permissions
+        if permission.label == "git diff"
+    ]
+    assert len(git_permissions) == 1
+    assert str(evil.resolve()) in git_permissions[0].invocation_pattern
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["pushd evil && git diff", "pushd evil && popd && git diff"]
+)
+def test_git_reader_tracks_directory_stack_builtins(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    evil = tmp_path / "evil"
+    for repository in (tmp_path, evil):
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+        )
+    (evil / ".git" / "config").write_text("[diff]\n\texternal = ./evil-diff\n")
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(
+                allowlist=["pushd", "popd", "git diff"]
+            ),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(
+                allowlist=["pushd", "popd", "git diff"]
+            ),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_git_reader_requires_approval_after_globbed_cd(shell_kind):
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="cd * && git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(
+            ExperimentalBashArgs(command="cd * && git status")
+        )
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_git_reader_inspects_bare_repository_config(shell_kind, tmp_path, monkeypatch):
+    (tmp_path / "objects").mkdir()
+    (tmp_path / "refs").mkdir()
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / "config").write_text("[core]\n\tfsmonitor = ./monitor\n")
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("command", "expected_reason"),
+    [
+        ("cat < input.txt", "redirection"),
+        ("(PATH=/tmp; git status)", "environment assignments, subshell"),
+        ("&&", "a syntax error"),
+    ],
+    ids=["redirection", "multiple", "parse-error"],
+)
+def test_shell_approval_prompt_names_the_offending_syntax(
+    shell_kind, command, expected_reason
+):
+    """The prompt must say which construct blocked auto-approval, not just that one did.
+
+    Only reachable where no command pattern survived; where one does it is named
+    instead, because it is what the answer grants.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
     assert any(
         required.label == f"shell syntax requiring approval: {expected_reason}"
         for required in result.required_permissions
     )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("command", "expected_pattern"),
+    [
+        # An unknown read operand must not earn a broad reader grant.
+        ("cat -n $FILE", "cat -n $FILE"),
+        # Other allowlisted argument expansions can generalize.
+        ("echo $HOME", "echo *"),
+        ("echo ===", "echo *"),
+        # Not allowlisted, so the pattern is the grant.
+        ("echo $(npm test)", "npm test *"),
+        ("uv run pytest $FILE", "uv run pytest *"),
+    ],
+    ids=[
+        "trailing-expansion",
+        "allowlisted-expansion",
+        "zsh-word",
+        "substituted-command",
+        "arity-prefix",
+    ],
+)
+def test_shell_scope_keeps_unknown_reads_exact_and_other_arguments_general(
+    shell_kind, command, expected_pattern
+):
+    """Unknown reads need exact approval; ordinary argument expansions can generalize."""
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    patterns = {rp.session_pattern for rp in result.required_permissions}
+    assert expected_pattern in patterns
+    if command != expected_pattern:
+        assert command not in patterns
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git $SUB",
+        "uv run $CMD",
+        "$RUNNER pytest",
+        "PATH=/tmp pytest tests",
+        "LD_PRELOAD=/tmp/x.so ls",
+        "npm test > $LOGFILE",
+        # The argument is the program, so the boundary the arity table reports
+        # for the wrapper is not where this command's identity stops.
+        "xargs $CMD",
+        "timeout 5 $CMD",
+        "env $CMD",
+        "source $SCRIPT",
+        # An environment is not an argument, so no pattern can express it and
+        # ``git status *`` would cover every one -- including a HOME whose
+        # gitconfig names a pager to run.
+        "HOME=/tmp/evil git status",
+        "GIT_CONFIG_GLOBAL=/tmp/e git status",
+        # The extractor drops the quotes, so the token the pattern is cut from
+        # is not the token the shell will run.
+        '"git" $SUB',
+        'git "status" $X',
+        # An -exec payload the extractor cannot read is erased from the very
+        # command text the guardrail inspects.
+        "find . -exec $CMD {} ;",
+    ],
+    ids=[
+        "subcommand",
+        "inside-arity-prefix",
+        "program-name",
+        "search-path",
+        "loader-preload",
+        "redirect-target",
+        "xargs-wrapper",
+        "timeout-wrapper",
+        "env-wrapper",
+        "sourced-script",
+        "home-override",
+        "git-config-override",
+        "quoted-program",
+        "quoted-subcommand",
+        "guardrail-exec-payload",
+    ],
+)
+def test_syntax_reaching_the_commands_identity_is_scoped_to_the_exact_string(
+    shell_kind, command
+):
+    """A pattern is only honest while the extract still says what will run.
+
+    ``git $SUB`` extracts to ``git``, whose pattern ``git *`` is every subcommand
+    from a call to one of them. Offering it beside the exact string would hand it
+    over anyway, so it must not be offered at all.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    patterns = [rp.session_pattern for rp in result.required_permissions]
+    assert command in patterns
+    # Guardrails add exact-text entries of their own, which release only the call
+    # they name; a trailing ``*`` is the widening being avoided.
+    assert not [pattern for pattern in patterns if pattern.endswith(" *")]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_an_unreadable_token_is_recorded_even_when_the_call_needs_other_scopes(
+    shell_kind,
+):
+    """The command's own pattern is never left to ride on an unrelated permission.
+
+    ``grep`` is allowlisted, so the outside-workdir glob is all the call would
+    otherwise ask for, and granting "read /etc" would release every future
+    ``grep $ANYTHING /etc/hosts``.
+    """
+    result = _resolve_default_shell_permission(shell_kind, "grep $PATTERN /etc/hosts")
+
+    assert isinstance(result, PermissionContext)
+    scopes = {rp.scope for rp in result.required_permissions}
+    assert scopes == {
+        PermissionScope.COMMAND_PATTERN,
+        PermissionScope.OUTSIDE_DIRECTORY,
+    }
+    assert "grep *" in {rp.session_pattern for rp in result.required_permissions}
+
+
+def _store_after_granting(shell_kind: str, command: str) -> PermissionStore:
+    store = PermissionStore()
+    result = _resolve_default_shell_permission(shell_kind, command)
+    assert isinstance(result, PermissionContext)
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="bash", scope=rp.scope, session_pattern=rp.session_pattern
+            )
+        )
+    return store
+
+
+def _uncovered(
+    store: PermissionStore, shell_kind: str, command: str
+) -> list[RequiredPermission]:
+    result = _resolve_default_shell_permission(shell_kind, command)
+    assert isinstance(result, PermissionContext)
+    return [rp for rp in result.required_permissions if not store.covers("bash", rp)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("wrapper", ["", "exec -- "])
+@pytest.mark.parametrize(
+    "operand", ["$FILE", ".env.other$(printf x)", '".env.other${SUFFIX}"']
+)
+def test_dynamic_reader_grants_only_the_exact_command_and_known_files(
+    shell_kind, wrapper, operand, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    command = f"{wrapper}cat .env {operand}"
+    permission = _resolve_default_shell_permission(shell_kind, command)
+    assert isinstance(permission, PermissionContext)
+    files = [
+        rp
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / ".env")]
+    commands = [
+        rp
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+    ]
+    assert len(commands) == 1
+    assert commands[0].session_pattern == command
+    store = _store_after_granting(shell_kind, command)
+    assert not _uncovered(store, shell_kind, command)
+    assert _uncovered(store, shell_kind, "cat .env $OTHER")
+    assert _uncovered(store, shell_kind, "cat .env.otherx")
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "guardrailed"),
+    [
+        ("git log $REF", "git log --ext-diff"),
+        ("git log $REF", "git log --output=/tmp/stolen"),
+        ("git diff $REF", "git diff --textconv"),
+        ("git log $REF *", "git log --ext-diff"),
+        ("git diff $REF *", "git diff --textconv"),
+    ],
+    ids=["ext-diff", "output", "textconv", "glob-ext-diff", "glob-textconv"],
+)
+def test_a_grant_on_a_guardrailed_command_does_not_cover_its_guarded_options(
+    shell_kind, granted, guardrailed
+):
+    """``git log *`` would cover the very options the guardrail exists to catch.
+
+    ``--ext-diff`` and ``--textconv`` run a driver named in the repository's own
+    config and ``--output`` writes wherever it is pointed, so a grant earned by
+    an innocuous expansion has to stop short of them. The ``*`` rows are the same
+    grant written with a glob of its own, which must stay an argument.
+    """
+    store = _store_after_granting(shell_kind, granted)
+
+    assert not _uncovered(store, shell_kind, granted)
+    assert _uncovered(store, shell_kind, guardrailed)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "next_call"),
+    [
+        ("git log --output $FILE", "git log --output $OTHER"),
+        ("git log $REF", "git log $OTHER"),
+        ("git submodule foreach $CMD", "git submodule foreach $OTHER"),
+    ],
+    ids=["guarded-option-value", "positional", "foreach-payload"],
+)
+def test_an_unreadable_token_keeps_a_guardrailed_command_scoped_to_its_own_text(
+    shell_kind, granted, next_call
+):
+    """The extract drops the token, and a literal grant has no ``*`` to lose it in.
+
+    Both calls extract to ``git log --output``, which says nothing about where
+    either one writes. A positional is no safer -- ``$REF`` is ``--ext-diff`` if
+    the variable says so -- so for a command whose options are guarded, an
+    unreadable token anywhere leaves the command as written the only honest scope.
+    """
+    store = _store_after_granting(shell_kind, granted)
+
+    assert not _uncovered(store, shell_kind, granted)
+    assert _uncovered(store, shell_kind, next_call)
+
+
+def test_a_shell_override_is_not_evidence_that_the_command_itself_got_scoped():
+    """A context permission is COMMAND_PATTERN-scoped and says nothing about the command.
+
+    ``[[ ... ]]`` extracts no command at all, so the override was the only thing
+    left in the list and the call recorded nothing about what it would test.
+    """
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    store = PermissionStore()
+
+    granted = tool.resolve_permission(
+        ExperimentalBashArgs(command="[[ -n $FOO ]]", shell="/bin/zsh")
+    )
+    assert isinstance(granted, PermissionContext)
+    assert "[[ -n $FOO ]]" in {
+        rp.session_pattern for rp in granted.required_permissions
+    }
+    for rp in granted.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="bash", scope=rp.scope, session_pattern=rp.session_pattern
+            )
+        )
+
+    other = tool.resolve_permission(
+        ExperimentalBashArgs(command="[[ -f $HOME/.ssh/id_rsa ]]", shell="/bin/zsh")
+    )
+    assert isinstance(other, PermissionContext)
+    assert [rp for rp in other.required_permissions if not store.covers("bash", rp)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "escalated"),
+    [
+        ("cat $FILE", "cat notes.txt > /etc/cron.d/pwn"),
+        ("echo $MSG", "echo key >> ~/.ssh/authorized_keys"),
+        ("ls $DIR", "ls > /tmp/listing"),
+    ],
+    ids=["cat-redirect", "echo-append", "ls-redirect"],
+)
+def test_a_pattern_grant_does_not_cover_what_only_the_command_text_can_scope(
+    shell_kind, granted, escalated
+):
+    """``cat *`` is a fair grant, and ``fnmatch`` would let it swallow a redirect.
+
+    A redirect target never reaches ``command_parts``, so it earns no
+    outside-workdir scope of its own and the exact command is the only permission
+    between an innocuous grant and an arbitrary write.
+    """
+    store = _store_after_granting(shell_kind, granted)
+
+    assert _uncovered(store, shell_kind, escalated)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("command", ["python", "cat"])
+def test_a_heredoc_grant_covers_only_the_body_it_was_shown(shell_kind, command):
+    """The body is what the command runs, and none of it reaches the extract."""
+    store = _store_after_granting(shell_kind, f"{command} <<EOF\nfirst\nEOF")
+
+    assert _uncovered(store, shell_kind, f"{command} <<EOF\nsecond\nEOF")
+
+
+_WITHHOLDS_APPROVAL = {
+    "date": ["date", "--set", "2020-01-01"],
+    "du": ["du", "--files0-from=/tmp/x"],
+    "file": ["file", "--files-from=/tmp/x"],
+    "find": ["find", ".", "-delete"],
+    "git": ["git", "log", "--ext-diff"],
+    "less": ["less", "--log-file=/tmp/x", "f"],
+    "md5sum": ["md5sum", "--check", "/tmp/x"],
+    "more": ["more", "--log-file=/tmp/x", "f"],
+    "sha1sum": ["sha1sum", "--check", "/tmp/x"],
+    "sha256sum": ["sha256sum", "--check", "/tmp/x"],
+    "shasum": ["shasum", "--check", "/tmp/x"],
+    "sort": ["sort", "--output=/tmp/x", "f"],
+    "tree": ["tree", "--output=/tmp/x"],
+    "uniq": ["uniq", "input", "/tmp/x"],
+    "wc": ["wc", "--files0-from=/tmp/x"],
+}
+_ONLY_NAMES_PATHS = {
+    "diff": ["diff", "--from-file=/etc/hosts", "b"],
+    "grep": ["grep", "--file=/etc/hosts", "x"],
+}
+
+
+def test_option_guardrails_track_the_policies_that_can_withhold_approval():
+    """``has_option_guardrails`` is what stops a command's grant generalising.
+
+    A policy that only nominates paths has nothing to protect there: those paths
+    become OUTSIDE_DIRECTORY permissions, a scope no command pattern is matched
+    against, so keeping such a command exact costs prompts and buys nothing.
+    """
+    assert set(_WITHHOLDS_APPROVAL) | set(_ONLY_NAMES_PATHS) == set(_COMMAND_POLICIES)
+
+    for tokens in _WITHHOLDS_APPROVAL.values():
+        assert analyze_shell_command_policy(tokens).requires_approval
+        assert has_option_guardrails(tokens)
+
+    for tokens in _ONLY_NAMES_PATHS.values():
+        policy = analyze_shell_command_policy(tokens)
+        assert not policy.requires_approval
+        assert policy.option_path_values
+        assert not has_option_guardrails(tokens)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_a_policy_that_only_names_paths_leaves_the_command_generalising(shell_kind):
+    """``grep``'s guarded options resolve to paths, not to a withheld approval.
+
+    Those land in OUTSIDE_DIRECTORY, a scope no command pattern is matched
+    against, so keeping ``grep`` exact would cost prompts and buy nothing.
+    """
+    store = _store_after_granting(shell_kind, "grep -n $PATTERN src")
+
+    assert not _uncovered(store, shell_kind, "grep -n $OTHER src")
+    assert _uncovered(store, shell_kind, "grep --file=/etc/shadow src")
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_recursive_reader_grant_does_not_cover_another_pattern(shell_kind):
+    store = _store_after_granting(shell_kind, "grep -rn token src")
+
+    assert _uncovered(store, shell_kind, "grep -rn other src")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git $SUB",
+        "$RUNNER pytest",
+        "PATH=/tmp pytest",
+        "FOO=bar ls",
+        "xargs $CMD",
+        '"git" $SUB',
+        "echo hi > out.txt",
+        "echo hi > $OUT",
+        "f() { git $X; }",
+        "foo \\\nbar",
+        "&&",
+    ],
+)
+def test_an_invalidated_scope_always_carries_a_reason(command):
+    """The shells label the exact-string grant with the analysis reason, so every
+    route to ``invalidates_scope`` has to leave one behind or the prompt names
+    nothing as the syntax that blocked auto-approval.
+    """
+    analysis = analyze_shell_command(command)
+
+    assert analysis.invalidates_scope
+    assert analysis.approval_reasons
 
 
 def _force_windows_bash(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2532,3 +2841,135 @@ def test_experimental_bash_standalone_denylisted_with_redirect_not_denied(comman
     assert result.permission is not ToolPermission.NEVER, (
         f"Command with redirect should not be denied: {command!r}"
     )
+
+
+_AGENT = "/Users/me/Library/LaunchAgents/x.plist"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (f"cat tools/plist.tmpl <workspace>{_AGENT}", ((_AGENT, _AGENT),)),
+        (
+            'echo x > "/Users/me/my notes.txt"',
+            (('"/Users/me/my notes.txt"', "/Users/me/my notes.txt"),),
+        ),
+        ("echo x > '/Users/me/$x'", (("'/Users/me/$x'", "/Users/me/$x"),)),
+        ("make >/dev/null 2> /tmp/err.log", (("/tmp/err.log", "/tmp/err.log"),)),
+        ("echo x >&/var/log/both.log", (("/var/log/both.log", "/var/log/both.log"),)),
+        ("cat <<EOF > /etc/motd\nhi\nEOF", (("/etc/motd", "/etc/motd"),)),
+        (
+            "echo $(echo x > /a/inner) > /a/outer",
+            (("/a/inner", "/a/inner"), ("/a/outer", "/a/outer")),
+        ),
+        ("echo x > /a/out; echo y >> /a/out", (("/a/out", "/a/out"),)),
+        # Only the word after the operator is opened; the rest are arguments.
+        ("echo x > /tmp/a /etc/passwd", (("/tmp/a", "/tmp/a"),)),
+        # From a root, but only the shell can read the spelling.
+        ("echo x > /tmp/$NAME.log", (("/tmp/$NAME.log", None),)),
+        ("echo x > /var/*.log", (("/var/*.log", None),)),
+        ('echo x > /tmp/"a b"', (('/tmp/"a b"', None),)),
+        ("echo x > $'/Users/me/x'", (("$'/Users/me/x'", None),)),
+        ("echo x > $'\\x2fetc/x'", (("$'\\x2fetc/x'", None),)),
+        ("echo x > \\/etc/x", (("\\/etc/x", None),)),
+        # Neither from a root nor relative: only the shell knows where it lands.
+        # zsh expands an unquoted ``=cmd`` to the command's path.
+        ("echo x > =git", (("=git", None),)),
+        ("echo x > >(tee /etc/passwd)", ((">(tee /etc/passwd)", None),)),
+        ("echo x > *.log", (("*.log", None),)),
+        # Relative, ``~`` or expansion-led: moved by what the command sets.
+        ("make > build.log 2>&1", ()),
+        ("echo x >> ~/.zshrc", ()),
+        ("echo x > $OUT/y", ()),
+        ('echo x > "$HOME/y"', ()),
+        ("echo x > out_$(date).log", ()),
+        ("echo x > '=git'", ()),
+        # A POSIX shell reads a drive spelling as a relative path.
+        ("echo x > C:/Users/me/x.ps1", ()),
+        # Reads, streams and descriptors open no file to keep.
+        ("cat < /etc/passwd", ()),
+        ("echo x >&2; echo y >&-", ()),
+        ("echo x > /dev/stderr 2>/dev/null", ()),
+    ],
+)
+def test_redirect_writes_place_only_plainly_spelled_targets_from_a_root(
+    command, expected
+):
+    """A target from a root is placed where the shell can only read it one way.
+    Relative, ``~`` and expansion-led targets, reads, streams and descriptor
+    operations are not listed; every other target is listed unplaced.
+    """
+    writes = redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # Bash joins the lines and opens ``/Users/me/.ssh/authorized_keys``.
+        (
+            "echo x > /Users/me/.ssh/authori\\\nzed_keys",
+            (("/Users/me/.ssh/authori", None),),
+        ),
+        # Bash opens ``/work/space/../../etc/x``.
+        ("echo x > /work/space/\\\n../../etc/x", (("/work/space/", None),)),
+        # Relative too: the parse says nothing certain about any target.
+        ("make \\\n  > build.log", (("build.log", None),)),
+        ("exec 3<> /etc/hosts", (("/etc/hosts", None),)),
+        # A ``$(...)`` inside double quotes is code, continued lines and all.
+        (
+            'echo "$(echo x > /etc/y \\\n z)" > /tmp/q',
+            (("/etc/y", None), ("/tmp/q", None)),
+        ),
+    ],
+)
+def test_no_write_is_placed_in_a_command_not_read_as_the_shell_reads_it(
+    command, expected
+):
+    """After a line continuation in code or a syntax error, the grammar's words
+    are not the shell's, so every write the command makes is listed unplaced.
+    """
+    writes = redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cat > Dockerfile <<'EOF'\nRUN a \\\n  b\nEOF", ()),
+        ("cat > /tmp/x <<EOF\nline \\\nmore\nEOF", (("/tmp/x", "/tmp/x"),)),
+        ("echo 'a\\\nb' > /tmp/q", (("/tmp/q", "/tmp/q"),)),
+        ("pytest \\\n  -x 2>&1 | tail", ()),
+        ("# note \\\nmake > /tmp/out.log", (("/tmp/out.log", "/tmp/out.log"),)),
+        ('echo "a\\\nb" > /tmp/x', (("/tmp/x", "/tmp/x"),)),
+    ],
+)
+def test_a_continued_line_in_data_or_without_a_write_places_as_usual(command, expected):
+    """A backslash-newline in a heredoc body, quoted text or a comment joins no
+    words of code, and a command that writes no file has nothing to place.
+    """
+    writes = redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo x > C:/Users/me/x.ps1", (("C:/Users/me/x.ps1", "C:/Users/me/x.ps1"),)),
+        (
+            "echo x > 'C:\\Users\\me\\x.ps1'",
+            (("'C:\\Users\\me\\x.ps1'", "C:\\Users\\me\\x.ps1"),),
+        ),
+        ("echo x > /c/Users/me/x.ps1", (("/c/Users/me/x.ps1", "/c/Users/me/x.ps1"),)),
+        # Unquoted, Git Bash reads the backslashes as escapes: ``C:Usersmex.ps1``.
+        ("echo x > C:\\Users\\me\\x.ps1", (("C:\\Users\\me\\x.ps1", None),)),
+    ],
+)
+def test_git_bash_also_writes_from_drive_roots(command, expected):
+    """Git Bash opens a drive spelling from that drive's root."""
+    writes = redirect_writes(command, drive_paths=True)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected

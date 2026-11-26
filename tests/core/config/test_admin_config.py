@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 from unittest.mock import AsyncMock
 
 import httpx
@@ -12,8 +13,14 @@ from vibe.core.config.admin_config import (
     ManagedConfig,
     fetch_managed_config,
 )
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 
 _URL = f"http://test{MANAGED_CONFIG_PATH}"
+
+
+def _key() -> ApiKeyPlatformCredentialProvider:
+    # Fresh per call: a provider remembers the credential a 401 rejected.
+    return ApiKeyPlatformCredentialProvider.from_api_key("api-key")
 
 
 @pytest.fixture
@@ -29,7 +36,7 @@ async def test_returns_enabled_config(respx_mock: respx.MockRouter) -> None:
         )
     )
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert route.called
     assert route.calls.last.request.headers["Authorization"] == "Bearer api-key"
@@ -45,7 +52,7 @@ async def test_disabled_state_is_not_enabled(respx_mock: respx.MockRouter) -> No
         return_value=httpx.Response(200, json={"state": "disabled"})
     )
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.error is None
     assert result.config is not None
@@ -59,7 +66,7 @@ async def test_non_retryable_status_reports_error(
 ) -> None:
     route = respx_mock.get(_URL).mock(return_value=httpx.Response(status_code))
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.config is None
     assert result.error == f"HTTP {status_code}"
@@ -73,7 +80,7 @@ async def test_retryable_status_retries_then_reports_error(
 ) -> None:
     route = respx_mock.get(_URL).mock(return_value=httpx.Response(status_code))
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.config is None
     assert result.error == f"HTTP {status_code}"
@@ -93,7 +100,7 @@ async def test_retryable_status_succeeds_on_retry(
         ]
     )
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.error is None
     assert result.config is not None
@@ -107,7 +114,7 @@ async def test_network_error_retries_then_reports_error(
 ) -> None:
     route = respx_mock.get(_URL).mock(side_effect=httpx.ConnectError("boom"))
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.config is None
     assert result.error is not None
@@ -127,7 +134,7 @@ async def test_network_error_succeeds_on_retry(
         ]
     )
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.error is None
     assert result.config is not None
@@ -139,7 +146,29 @@ async def test_network_error_succeeds_on_retry(
 async def test_bad_json_reports_error(respx_mock: respx.MockRouter) -> None:
     respx_mock.get(_URL).mock(return_value=httpx.Response(200, text="not json"))
 
-    result = await fetch_managed_config("http://test", "api-key")
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.config is None
+    assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_failure_before_the_wire_reports_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trust store that will not build never reaches httpx, and the promise
+    that any failure leaves the admin layer empty has to cover it: every caller
+    fails open on an error result and none of them can answer an exception.
+    """
+
+    def _unbuildable() -> ssl.SSLContext:
+        raise ssl.SSLError("trust store unavailable")
+
+    monkeypatch.setattr(
+        "vibe.core.platform_auth._mistral.build_ssl_context", _unbuildable
+    )
+
+    result = await fetch_managed_config("http://test", _key())
 
     assert result.config is None
     assert result.error is not None

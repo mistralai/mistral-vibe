@@ -81,6 +81,15 @@ class TestConfigDirs:
         result = find_local_config_dirs(tmp_path)
         assert tmp_path.resolve() / ".vibe" in result.config_dirs
 
+    @pytest.mark.parametrize("filename", ["hooks.toml", "skills.toml"])
+    def test_finds_vibe_with_trust_gated_file(
+        self, tmp_path: Path, filename: str
+    ) -> None:
+        (tmp_path / ".vibe").mkdir()
+        (tmp_path / ".vibe" / filename).write_text("")
+        result = find_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" in result.config_dirs
+
     def test_finds_vibe_and_agents_at_same_root(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "skills").mkdir(parents=True)
         (tmp_path / ".agents" / "skills").mkdir(parents=True)

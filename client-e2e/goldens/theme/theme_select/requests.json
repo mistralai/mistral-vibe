@@ -1,0 +1,18 @@
+[
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "set",
+     "path": "/theme",
+     "targetLayer": null,
+     "value": "atom-one-dark"
+    }
+   ],
+   "reason": "app-server config update",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

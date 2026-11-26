@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager, suppress
+from copy import copy
 from dataclasses import dataclass
 from enum import StrEnum
+import os
 from pathlib import Path
+import shutil
+import tempfile
+import time
 import tomllib
 
 import tomli_w
 
 from vibe.core.paths import (
     AGENTS_MD_FILENAME,
+    SCRATCH_DIR,
     TRUSTED_FOLDERS_FILE,
     find_local_config_dirs,
 )
+from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
 from vibe.observability.logging import logger
 
 
@@ -145,7 +154,8 @@ def maybe_build_workspace_trust_prompt(
 ) -> WorkspaceTrustPrompt | None:
     manager = manager or trusted_folders_manager
     resolved_cwd = cwd.resolve()
-    if resolved_cwd == Path.home().resolve():
+    # Home trusts everything under it, and a scratch folder is never trusted.
+    if resolved_cwd == Path.home().resolve() or is_in_scratch_dir(resolved_cwd):
         return None
 
     if manager.is_trusted(cwd) is True:
@@ -225,6 +235,41 @@ class TrustedFoldersManager:
         self._session_trusted: list[str] = []
         self._load()
 
+    def for_session(self) -> TrustedFoldersManager:
+        """Share persisted decisions without inheriting temporary grants."""
+        manager = copy(self)
+        manager._session_trusted = []
+        return manager
+
+    def persisted_decisions(self) -> dict[str, list[str]]:
+        """What ``for_session`` keeps, for another process: ``from_decisions``."""
+        return {"trusted": list(self._trusted), "untrusted": list(self._untrusted)}
+
+    @classmethod
+    def read_file(cls) -> TrustedFoldersManager:
+        """A manager of its own over the trust file as it is now, for editing it.
+
+        It shares nothing with the managers of running sessions, so its edits
+        reach the file but not their in-memory decisions. Unlike the first
+        load, an unreadable file raises ``OSError`` or ``TrustFileError``
+        and is left as it is: it may be another process's write in progress.
+        A missing file means no decisions.
+        """
+        trusted, untrusted = _read_while_locked(TRUSTED_FOLDERS_FILE.path)
+        return cls.from_decisions({"trusted": trusted, "untrusted": untrusted})
+
+    @classmethod
+    def from_decisions(cls, decisions: dict[str, list[str]]) -> TrustedFoldersManager:
+        """Answers as the manager ``persisted_decisions`` came from, without
+        reading or rewriting the trust file.
+        """
+        manager = cls.__new__(cls)
+        manager._file_path = TRUSTED_FOLDERS_FILE.path
+        manager._trusted = list(decisions["trusted"])
+        manager._untrusted = list(decisions["untrusted"])
+        manager._session_trusted = []
+        return manager
+
     def trust_for_session(self, path: Path) -> None:
         self._session_trusted.append(self._normalize_path(path))
 
@@ -243,34 +288,80 @@ class TrustedFoldersManager:
         return str(path.expanduser().resolve())
 
     def _load(self) -> None:
-        if not self._file_path.is_file():
-            self._trusted = []
-            self._untrusted = []
-            self._save()
-            return
+        """Read the file, creating it empty when missing.
 
+        A file that cannot be read is left as it is, with no decision in
+        memory: it may hold the user's decisions, and writing over it would
+        lose them.
+        """
         try:
-            with self._file_path.open("rb") as f:
-                data = tomllib.load(f)
-            self._trusted = list(data.get("trusted", []))
-            self._untrusted = list(data.get("untrusted", []))
-        except (OSError, tomllib.TOMLDecodeError):
-            self._trusted = []
-            self._untrusted = []
-            self._save()
+            with ExitStack() as stack:
+                locked = _try_lock(stack, self._file_path)
+                if locked and not self._file_path.exists():
+                    _write_lists(self._file_path, [], [])
+                trusted, untrusted = _read_lists(self._file_path)
+        except (OSError, TrustFileError) as exc:
+            logger.warning("Ignoring the trust store: %s", exc)
+            trusted, untrusted = [], []
+        self._trusted[:] = trusted
+        self._untrusted[:] = untrusted
 
-    def _save(self) -> None:
-        self._file_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"trusted": self._trusted, "untrusted": self._untrusted}
+    def _change(self, entry: str, trusted: bool) -> None:
+        """The trust prompt's answer: in memory, then merged into the file as it is now.
+
+        Only this change is written, under a lock, so decisions another
+        manager or process wrote since this one loaded survive. A file that
+        cannot be read is never overwritten: it may hold the user's own
+        decisions. Such a file or a failed write leaves the decision in
+        memory only, as the trust prompt always did.
+        """
+        _move(self._trusted, self._untrusted, entry, trusted)
         try:
-            with self._file_path.open("wb") as f:
-                tomli_w.dump(data, f)
-        except OSError:
-            pass
+            with _locked(self._file_path):
+                on_disk = _read_lists(self._file_path)
+                _move(*on_disk, entry, trusted)
+                _write_lists(self._file_path, *on_disk)
+        except (OSError, TrustFileError) as exc:
+            logger.warning("Trust decision for %s not saved: %s", entry, exc)
+
+    def edit(self, entry: str, trusted: bool | None) -> bool:
+        """Move or forget an entry the file stores, as it is now; false when it stores none.
+
+        *entry* is taken as stored, without normalization, so an entry whose
+        path no longer resolves to itself can still be edited. Checked and
+        written under one lock, so an entry another process just forgot is
+        never written back. This manager then holds the file as written.
+        Raises ``OSError`` or ``TrustFileError`` when the file cannot be read
+        or written, leaving it as it was.
+        """
+        with _locked(self._file_path):
+            on_disk = _read_lists(self._file_path)
+            if entry not in on_disk[0] and entry not in on_disk[1]:
+                self._trusted[:], self._untrusted[:] = on_disk
+                return False
+            _move(*on_disk, entry, trusted)
+            _write_lists(self._file_path, *on_disk)
+        self._trusted[:], self._untrusted[:] = on_disk
+        return True
+
+    def trust(self, path: Path) -> None:
+        """Trust *path* in the file as it is now; this manager then holds the file as written.
+
+        Raises ``OSError`` or ``TrustFileError`` when the file cannot be read
+        or written, leaving it as it was.
+        """
+        entry = self._normalize_path(path)
+        with _locked(self._file_path):
+            on_disk = _read_lists(self._file_path)
+            _move(*on_disk, entry, True)
+            _write_lists(self._file_path, *on_disk)
+        self._trusted[:], self._untrusted[:] = on_disk
 
     def _closest_decision(self, path: Path) -> tuple[bool, Path] | None:
         """``(trusted, ancestor)`` for the closest decision, ``None`` if undecided."""
         current = Path(self._normalize_path(path))
+        if is_in_scratch_dir(current):
+            return False, current
         while True:
             s = str(current)
             if s in self._trusted or s in self._session_trusted:
@@ -291,6 +382,8 @@ class TrustedFoldersManager:
 
     def trust_status(self, path: Path) -> WorkspaceTrustStatus:
         current = Path(self._normalize_path(path))
+        if is_in_scratch_dir(current):
+            return WorkspaceTrustStatus.UNTRUSTED
         while True:
             s = str(current)
             if s in self._session_trusted:
@@ -316,20 +409,131 @@ class TrustedFoldersManager:
                 return None
 
     def add_trusted(self, path: Path) -> None:
-        normalized = self._normalize_path(path)
-        if normalized not in self._trusted:
-            self._trusted.append(normalized)
-        if normalized in self._untrusted:
-            self._untrusted.remove(normalized)
-        self._save()
+        self._change(self._normalize_path(path), True)
 
     def add_untrusted(self, path: Path) -> None:
-        normalized = self._normalize_path(path)
-        if normalized not in self._untrusted:
-            self._untrusted.append(normalized)
-        if normalized in self._trusted:
-            self._trusted.remove(normalized)
-        self._save()
+        self._change(self._normalize_path(path), False)
+
+
+def is_in_scratch_dir(path: Path) -> bool:
+    # A scratch folder holds what its projectless session wrote, so no decision trusts it.
+    return (
+        path
+        .expanduser()
+        .resolve()
+        .is_relative_to(SCRATCH_DIR.path.expanduser().resolve())
+    )
+
+
+def _move(
+    trusted: list[str], untrusted: list[str], entry: str, target: bool | None
+) -> None:
+    """Put *entry* in the list *target* names, once, and in no other."""
+    for stored in (trusted, untrusted):
+        while entry in stored:
+            stored.remove(entry)
+    if target is not None:
+        (trusted if target else untrusted).append(entry)
+
+
+class TrustFileError(ValueError):
+    """The trust file is not the two lists of paths Vibe writes."""
+
+
+def _read_lists(path: Path) -> tuple[list[str], list[str]]:
+    """The trust file's ``(trusted, untrusted)``; a missing file holds none."""
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return [], []
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise TrustFileError(f"{path} is not valid TOML: {exc}") from exc
+    lists = data.get("trusted", []), data.get("untrusted", [])
+    for value in lists:
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise TrustFileError(f"{path} must hold two lists of paths")
+    return list(lists[0]), list(lists[1])
+
+
+def _read_while_locked(path: Path) -> tuple[list[str], list[str]]:
+    """``_read_lists`` under the lock when this user can take it."""
+    with ExitStack() as stack:
+        _try_lock(stack, path)
+        return _read_lists(path)
+
+
+def _try_lock(stack: ExitStack, path: Path) -> bool:
+    """Hold the lock on *stack* for a reader; false when it cannot be taken.
+
+    A reader only takes the lock to keep out of a writer's way, so one that
+    cannot open it (left by a `sudo` run, a read-only home or disk) or wait
+    for it reads without it. The file it reads is always whole, since writers
+    swap it in. On Windows a slow writer's swap may then fail and be reported,
+    but nothing is lost. A failed read is the caller's error, never swallowed.
+    """
+    try:
+        stack.enter_context(_locked(path))
+    except OSError:
+        return False
+    return True
+
+
+_LOCK_WAIT_SECONDS = 5.0
+_LOCK_RETRY_SECONDS = 0.01
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold the trust file's lock, a file beside it that is never removed.
+
+    Every write holds it. Readers take it when they can (see ``_try_lock``),
+    so they rarely hold the file open while a writer swaps it, which Windows
+    refuses.
+    """
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+    with target.with_name(f".{target.name}.lock").open("a+b") as handle:
+        while True:
+            try:
+                acquire_file_lock(handle)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise BlockingIOError(
+                        f"{target} is locked by another Vibe process"
+                    ) from exc
+            time.sleep(_LOCK_RETRY_SECONDS)
+        try:
+            yield
+        finally:
+            release_file_lock(handle)
+
+
+def _write_lists(path: Path, trusted: list[str], untrusted: list[str]) -> None:
+    """Swap a complete new trust file in, so no reader ever sees half of one.
+
+    A symlinked file is written through its link. The store is a
+    security-decision record, so it is created owner-only; an existing file
+    keeps its mode.
+    """
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump({"trusted": trusted, "untrusted": untrusted}, f)
+            # On disk before the swap, so a crash never leaves an empty store.
+            f.flush()
+            os.fsync(f.fileno())
+        with suppress(FileNotFoundError):
+            shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
 
 
 trusted_folders_manager = TrustedFoldersManager()

@@ -2,67 +2,299 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Sequence
+from contextlib import ExitStack
+from pathlib import Path
+import sys
+from typing import TYPE_CHECKING
 
-from vibe._experimental_harness import add_experimental_harness_argument
-from vibe.app_server._runtime import create_harness_server
-from vibe.app_server.transport import (
-    BinaryLineReader,
-    BinaryLineWriter,
-    StdioJsonRpcTransport,
-)
-from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.paths import LOG_FILE
-from vibe.observability.logging import init_file_logging
+if TYPE_CHECKING:
+    from vibe.app_server._agent_socket import AgentSocketMount
+    from vibe.app_server._process_services import ProcessServices
+    from vibe.app_server.multiplex import ChannelOpen, ChannelServer
+    from vibe.app_server.transport import (
+        BinaryLineReader,
+        BinaryLineWriter,
+        JsonRpcTransport,
+    )
 
 
 async def serve_stdio(
     *,
     reader: BinaryLineReader | None = None,
     writer: BinaryLineWriter | None = None,
-    experimental_harness: bool = False,
-    legacy_harness: bool = False,
+    multiplex: bool = False,
+    additional_builtin_plugin_roots: Sequence[Path] = (),
+    agent_socket: AgentSocketMount | None = None,
+    end_on_sigterm: bool = False,
 ) -> None:
-    transport = (
+    """``end_on_sigterm``: SIGTERM ends the input as its end does; the process
+    exits once serving has wound down. For the process's own server only.
+    """
+    from vibe.app_server.transport import StdioJsonRpcTransport
+
+    transport: JsonRpcTransport = (
         StdioJsonRpcTransport.from_standard_streams()
         if reader is None or writer is None
         else StdioJsonRpcTransport(reader, writer)
     )
-    harness = await create_harness_server(
-        transport,
-        transport_kind="stdio",
-        experimental_harness=experimental_harness,
-        legacy_harness=legacy_harness,
+    with ExitStack() as stack:
+        if end_on_sigterm:
+            from vibe.app_server._termination import ending_on_sigterm
+
+            transport = stack.enter_context(ending_on_sigterm(transport))
+        await _serve(
+            transport,
+            multiplex=multiplex,
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            agent_socket=agent_socket,
+        )
+
+
+async def _serve(
+    transport: JsonRpcTransport,
+    *,
+    multiplex: bool,
+    additional_builtin_plugin_roots: Sequence[Path],
+    agent_socket: AgentSocketMount | None,
+) -> None:
+    from vibe.app_server._process_services import ProcessServices
+    from vibe.app_server._worktree_housekeeping import has_managed_worktrees
+
+    services = ProcessServices.create()
+    try:
+        # Finish reaps left by earlier processes, in the background.
+        if await asyncio.to_thread(has_managed_worktrees):
+            services.worktrees.sweep()
+        await _serve_with(
+            transport,
+            services,
+            multiplex=multiplex,
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            agent_socket=agent_socket,
+        )
+    finally:
+        await services.close()
+
+
+async def _serve_with(
+    transport: JsonRpcTransport,
+    services: ProcessServices,
+    *,
+    multiplex: bool,
+    additional_builtin_plugin_roots: Sequence[Path],
+    agent_socket: AgentSocketMount | None,
+) -> None:
+    from vibe.app_server._connection_protocol import InitializeParams
+    from vibe.app_server._left_turns import (
+        close_left_turns_first,
+        list_on_own_channel,
+        resume_on_own_channel,
     )
+    from vibe.app_server._runtime import HarnessProcess, create_harness_server
+    from vibe.app_server.multiplex import serve_multiplexed
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    if multiplex:
+
+        async def create_channel(
+            channel: JsonRpcTransport,
+            options: ChannelOpen | None,
+            left_turn_session: str | None = None,
+        ) -> ChannelServer:
+            if options is not None:
+                from vibe.app_server._run_channel import RunChannelServer
+
+                return RunChannelServer(
+                    channel,
+                    options,
+                    services=services,
+                    additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+                )
+            harness_files = HarnessFilesManager(
+                sources=("user", "project"),
+                trust_store=trusted_folders_manager.for_session(),
+            )
+            process = HarnessProcess(
+                harness_files,
+                services=services,
+                additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            )
+            process.start_connector_warm_up()
+            return await create_harness_server(
+                channel,
+                transport_kind="stdio",
+                process=process,
+                open_sessions=services.open_sessions,
+                left_turns=services.left_turns,
+                open_left_turn_channel=open_left_turn_channel,
+                list_on_own_channel=list_left_on_own_channel,
+                left_turn_session=left_turn_session,
+            )
+
+        async def serve_own_channel(channel: JsonRpcTransport, session_id: str) -> None:
+            server = await create_channel(channel, None, session_id)
+            await server.serve()
+
+        async def serve_listing_channel(channel: JsonRpcTransport) -> None:
+            server = await create_channel(channel, None)
+            await server.serve()
+
+        async def list_left_on_own_channel(params: InitializeParams) -> list[str]:
+            return await list_on_own_channel(serve_listing_channel, params)
+
+        async def open_left_turn_channel(
+            params: InitializeParams, session_id: str, interrupt: bool
+        ) -> None:
+            await resume_on_own_channel(
+                serve_own_channel, params, session_id, interrupt
+            )
+
+        try:
+            await serve_multiplexed(transport, create_channel)
+        finally:
+            await close_left_turns_first(services.left_turns, services.open_sessions)
+        return
+    if agent_socket is None:
+        process = HarnessProcess(
+            services=services,
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+        )
+        process.start_connector_warm_up()
+        harness = await create_harness_server(
+            transport, transport_kind="stdio", process=process
+        )
+    else:
+        harness = await create_harness_server(
+            transport,
+            transport_kind="stdio",
+            process=HarnessProcess(
+                services=services,
+                additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+                agent_socket=agent_socket,
+            ),
+        )
     await harness.serve()
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Mistral Vibe app server")
-    harness_group = parser.add_mutually_exclusive_group()
-    add_experimental_harness_argument(parser, group=harness_group)
-    harness_group.add_argument(
-        "--legacy-harness",
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--multiplex",
         action="store_true",
-        default=False,
-        help="Force the legacy Python harness, overriding the GrowthBook rollout.",
+        help="Serve isolated Unified Harness connections in one stdio process.",
     )
-    return parser.parse_args()
+    # Experimental and hidden, like `vibe -p --agent-socket`, which passes it:
+    # the protocol (vibe.app_server._agent_socket) may change without notice.
+    mode.add_argument(
+        "--agent-socket", type=Path, metavar="PATH", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--additional-builtin-plugin-root",
+        action="append",
+        dest="additional_builtin_plugin_roots",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Directory to discover built-in plugins from, in addition to the "
+            "ones shipped inside the package. May be given more than once."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> None:
+_PROCESS_TITLE = "vibe-app-server"
+
+
+def _set_process_title() -> None:
+    # Cosmetic, so it must never block startup: setproctitle can fail on exotic
+    # platforms or frozen builds. No-op for Windows Task Manager.
+    try:
+        import setproctitle
+
+        setproctitle.setproctitle(_PROCESS_TITLE)
+    except Exception:
+        pass
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_arguments(argv)
+    from vibe.core.paths import bootstrap_vibe_home
+
+    # Run the private-home gate before loading the normal runtime dependencies.
+    bootstrap_vibe_home()
+    from vibe._experimental_harness import ExperimentalHarnessUnavailableError
+    from vibe.core.config.harness_files import init_harness_files_manager
+    from vibe.core.paths import LOG_FILE
+    from vibe.observability.logging import init_file_logging
+    from vibe.observability.sentry import claim_cli_crash_report_dsn
+
+    _set_process_title()
+    claim_cli_crash_report_dsn()
     from vibe.core.config import load_dotenv_values
     from vibe.core.utils.windows_asyncio import (
         silence_proactor_transport_teardown_warnings,
     )
 
     silence_proactor_transport_teardown_warnings()
-    args = parse_arguments()
-    init_harness_files_manager("user", "project")
+    # The gate must run before the harness files manager and file logging:
+    # their mkdir(parents=True) calls are otherwise the first to materialize
+    # ~/.vibe, at permissive modes.
     init_file_logging(LOG_FILE.path)
     load_dotenv_values()
-    asyncio.run(
-        serve_stdio(
-            experimental_harness=args.experimental_harness,
-            legacy_harness=args.legacy_harness,
-        )
+    agent_socket = (
+        None if args.agent_socket is None else _connect_agent_socket(args.agent_socket)
     )
+    if agent_socket is None or agent_socket.sandbox is None:
+        init_harness_files_manager("user", "project")
+    else:
+        # The project lives in the sandbox: its files on this host's disk at
+        # the same path are not the project's.
+        init_harness_files_manager("user")
+    # The Unified Harness is the required default runtime: a missing,
+    # incompatible, or failed Runtime must abort startup with an actionable
+    # error instead of serving on the legacy fallback. Stdout stays clean for
+    # the JSON-RPC stream; the error goes to stderr with a non-zero exit.
+    try:
+        asyncio.run(
+            serve_stdio(
+                multiplex=args.multiplex,
+                additional_builtin_plugin_roots=args.additional_builtin_plugin_roots,
+                agent_socket=agent_socket,
+                end_on_sigterm=True,
+            )
+        )
+    except ExperimentalHarnessUnavailableError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        _neutralize_stdout()
+
+
+def _connect_agent_socket(path: Path) -> AgentSocketMount:
+    """Handshake before serving: whether the server serves a sandbox decides
+    which harness files load. A failed handshake fails every session open.
+    """
+    from vibe.app_server import _agent_socket
+
+    return asyncio.run(_agent_socket.AgentSocketMount.connect(path.expanduser()))
+
+
+def _neutralize_stdout() -> None:
+    """Prevent a disconnected client from breaking the interpreter's final flush."""
+    import os
+    import sys
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+    finally:
+        os.close(devnull)

@@ -1,14 +1,35 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AbstractAsyncContextManager
-from typing import Protocol
+from typing import Protocol, runtime_checkable
+
+from pydantic import JsonValue
 
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._model import ProtocolModel
 from vibe.app_server.models import PublicCallbackEntry
-from vibe.app_server.protocol import ClientCapabilities, ClientInfo
+from vibe.app_server.protocol import (
+    ClientCapabilities,
+    ClientInfo,
+    SessionPeerArchiveParams,
+    SessionPeerArchiveResponse,
+    SessionPeerListParams,
+    SessionPeerListResponse,
+    SessionPeerMarkSeenParams,
+    SessionPeerMarkSeenResponse,
+    SessionPeerReadParams,
+    SessionPeerReadResponse,
+    SessionPeerRenameParams,
+    SessionPeerRenameResponse,
+    SessionPeerRestoreParams,
+    SessionPeerRestoreResponse,
+    SessionPeerSendParams,
+    SessionPeerSendResponse,
+    SessionSpawnParams,
+    SessionSpawnResponse,
+)
+from vibe.core.platform_auth import PlatformCredentialProvider
 
 
 class SessionBackendServices(Protocol):
@@ -18,13 +39,9 @@ class SessionBackendServices(Protocol):
 
     def current_session_id(self) -> str: ...
 
-    def event_watermark(self, session_id: str) -> int: ...
-
     def account_gateway(self) -> AccountGateway | None: ...
 
     def identity_gateway(self) -> IdentityGateway | None: ...
-
-    def lifecycle_transition(self) -> AbstractAsyncContextManager[None]: ...
 
     def task_finished(self, task: asyncio.Task[None]) -> None: ...
 
@@ -32,10 +49,48 @@ class SessionBackendServices(Protocol):
 
     async def publish_callback(self, callback: PublicCallbackEntry) -> None: ...
 
-    async def record_child_notification(
-        self, method: str, params: ProtocolModel
-    ) -> None: ...
+    async def spawn_session(
+        self, params: SessionSpawnParams
+    ) -> SessionSpawnResponse: ...
 
-    async def request_client_result[ResultT: ProtocolModel](
-        self, method: str, params: ProtocolModel, response_type: type[ResultT]
-    ) -> ResultT: ...
+    async def list_peer_sessions(
+        self, params: SessionPeerListParams
+    ) -> SessionPeerListResponse: ...
+
+    async def read_peer_session(
+        self, params: SessionPeerReadParams
+    ) -> SessionPeerReadResponse: ...
+
+    async def send_to_peer_session(
+        self, params: SessionPeerSendParams
+    ) -> SessionPeerSendResponse: ...
+
+    async def archive_peer_sessions(
+        self, params: SessionPeerArchiveParams
+    ) -> SessionPeerArchiveResponse: ...
+
+    async def restore_peer_sessions(
+        self, params: SessionPeerRestoreParams
+    ) -> SessionPeerRestoreResponse: ...
+
+    async def rename_peer_session(
+        self, params: SessionPeerRenameParams
+    ) -> SessionPeerRenameResponse: ...
+
+    async def mark_peer_sessions_seen(
+        self, params: SessionPeerMarkSeenParams
+    ) -> SessionPeerMarkSeenResponse: ...
+
+
+@runtime_checkable
+class SessionBackendClientOwner(Protocol):
+    """Optional owner of the connection: its entrypoint and reported account."""
+
+    def client_owner(self) -> JsonValue: ...
+
+
+@runtime_checkable
+class SessionBackendPlatformCredentials(Protocol):
+    def platform_credentials(
+        self, api_key_env_var: str
+    ) -> PlatformCredentialProvider: ...

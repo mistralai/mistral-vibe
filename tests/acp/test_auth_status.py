@@ -17,7 +17,7 @@ from vibe.core.config import (
 )
 from vibe.core.types import Backend
 from vibe.setup.auth import AuthStateKind
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.onboarding_context import OnboardingContext
 
 
 @pytest.fixture(autouse=True)
@@ -58,8 +58,11 @@ def build_acp_agent_loop(
     *,
     environ_before_dotenv_load: dict[str, str] | None = None,
 ) -> VibeAcpAgentLoop:
+    async def context_loader() -> OnboardingContext:
+        return OnboardingContext(provider=provider)
+
     return VibeAcpAgentLoop(
-        onboarding_context_loader=lambda: OnboardingContext(provider=provider),
+        onboarding_context_loader=context_loader,
         environ_before_dotenv_load=environ_before_dotenv_load,
     )
 
@@ -83,7 +86,28 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.SIGNED_OUT.value,
             "signOutAvailable": False,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
+
+    @pytest.mark.asyncio
+    async def test_auth_status_loads_the_onboarding_context_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
+        loads = 0
+
+        async def counting_loader() -> OnboardingContext:
+            nonlocal loads
+            loads += 1
+            return OnboardingContext(provider=build_mistral_provider())
+
+        acp_agent_loop = VibeAcpAgentLoop(onboarding_context_loader=counting_loader)
+
+        before = loads
+        await acp_agent_loop.ext_method("auth/status", {})
+
+        assert loads - before == 1
 
     @pytest.mark.asyncio
     async def test_returns_sign_out_available_for_default_dotenv_key(
@@ -100,6 +124,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE.value,
             "signOutAvailable": True,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -123,6 +149,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE.value,
             "signOutAvailable": True,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -139,6 +167,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.PROCESS_ENV.value,
             "signOutAvailable": False,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -156,6 +186,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.PROCESS_ENV.value,
             "signOutAvailable": False,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -175,6 +207,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.OS_KEYRING.value,
             "signOutAvailable": True,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -193,6 +227,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.AUTH_NOT_REQUIRED.value,
             "signOutAvailable": False,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -210,6 +246,8 @@ class TestACPAuthStatus:
             "authState": AuthStateKind.UNSUPPORTED_PROVIDER.value,
             "signOutAvailable": False,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
 
@@ -236,6 +274,8 @@ class TestACPAuthSignOut:
             "authState": AuthStateKind.SIGNED_OUT.value,
             "signOutAvailable": False,
             "customDomain": None,
+            "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio

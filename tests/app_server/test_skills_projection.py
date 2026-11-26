@@ -8,17 +8,22 @@ projection refuses to hand over.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+import os
 from pathlib import Path
+import shutil
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.app_server._skills import (
     SkillProjection,
-    builtin_skills_dir,
     discover_session_skills,
     project_core_skills,
 )
+from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
 
 if TYPE_CHECKING:
@@ -33,6 +38,7 @@ def _skill(
     path: Path | None = None,
     description: str = "Does a thing.",
     source: SkillSource = SkillSource.LOCAL,
+    model_invocable: bool = True,
 ) -> SkillInfo:
     return SkillInfo(
         name=name,
@@ -41,6 +47,7 @@ def _skill(
         prompt=f"Body of {name}.",
         source=source,
         scope=SkillScope.PROJECT,
+        model_invocable=model_invocable,
     )
 
 
@@ -99,6 +106,39 @@ def test_every_advertised_skill_has_a_body_the_runtime_can_serve(
     assert set(projection.payloads) == {"review", "toolkit:deploy"}
     assert "Body of review." in projection.payloads["review"]
     assert "Body of deploy." in projection.payloads["toolkit:deploy"]
+
+
+def test_explicit_only_skills_stay_in_catalogue_but_not_model_capabilities(
+    tmp_path: Path,
+) -> None:
+    automatic_path = _write_skill(tmp_path / "root", "automatic")
+    root_explicit_path = _write_skill(tmp_path / "root", "root-explicit")
+    plugin_explicit_path = _write_skill(tmp_path / "plugin", "plugin-explicit")
+    plugin_alias = "toolkit:plugin-explicit"
+
+    projection = project_core_skills(
+        {
+            "automatic": _skill("automatic", path=automatic_path),
+            "root-explicit": _skill(
+                "root-explicit", path=root_explicit_path, model_invocable=False
+            ),
+        },
+        plugin_skills={
+            plugin_alias: _skill(
+                plugin_alias,
+                path=plugin_explicit_path,
+                source=SkillSource.PLUGIN,
+                model_invocable=False,
+            )
+        },
+        plugin_contexts=[_plugin_context((plugin_alias, str(plugin_explicit_path)))],
+    )
+
+    assert [definition.name for definition in projection.definitions] == ["automatic"]
+    assert projection.plugin_contexts[0].capabilities.skills == []
+    assert set(projection.model_payloads) == {"automatic"}
+    assert set(projection.payloads) == {"automatic", "root-explicit", plugin_alias}
+    assert {skill.name for skill in projection.catalogue} == set(projection.payloads)
 
 
 def test_a_plugin_skill_is_offered_to_the_client_under_its_alias(
@@ -280,96 +320,20 @@ def test_a_skill_core_would_reject_is_dropped_without_taking_the_others_down() -
     assert set(projection.payloads) == {"review"}
 
 
-def test_builtin_skills_are_written_to_disk_so_core_has_an_honest_path() -> None:
-    """Prepare the shipped builtins, which carry no ``skill_path``.
+def test_a_root_skill_without_a_path_is_dropped_not_raised() -> None:
+    """Prepare a pathless root skill.
 
-    Do project them.
+    Do project it.
 
-    Assert each got a real ``SKILL.md``. Core requires the path to end in
-    ``SKILL.md`` and the prompt tells the model those paths are readable, so a
-    fabricated one would be a lie the model can act on.
+    Assert nothing raises and no definition survives. A skill the session
+    cannot point at on disk is a degraded session, not a dead one.
     """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
     projection = project_core_skills(
-        BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[]
-    )
-
-    assert {definition.name for definition in projection.definitions} == set(
-        BUILTIN_SKILLS
-    )
-    for definition in projection.definitions:
-        path = Path(definition.path)
-        assert path.is_file()
-        assert path.parent.parent == builtin_skills_dir()
-        assert BUILTIN_SKILLS[definition.name].prompt in path.read_text(
-            encoding="utf-8"
-        )
-
-
-def test_materializing_a_builtin_twice_leaves_the_file_alone() -> None:
-    """Prepare a projection that has already run once.
-
-    Do project again.
-
-    Assert the file was not rewritten. Every derivation re-projects, and a
-    rewrite per derivation would churn mtimes a file watcher reacts to.
-    """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    first = project_core_skills(BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[])
-    path = Path(first.definitions[0].path)
-    stamp = path.stat().st_mtime_ns
-
-    second = project_core_skills(BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[])
-
-    assert Path(second.definitions[0].path) == path
-    assert path.stat().st_mtime_ns == stamp
-
-
-def test_a_builtin_that_cannot_be_written_is_dropped_not_raised(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Prepare a read-only home so materialization fails.
-
-    Do project the builtins.
-
-    Assert nothing raises and no definition survives. A home Vibe cannot write
-    to is a degraded session, not a dead one.
-    """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    def _refuse(*args: object, **kwargs: object) -> None:
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(Path, "mkdir", _refuse)
-    monkeypatch.setattr(Path, "write_text", _refuse)
-
-    projection = project_core_skills(
-        BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[]
+        {"ghost": _skill("ghost")}, plugin_skills={}, plugin_contexts=[]
     )
 
     assert projection.definitions == ()
     assert projection.payloads == {}
-
-
-def test_materialization_does_not_change_what_a_builtin_reports_as_its_source() -> None:
-    """Prepare the builtins.
-
-    Do project them.
-
-    Assert they still report ``BUILTIN``. The write target is deliberately a
-    sibling of the skills search path: inside it, ``SkillManager`` would
-    rediscover the builtins as ``LOCAL`` and the CLI would relabel them.
-    """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    project_core_skills(BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[])
-
-    for skill in BUILTIN_SKILLS.values():
-        assert skill.source is SkillSource.BUILTIN
-        assert skill.skill_path is None
-    assert builtin_skills_dir().name not in {"skills"}
 
 
 def test_a_plugin_definition_without_a_resolved_skill_is_left_without_a_payload(
@@ -439,29 +403,99 @@ def test_denying_the_skill_tool_denies_plugin_skills_too(tmp_path: Path) -> None
     assert "toolkit:deploy" in {skill.name for skill in denied.catalogue}
 
 
-def test_a_unified_session_takes_the_builtins_from_the_plugin_not_from_python(
+@pytest.mark.usefixtures("config_dir")
+@pytest.mark.parametrize(("registry", "winner"), [(False, "host"), (True, "project")])
+def test_a_sandbox_ranks_its_project_skills_as_the_host_ranks_its_own(
+    tmp_path: Path, registry: bool, winner: str
+) -> None:
+    from vibe.core.config.harness_files import HarnessFilesManager
+
+    configured = tmp_path / "configured"
+    host = configured / "deploy" / "SKILL.md"
+    host.parent.mkdir(parents=True)
+    host.write_text(
+        "---\nname: deploy\ndescription: Ships it.\n---\n\n# deploy\n", encoding="utf-8"
+    )
+    paths = {"host": host, "project": tmp_path / "sandbox" / "deploy" / "SKILL.md"}
+    config = build_test_vibe_config(
+        skill_paths=[configured], experimental_enable_registry_skills=registry
+    )
+
+    manager = SkillManager(
+        lambda: config,
+        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
+        project_skills={"deploy": _skill("deploy", path=paths["project"])},
+    )
+
+    assert manager.available_skills["deploy"].skill_path == paths[winner]
+
+
+def test_a_sessions_derivation_marks_the_registry_versions_it_loads_used(
     tmp_path: Path,
 ) -> None:
-    """Prepare a session whose only plugin is the shipped ``vibe`` one.
-
-    Do discover the catalogue.
-
-    Assert no Python builtin came through as a root skill. They reach a unified
-    session as ``vibe:`` plugin skills, so loading them here as well would offer
-    each one twice, under two names, out of two copies free to disagree.
-    """
-    from vibe.core.config import VibeConfigSchema
+    from tests.skills.registry.conftest import make_item
     from vibe.core.config.harness_files import HarnessFilesManager
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
+    from vibe.core.skills.models import ManifestEntry
+    from vibe.core.skills.registry import _manifest, _store
+    from vibe.core.skills.registry._manifest import SkillManifest
 
-    _, projection = discover_session_skills(
-        VibeConfigSchema,
+    config = build_test_vibe_config(experimental_enable_registry_skills=True)
+    _manifest.save_sync(
+        _manifest.global_manifest_path(),
+        SkillManifest(skills=[ManifestEntry(name="deploy", skill_id="cid")]),
+    )
+    _store._materialize(make_item(skill_id="cid", version=1), "deploy")
+    marker = _store.used_marker("cid", 1)
+    marker.touch()
+    long_ago = time.time() - 40 * 24 * 3600
+    os.utime(marker, (long_ago, long_ago))
+
+    discover_session_skills(
+        lambda: config,
         harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
         plugin_skills={},
         plugin_contexts=[],
         skill_tool_available=True,
     )
 
-    offered = {definition.name for definition in projection.definitions}
-    assert offered.isdisjoint(BUILTIN_SKILLS)
-    assert {skill.name for skill in projection.catalogue}.isdisjoint(BUILTIN_SKILLS)
+    assert marker.stat().st_mtime > time.time() - 60
+
+
+def test_a_derivation_that_loses_a_version_as_it_reads_it_resolves_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.skills.registry.conftest import make_item
+    from vibe.app_server import _skills
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.skills.models import ManifestEntry
+    from vibe.core.skills.registry import _manifest, _store
+    from vibe.core.skills.registry._manifest import SkillManifest
+
+    config = build_test_vibe_config(experimental_enable_registry_skills=True)
+    _manifest.save_sync(
+        _manifest.global_manifest_path(),
+        SkillManifest(skills=[ManifestEntry(name="deploy", skill_id="cid")]),
+    )
+    for version in (1, 2):
+        _store._materialize(make_item(skill_id="cid", version=version), "deploy")
+    mark = _skills.mark_versions_used
+    evicted: list[bool] = []
+
+    def evicted_once_read(versions: Iterable[tuple[str, int]]) -> bool:
+        if not evicted:
+            shutil.rmtree(_store.skill_dir("cid", 2))
+            evicted.append(True)
+        return mark(versions)
+
+    monkeypatch.setattr(_skills, "mark_versions_used", evicted_once_read)
+
+    _, projection = discover_session_skills(
+        lambda: config,
+        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
+        plugin_skills={},
+        plugin_contexts=[],
+        skill_tool_available=True,
+    )
+
+    assert dict(projection.registry_versions) == {"deploy": ("cid", 1)}
+    assert not _store.used_marker("cid", 2).exists()

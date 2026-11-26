@@ -13,8 +13,10 @@ from typing import cast
 
 import pytest
 
+import vibe.app_server._cached_layers as cached_layers_module
+from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._host import HostRequestHandler
-import vibe.app_server._runtime as runtime_module
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.protocol import AgentsListParams, AgentsListResponse
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.experiments.active import ExperimentName
@@ -33,19 +35,27 @@ def _smart_approve_available_response() -> EvalResponse:
 
 @pytest.mark.asyncio
 async def test_agents_list_offers_smart_approve_from_cached_experiment(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setattr(
-        runtime_module,
+        cached_layers_module,
         "load_cached_eval_response",
-        lambda _config: _smart_approve_available_response(),
+        lambda _config, _credentials=None: _smart_approve_available_response(),
     )
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
+    )
 
     result = await handler.dispatch(
-        "agents/list", AgentsListParams().model_dump(mode="json", by_alias=True)
+        "agents/list",
+        AgentsListParams().model_dump(mode="json", by_alias=True),
+        client_info=ClientInfo(name="test-client", version="0.0.0"),
     )
 
     response = cast(AgentsListResponse, result.response)
-    names = [agent.name for agent in response.agents]
+    names = [policy.name for policy in response.approval_policies]
     assert "smart-approve" in names

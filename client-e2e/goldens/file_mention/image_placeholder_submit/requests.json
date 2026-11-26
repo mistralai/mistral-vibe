@@ -1,0 +1,43 @@
+[
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "@/tmp/vibe-e2e-shot.png what is this",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "[Image #1] what is this",
+       "type": "text"
+      },
+      {
+       "altText": "[Image #1]",
+       "mediaType": "image/png",
+       "type": "image",
+       "uri": "file:///vibe-e2e-snapshots/shot.png"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

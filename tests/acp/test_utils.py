@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from vibe.acp.utils import build_mode_state, build_permission_options
+from vibe.acp.utils import (
+    ToolOption,
+    build_agent_config,
+    build_mode_state,
+    build_permission_options,
+)
 from vibe.agents import AgentSafety, AgentType
-from vibe.app_server.models import AgentSummary
-from vibe.permissions import PermissionScope, RequiredPermission
+from vibe.app_server.models import AgentSummary, ApprovalPolicySummary
+from vibe.permissions import PathGrantScope, PermissionScope, RequiredPermission
 
 
 def test_build_permission_options_serializes_scopes_with_snake_case_keys() -> None:
@@ -33,28 +38,92 @@ def test_build_permission_options_serializes_scopes_with_snake_case_keys() -> No
         assert option.field_meta["required_permissions"] == expected_meta
 
 
-def _agent(
-    name: str,
-    *,
-    safety: AgentSafety = AgentSafety.NEUTRAL,
-    agent_type: AgentType = AgentType.AGENT,
-) -> AgentSummary:
+def test_build_permission_options_exposes_exact_file_scope() -> None:
+    required = [
+        RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern="/outside/config.json",
+            session_pattern="vibe-path:exact:/outside/config.json",
+            label="outside workdir (/outside/config.json)",
+        )
+    ]
+
+    options = build_permission_options(required, [PathGrantScope.EXACT])
+
+    assert [option.option_id for option in options] == [
+        ToolOption.ALLOW_ONCE,
+        ToolOption.ALLOW_SESSION_EXACT,
+        ToolOption.ALLOW_PERMANENT_EXACT,
+        ToolOption.REJECT_ONCE,
+    ]
+    assert [option.name for option in options] == [
+        "Allow once",
+        "Allow this file only for this session",
+        "Always allow this file",
+        "Deny",
+    ]
+
+
+def test_build_permission_options_exposes_recursive_folder_scope() -> None:
+    options = build_permission_options([], [PathGrantScope.DIRECTORY_RECURSIVE])
+
+    assert [option.name for option in options] == [
+        "Allow once",
+        "Allow this folder for this session",
+        "Always allow this folder",
+        "Deny",
+    ]
+
+
+def test_build_permission_options_names_every_recursive_folder() -> None:
+    required = [
+        RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern=path,
+            session_pattern=f"vibe-path:exact:{path}",
+            label=f"outside workdir ({path})",
+            path_scope_root=path,
+        )
+        for path in ("/etc", "/var/log")
+    ]
+
+    options = build_permission_options(required, [PathGrantScope.DIRECTORY_RECURSIVE])
+
+    assert [option.name for option in options] == [
+        "Allow once",
+        "Allow these folders for this session",
+        "Always allow these folders",
+        "Deny",
+    ]
+
+
+def _policy(
+    name: str, *, safety: AgentSafety = AgentSafety.NEUTRAL
+) -> ApprovalPolicySummary:
+    return ApprovalPolicySummary(
+        name=name,
+        display_name=name.replace("-", " ").title(),
+        description=f"{name} policy",
+        safety=safety,
+    )
+
+
+def _agent(name: str, *, agent_type: AgentType = AgentType.AGENT) -> AgentSummary:
     return AgentSummary(
         name=name,
         display_name=name.replace("-", " ").title(),
-        description=f"{name} mode",
-        safety=safety,
+        description=f"{name} agent",
         agent_type=agent_type,
     )
 
 
 def test_build_mode_state_includes_active_mode_hidden_from_picker() -> None:
-    # A session can run a mode the rollout gate hides from the offered list
+    # A session can run a policy the rollout gate hides from the offered list
     # (e.g. smart-approve after its experiment flag lapses). The advertised list
-    # must still contain the active mode so the client can label it and switch
+    # must still contain the active one so the client can label it and switch
     # away from it.
-    offered = [_agent("ask"), _agent("auto-approve", safety=AgentSafety.YOLO)]
-    active = _agent("smart-approve", safety=AgentSafety.SMART)
+    offered = [_policy("ask"), _policy("auto-approve", safety=AgentSafety.YOLO)]
+    active = _policy("smart-approve", safety=AgentSafety.SMART)
 
     state, option = build_mode_state(offered, active)
 
@@ -67,8 +136,8 @@ def test_build_mode_state_includes_active_mode_hidden_from_picker() -> None:
 
 
 def test_build_mode_state_does_not_duplicate_active_mode() -> None:
-    auto = _agent("auto-approve", safety=AgentSafety.YOLO)
-    offered = [_agent("ask"), auto]
+    auto = _policy("auto-approve", safety=AgentSafety.YOLO)
+    offered = [_policy("ask"), auto]
 
     state, option = build_mode_state(offered, auto)
 
@@ -78,15 +147,22 @@ def test_build_mode_state_does_not_duplicate_active_mode() -> None:
     assert option_values.count("auto-approve") == 1
 
 
-def test_build_mode_state_excludes_subagents_but_keeps_active() -> None:
+def test_build_agent_config_lists_primary_agents_only() -> None:
     offered = [
-        _agent("ask"),
-        _agent("explore", safety=AgentSafety.SAFE, agent_type=AgentType.SUBAGENT),
+        _agent("default"),
+        _agent("explore", agent_type=AgentType.SUBAGENT),
+        _agent("task-lead"),
     ]
-    active = _agent("smart-approve", safety=AgentSafety.SMART)
 
-    state, _ = build_mode_state(offered, active)
+    option = build_agent_config(offered, offered[2])
 
-    mode_ids = [mode.id for mode in state.available_modes]
-    assert "explore" not in mode_ids
-    assert "smart-approve" in mode_ids
+    assert option is not None
+    assert option.id == "agent"
+    assert option.current_value == "task-lead"
+    assert [choice.value for choice in option.options] == ["default", "task-lead"]
+
+
+def test_build_agent_config_is_left_out_with_one_agent() -> None:
+    offered = [_agent("default"), _agent("explore", agent_type=AgentType.SUBAGENT)]
+
+    assert build_agent_config(offered, offered[0]) is None

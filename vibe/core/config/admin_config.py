@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict
 
+from vibe.core.platform_auth import PlatformCredentialProvider
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.core.utils.retry import async_retry
 from vibe.observability.logging import logger
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 # Served by Vibe server app, so this is appended to vibe_base_url
 # e.g. https://chat.mistral.ai/api/v1/code/managed-config.
@@ -65,37 +66,46 @@ class AdminConfigApplyResult:
 
 
 @async_retry(tries=MANAGED_CONFIG_RETRY_TRIES, delay_seconds=0.5, backoff_factor=2.0)
-async def _fetch_response(url: str, headers: dict[str, str]) -> httpx.Response:
-    async with VibeAsyncHTTPClient(verify=build_ssl_context()) as client:
-        response = await client.get(
-            url, headers=headers, timeout=MANAGED_CONFIG_TIMEOUT
-        )
-        response.raise_for_status()
-        return response
+async def _fetch_response(
+    url: str, credentials: PlatformCredentialProvider
+) -> httpx2.Response:
+    response = await credential_request(
+        credentials, "GET", url, timeout=MANAGED_CONFIG_TIMEOUT
+    )
+    response.raise_for_status()
+    return response
 
 
-async def fetch_managed_config(base_url: str, api_key: str) -> ManagedConfigResult:
-    """Fetch the org/workspace-enforced config for the given Mistral API key.
+async def fetch_managed_config(
+    base_url: str, credentials: PlatformCredentialProvider
+) -> ManagedConfigResult:
+    """Fetch the org/workspace-enforced config for the given Mistral credential.
 
     ``base_url`` is the Vibe server base (``vibe_base_url``, e.g.
     ``https://chat.mistral.ai``) that serves the managed-config endpoint.
 
     Transient failures (network errors, 5xx, 429) are retried with exponential
     backoff. On any failure the returned result carries an ``error`` message and
-    no config, so the admin layer stays empty and a fetch problem has no impact
-    on the client.
+    no config: the caller keeps what the admin layer already holds (the cached
+    copy, at a session start), and a fetch problem never stops the client.
     """
     url = f"{base_url.rstrip('/')}{MANAGED_CONFIG_PATH}"
-    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        response = await _fetch_response(url, headers)
-    except httpx.HTTPStatusError as exc:
+        response = await _fetch_response(url, credentials)
+    except httpx2.HTTPStatusError as exc:
         logger.debug(
             "Managed config fetch status=%s url=%s", exc.response.status_code, url
         )
         return ManagedConfigResult(error=f"HTTP {exc.response.status_code}")
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.debug("Managed config fetch failed url=%s error=%s", url, exc)
+        return ManagedConfigResult(error=str(exc))
+    except Exception as exc:
+        # The promise above is unconditional, so it has to cover the failures
+        # that never reach the wire: a trust store that will not build, a
+        # malformed proxy in the environment. Callers fail open on an empty
+        # admin layer; they have no answer for an exception.
+        logger.debug("Managed config fetch errored url=%s error=%s", url, exc)
         return ManagedConfigResult(error=str(exc))
 
     try:

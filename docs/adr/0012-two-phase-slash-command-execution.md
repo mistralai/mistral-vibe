@@ -2,30 +2,43 @@
 
 ## Decision
 
-The app server queue contains structured user turns only. The Textual client
-does not keep a second queue for slash commands, shell commands, or deferred
-settings writes.
+The Runtime-owned accepted queue, exposed through the app server, contains
+structured user turns only. App-server modules enforce product command policy.
+The terminal client does not keep a second queue for slash commands, shell
+commands or deferred settings writes.
 
 Slash commands have two execution policies:
 
-- Commands with `side_channel=True` may run immediately while an agent turn or
-  shell command is active. `SideChannelController` allows one such command at a
-  time.
+- Commands marked `side_channel` may run immediately while an agent turn or
+  shell command is active. Only one such command runs at a time.
 - All other slash commands require an idle session. If the user submits one
   while busy, the client keeps the text in the input and shows a warning.
+
+A paused queue (after an interrupted or failed turn) waits for the user, so the
+session counts as idle for slash commands. Only commands that replace the
+session or its history, and drop the queue with it (`/clear`, `/compact`,
+`/rewind`, `/resume`), wait until the user resumes or empties the queue.
+`/retry` starts its injected turn ahead of the held prompts. The local runtime
+admits an injected `turn/start` past a paused queue, refuses any other direct
+start while the queue holds turns, and resumes the queue once the injected turn
+completes; a failed or interrupted retry leaves it paused. App-server callers
+that inject turns on their own, such as goal continuations, keep checking for a
+paused queue first. The target runtime must match this before injected starts
+move to the Session API.
 
 Shell commands also require an idle session. They are rejected while an agent
 turn, another shell command, or accepted queued prompt is active.
 
-Settings commands such as `/model`, `/thinking`, `/theme`, `/voice`, and
-`/proxy-setup` open their picker only while idle. Once the user confirms a
-choice, the client sends the app-server config request directly and waits for
-the result. There is no deferred client-side persistence queue.
+Settings a turn reads open their picker only while idle; settings no turn reads
+may be side-channel commands. Once the user confirms a choice, the client sends
+the app-server request directly, and the app server decides whether a running
+turn blocks that write. There is no deferred client-side persistence queue.
 
 ## Rationale
 
-The app server is the single owner of turn ordering. A second Textual queue for
-commands and shell work duplicated scheduling rules and forced the UI to keep a
+Runtime is the single owner of accepted turn ordering; the app server enforces
+command policy through its session capabilities. A second client-side queue for
+commands and shell work duplicates scheduling rules and forces the UI to keep a
 drain task, command barriers, discard callbacks, and picker coordination.
 
 Rejecting non-side-channel commands while busy makes the behavior explicit and
@@ -33,15 +46,36 @@ keeps the client small. It also avoids ordering ambiguities such as whether a
 queued `/clear` should discard prompts that the app server has already
 accepted.
 
-Settings writes require the session to be idle because they can rebuild model,
-tool, skill, and prompt state. Since their commands cannot open while busy,
-their handlers can persist directly without retry or deferral logic.
+Settings writes that a turn reads require the session to be idle because they
+can rebuild model, tool, skill, and prompt state. Since their commands cannot
+open while busy, their handlers can persist directly without retry or deferral
+logic.
 
 ## Side-channel rules
 
 A side-channel command must be safe to run alongside active work. Suitable
-commands display information, copy data, or exit. They must not mutate runtime
-configuration, session history, or other state used by the active turn.
+commands display information, copy data, exit, write settings no turn reads, or
+fork a detached copy of the session. They must not mutate session history or
+configuration the active turn reads.
+
+`/branch` forks while a turn runs: the Harness cuts the copy before that turn,
+whose history is not committed yet. The fork holds the source's turn-start lock
+while it copies, so queued prompts wait for it. A turn an automatic compaction
+merged into its summary refuses the fork until it ends.
+
+Left and `/sessions` open the Sessions page as a side-channel command. While
+busy, the page only lists and reads sessions, lists projects, renames any
+session, and archives or marks as seen a session other than the busy one. It
+refuses to switch to another session until the turn ends. `/resume` opens the
+same page but stays idle-only, since it attaches another session.
+
+MCP, connector, and plugin changes stay idle-only: the Harness refuses them
+while a turn runs.
+
+`/skills` is side-channel: its reads never touch the turn, and a skill change
+made during a turn is persisted at once and parked until the turn ends, like
+`config/model/write` and the skill folder watch. The answer says `pending`, and
+the running turn keeps the skills it bound at its start.
 
 If one side-channel command is already running, a second one is rejected with a
 warning. Side-channel commands are not queue items and do not appear in the
@@ -49,12 +83,18 @@ queued-message UI.
 
 ## Agent Guidance
 
-- Add `side_channel=True` only when the command is safe during an active turn or
-  shell command.
+- Mark a command `side_channel` only when it is safe during an active turn or
+  shell command, and make sure every app-server and Harness call behind it
+  accepts a running turn, with a backend contract test against the real
+  adapter.
+- Add a config path to `config/write`'s turn-independent allowlist only when no
+  turn, tool, or prompt reads it.
+- Mark a side-channel command `.after_jobs()` when its server write conflicts
+  with a compaction, project request, or agent install.
 - Keep lifecycle commands such as `/clear`, `/compact`, `/rewind`, `/resume`,
   and `/retry` on the idle-only path.
-- Keep settings commands on the idle-only path and write config directly after
-  the user confirms the picker.
+- Keep settings commands that a turn reads on the idle-only path and write
+  config directly after the user confirms the picker.
 - Do not add command, shell, callback, or barrier variants to the prompt queue.
   New queued work belongs in an explicit app-server API.
 - Preserve the submitted input when rejecting a busy command so the user can

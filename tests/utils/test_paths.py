@@ -107,3 +107,19 @@ def test_input_path_rejects_unanchored_paths(raw: str) -> None:
 @pytest.mark.usefixtures("on_windows")
 def test_input_path_passes_through_resolvable_windows_inputs(raw: str) -> None:
     assert normalize_windows_input_path(raw) == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("C:\\Users\\acmedev\\repo", "/c/Users/acmedev/repo"),
+        ("D:/work/repo", "/d/work/repo"),
+        ("C:\\", "/c/"),
+        ("\\\\server\\share\\repo", "\\\\server\\share\\repo"),
+        ("C:file", "C:file"),
+        ("C:", "C:"),
+        ("src/main.py", "src/main.py"),
+    ],
+)
+def test_to_git_bash_path(raw: str, expected: str) -> None:
+    assert paths.to_git_bash_path(raw) == expected

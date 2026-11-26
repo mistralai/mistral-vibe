@@ -7,9 +7,8 @@ import shutil
 from typing import Any
 
 from vibe.core.config import SessionLoggingConfig
-from vibe.core.session import last_session_pointer
+from vibe.core.session.metadata import persist_metadata
 from vibe.core.session.session_loader import METADATA_FILENAME, SessionLoader
-from vibe.core.session.session_logger import SessionLogger
 from vibe.utils.io import read_safe
 
 
@@ -64,7 +63,7 @@ async def update_saved_session_title_at_path(
     metadata = _load_raw_metadata(session_dir)
 
     updated_metadata = {**metadata, "title": normalized_title, "title_source": "manual"}
-    await SessionLogger.persist_metadata(updated_metadata, session_dir)
+    await persist_metadata(updated_metadata, session_dir)
     return updated_metadata
 
 
@@ -73,6 +72,31 @@ async def update_saved_session_title(
 ) -> dict[str, Any]:
     session_dir = _resolve_saved_session_dir(session_id, session_config)
     return await update_saved_session_title_at_path(session_dir, title)
+
+
+async def update_saved_session_pin_at_path(
+    session_dir: Path, pinned_at: str | None
+) -> dict[str, Any]:
+    """Pin or unpin a session no agent is holding, by rewriting the record.
+
+    Unified's merged catalogue uses this for sessions in the older store.
+    Unpinning clears the timestamp; repeated pinning keeps the original so
+    the pinned shelf does not reorder.
+    """
+    metadata = _load_raw_metadata(session_dir)
+    existing = metadata.get("pinned_at")
+    if pinned_at is not None and isinstance(existing, str):
+        return metadata
+    updated_metadata = {**metadata, "pinned_at": pinned_at}
+    await persist_metadata(updated_metadata, session_dir)
+    return updated_metadata
+
+
+async def update_saved_session_pin(
+    session_id: str, pinned_at: str | None, session_config: SessionLoggingConfig
+) -> dict[str, Any]:
+    session_dir = _resolve_saved_session_dir(session_id, session_config)
+    return await update_saved_session_pin_at_path(session_dir, pinned_at)
 
 
 async def relocate_saved_session_at_path(
@@ -89,9 +113,13 @@ async def relocate_saved_session_at_path(
 
     Nothing else moves. A detached session holds no trust grant, no harness
     root and no config layer to re-root -- those are built from this record the
-    next time it is opened, which is why the move is only this.
+    next time it is opened, which is why the move is only this. The recorded
+    repository and checkout belonged to the old folder, so they are dropped and
+    looked up again the next time the record is written.
     """
     metadata = _load_raw_metadata(session_dir)
+    metadata.pop("repository_root", None)
+    metadata.pop("checkout_root", None)
     environment = {**(metadata.get("environment") or {})}
     origin = metadata.get("origin_directory") or environment.get("working_directory")
     environment["working_directory"] = str(cwd)
@@ -101,7 +129,7 @@ async def relocate_saved_session_at_path(
         "environment": environment,
         "origin_directory": origin,
     }
-    await SessionLogger.persist_metadata(updated_metadata, session_dir)
+    await persist_metadata(updated_metadata, session_dir)
     return updated_metadata
 
 
@@ -118,9 +146,7 @@ async def delete_saved_session(
     """Remove a saved session, reporting whether this store held one."""
     session_dir = _find_saved_session_dir(session_id, session_config)
     if session_dir is None:
-        last_session_pointer.clear_matching(session_config, session_id)
         return False
 
     await asyncio.to_thread(shutil.rmtree, session_dir)
-    last_session_pointer.clear_matching(session_config, session_id)
     return True

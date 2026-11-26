@@ -10,7 +10,7 @@ from vibe.core.telemetry.send import (
     send_unified_subagent_tool_call_finished,
     send_unified_tool_call_finished,
 )
-from vibe.core.telemetry.types import TelemetryCallType
+from vibe.core.telemetry.types import AttachmentKind, TelemetryCallType
 
 __all__ = ["SessionTelemetry"]
 
@@ -47,6 +47,9 @@ class SessionTelemetry:
         """Pre-mark a resumed session's terminal effects so they never re-emit."""
         self._recorded.add(effect_id)
 
+    def is_recorded(self, effect_id: str) -> bool:
+        return effect_id in self._recorded
+
     def claim(self, effect_id: str) -> bool:
         """Return ``True`` the first time an effect id is seen, ``False`` after.
 
@@ -66,6 +69,9 @@ class SessionTelemetry:
         nb_context_messages: int,
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
+        reasoning_effort: str,
+        message_id: str | None = None,
+        attachment_counts: dict[AttachmentKind, int] | None = None,
     ) -> None:
         self._client.send_request_sent(
             model=model,
@@ -73,9 +79,37 @@ class SessionTelemetry:
             nb_context_messages=nb_context_messages,
             nb_prompt_chars=nb_prompt_chars,
             call_type=call_type,
+            reasoning_effort=reasoning_effort,
+            message_id=message_id,
+            attachment_counts=attachment_counts,
         )
 
-    def record_tool_call_finished(
+    def record_tool_call_detected(
+        self,
+        *,
+        model: str,
+        backend: str,
+        api_style: str,
+        call_type: TelemetryCallType,
+        reasons: list[str],
+        nb_unusable_attempts: int,
+        nb_dropped_tool_calls: int,
+        status: Literal["success", "error"],
+        message_id: str | None = None,
+    ) -> None:
+        self._client.send_tool_call_detected(
+            model=model,
+            backend=backend,
+            api_style=api_style,
+            call_type=call_type,
+            reasons=reasons,
+            nb_unusable_attempts=nb_unusable_attempts,
+            nb_dropped_tool_calls=nb_dropped_tool_calls,
+            status=status,
+            message_id=message_id,
+        )
+
+    def record_tool_call_finished(  # noqa: PLR0913
         self,
         *,
         tool_name: str,
@@ -84,6 +118,14 @@ class SessionTelemetry:
         nb_files_created: int,
         nb_files_modified: int,
         file_extension: str | None,
+        approval_policy: str | None = None,
+        message_id: str | None = None,
+        decision: Literal["execute", "skip"] | None = None,
+        approval_type: Literal["always", "never", "ask"] | None = None,
+        approval_source: Literal["config", "smart", "user", "bypass", "never"]
+        | None = None,
+        error_code: str | None = None,
+        error_reason: str | None = None,
     ) -> None:
         send_unified_tool_call_finished(
             self._client,
@@ -91,9 +133,16 @@ class SessionTelemetry:
             status=status,
             model=self._model,
             agent_profile_name=agent_profile_name,
+            approval_policy=approval_policy,
             nb_files_created=nb_files_created,
             nb_files_modified=nb_files_modified,
             file_extension=file_extension,
+            message_id=message_id,
+            decision=decision,
+            approval_type=approval_type,
+            approval_source=approval_source,
+            error_code=error_code,
+            error_reason=error_reason,
         )
 
     def record_subagent_tool_call_finished(
@@ -102,13 +151,17 @@ class SessionTelemetry:
         operation: SubagentOperation,
         outcome: SubagentOutcome,
         profile_source: SubagentProfileSource | None,
+        caller_agent_path: str,
+        message_id: str | None = None,
     ) -> None:
         send_unified_subagent_tool_call_finished(
             self._client,
             operation=operation,
             outcome=outcome,
             model=self._model,
+            caller_agent_path=caller_agent_path,
             profile_source=profile_source,
+            message_id=message_id,
         )
 
     def record_auto_compact_triggered(
@@ -128,3 +181,112 @@ class SessionTelemetry:
         self, *, reason: Literal["tool_call", "empty_summary"]
     ) -> None:
         self._client.send_compaction_failed(reason=reason)
+
+    def record_artifact_detected(
+        self,
+        *,
+        provider: Literal["github", "gitlab"],
+        cli_source: Literal["system", "bundled", "none"],
+        command_matched: bool,
+        message_id: str | None = None,
+    ) -> None:
+        """A ``gh pr create`` / ``glab mr create`` command was intercepted."""
+        self._client.send_telemetry_event(
+            "vibe.artifact_detected",
+            {
+                "provider": provider,
+                "cli_source": cli_source,
+                "command_matched": command_matched,
+                "message_id": message_id,
+            },
+        )
+
+    def record_artifact_created(
+        self,
+        *,
+        provider: Literal["github", "gitlab"],
+        is_draft: bool,
+        host_type: Literal["github_com", "gitlab_com", "enterprise"],
+        repo_id_resolved: bool,
+        has_title: bool,
+        message_id: str | None = None,
+        source: Literal["detected", "discovered"] = "detected",
+    ) -> None:
+        """An artifact was recorded (not a duplicate).
+
+        ``source`` distinguishes Phase 1 command interception (``detected``)
+        from Phase 2 session-load discovery (``discovered``) — one event, per
+        the conventions' reuse-first rule; ``discovered`` is not in the closed
+        past-tense verb list, so a separate ``vibe.artifact_discovered`` event
+        would violate the naming taxonomy.
+        """
+        self._client.send_telemetry_event(
+            "vibe.artifact_created",
+            {
+                "provider": provider,
+                "is_draft": is_draft,
+                "host_type": host_type,
+                "repo_id_resolved": repo_id_resolved,
+                "has_title": has_title,
+                "message_id": message_id,
+                "source": source,
+            },
+        )
+
+    def record_artifact_mark_viewed(
+        self, *, nb_artifacts: int, nb_already_viewed: int
+    ) -> None:
+        """The client marked artifacts as viewed (Phase 3+, Desktop panel)."""
+        self._client.send_telemetry_event(
+            "vibe.artifact_mark_viewed",
+            {"nb_artifacts": nb_artifacts, "nb_already_viewed": nb_already_viewed},
+        )
+
+    def record_artifact_detection_failed(
+        self,
+        *,
+        error_type: str,
+        provider: Literal["github", "gitlab", "unknown"],
+        stage: Literal[
+            "command_parse",
+            "output_extract",
+            "repo_id_resolve",
+            "coordinates_resolve",
+            "persist",
+        ],
+    ) -> None:
+        """Artifact detection raised an unexpected error at ``stage``."""
+        self._client.send_telemetry_event(
+            "vibe.artifact_detection_failed",
+            {"error_type": error_type, "provider": provider, "stage": stage},
+        )
+
+    def record_artifact_synced(
+        self,
+        *,
+        provider: Literal["github", "gitlab"],
+        trigger: Literal["session_start", "turn_end", "client_request", "poll"],
+        changed: bool,
+    ) -> None:
+        """A provider sync pass refreshed an artifact (Phase 4).
+
+        Emitted only for artifacts whose stored fields actually changed —
+        an unchanged PR produces no telemetry noise.
+        """
+        self._client.send_telemetry_event(
+            "vibe.artifact_synced",
+            {"provider": provider, "trigger": trigger, "changed": changed},
+        )
+
+    def record_artifact_sync_failed(
+        self,
+        *,
+        provider: Literal["github", "gitlab", "unknown"],
+        trigger: Literal["session_start", "turn_end", "client_request", "poll"],
+        error_type: str,
+    ) -> None:
+        """A provider sync fetch failed for one artifact (Phase 4)."""
+        self._client.send_telemetry_event(
+            "vibe.artifact_sync_failed",
+            {"provider": provider, "trigger": trigger, "error_type": error_type},
+        )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -17,7 +18,6 @@ from vibe.app_server.protocol import (
     WorkspaceTrustStatusResponse,
     WorkspaceUntrustedConfigResponse,
 )
-from vibe.core.agent_loop import AgentLoop
 from vibe.core.autocompletion.path_prompt import (
     PathPromptPayload,
     PathResource,
@@ -39,7 +39,7 @@ from vibe.user_content import UserTextResource
 from vibe.utils.images import MAX_IMAGES_PER_MESSAGE
 from vibe.utils.io import BoundedReadResult, read_lines_safe, read_lines_safe_async
 
-_MENTIONED_FILE_MAX_BYTES = 50 * 1024
+_MENTIONED_FILE_MAX_BYTES = 64_000
 _MENTIONED_FILE_LINE_LIMIT = 2000
 _MENTIONED_FILE_MAX_FILES = 8
 _TRUNCATED_FILE_NOTE = "\n\n[File mention truncated to fit context limits.]"
@@ -51,6 +51,40 @@ class PromptPreparationError(ValueError):
 
 class WorkspaceTrustError(ValueError):
     pass
+
+
+def is_trust_grant(decision: WorkspaceTrustDecision) -> bool:
+    """Grants reload config and re-derive the runtime; a decline does not."""
+    return decision in {"trust_repo", "trust_cwd"}
+
+
+def require_trust_session_id(session_id: str | None) -> str:
+    """A trust decision is a persistent write, so it must name its session."""
+    if session_id is None:
+        raise WorkspaceTrustError(
+            "Active workspace trust decisions require a session ID"
+        )
+    return session_id
+
+
+def resolve_session_trust_target(
+    session_cwd: Path | str, requested: str | None
+) -> Path:
+    """The directory a session-scoped trust decision may target.
+
+    A trust decision is a persistent write to the trust store, so a
+    caller-supplied ``requested`` path may only be the session's own working
+    directory, after ``~`` and symlink resolution.
+    """
+    target = Path(session_cwd).expanduser().resolve()
+    if requested is None:
+        return target
+    resolved = Path(requested).expanduser().resolve()
+    if resolved != target:
+        raise WorkspaceTrustError(
+            "Workspace trust decisions must target the session's working directory"
+        )
+    return resolved
 
 
 def read_workspace_trust(
@@ -116,40 +150,11 @@ def _workspace_trust_details(prompt: WorkspaceTrustPrompt) -> WorkspaceTrustDeta
     )
 
 
-def prepare_prompt(
-    agent_loop: AgentLoop, message: str, title_content: list[ContentBlock] | None = None
-) -> PreparedPrompt:
-    model = agent_loop.config.get_active_model()
-    return prepare_prompt_from_context(
-        message,
-        cwd=agent_loop.cwd,
-        session_dir=agent_loop.session_logger.session_dir,
-        model_alias=model.alias,
-        model_display_name=model.display_name,
-        model_supports_images=model.supports_images,
-        needs_initial_auto_title=agent_loop.session_logger.needs_initial_auto_title(),
-        title_content=title_content,
-    )
-
-
 def prepare_prompt_from_context(
-    message: str,
-    *,
-    cwd: Path,
-    session_dir: Path | None,
-    model_alias: str,
-    model_supports_images: bool,
-    needs_initial_auto_title: bool,
-    model_display_name: str | None = None,
-    title_content: list[ContentBlock] | None = None,
+    message: str, *, cwd: Path, session_dir: Path | None
 ) -> PreparedPrompt:
     payload = build_path_prompt_payload(message, base_dir=cwd)
     images = _snapshot_images(session_dir, payload)
-    if images and not model_supports_images:
-        raise PromptPreparationError(
-            f"Model `{model_display_name or model_alias}` does not support images. "
-            "Switch with /model or remove the attachment."
-        )
     # The title is left unset here; it is generated in the background by the
     # agent loop once there is a transcript to summarize.
     return PreparedPrompt(
@@ -185,10 +190,16 @@ def mentioned_file_content_blocks(
 async def mentioned_file_content_blocks_async(
     message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
 ) -> list[ContentBlock]:
+    if "@" not in message:
+        return []
+    resources = await asyncio.to_thread(
+        _mentioned_file_resources,
+        message,
+        base_dir=base_dir,
+        workspace_roots=workspace_roots,
+    )
     blocks: list[ContentBlock] = []
-    for resource in _mentioned_file_resources(
-        message, base_dir=base_dir, workspace_roots=workspace_roots
-    ):
+    for resource in resources:
         try:
             result = await read_lines_safe_async(
                 resource.path,

@@ -1,103 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
 
-from vibe.app_server._projection import (
-    project_agents,
-    project_message_history,
-    project_workdir,
-)
-from vibe.app_server._utils import now_ms
+from vibe.app_server._history_projection import project_message_history
+from vibe.app_server._utils import now_ms, optional_time_ms, time_ms
 from vibe.app_server.models import (
-    BlockedSessionStatus,
     IdleSessionStatus,
-    PublicCallbackEntry,
     PublicHistoryEntry,
     PublicHistoryPage,
-    PublicRetryState,
     PublicSession,
     PublicSessionState,
     PublicTurn,
     PublicTurnStatus,
-    RunningSessionStatus,
-    TokenUsage,
 )
-from vibe.core.agent_loop import AgentLoop
 from vibe.core.types import LLMMessage, Role, SessionMetadata
-
-
-def build_public_state(
-    agent_loop: AgentLoop,
-    *,
-    history: list[PublicHistoryEntry],
-    current_history: list[PublicHistoryEntry],
-    callbacks: list[PublicCallbackEntry],
-    turns: list[PublicTurn],
-    retrying: PublicRetryState | None,
-    history_limit: int,
-    turns_limit: int | None = None,
-    include_history: bool = True,
-    include_turns: bool = True,
-) -> PublicSessionState:
-    all_history = [*history, *current_history]
-    open_callbacks = [
-        callback for callback in callbacks if callback.state.status == "open"
-    ]
-    active_turn = (
-        turns[-1]
-        if turns and turns[-1].status is PublicTurnStatus.IN_PROGRESS
-        else None
-    )
-    if active_turn is None:
-        status = IdleSessionStatus()
-    elif open_callbacks:
-        callback = open_callbacks[-1]
-        status = BlockedSessionStatus(
-            active_turn_id=active_turn.id,
-            callback_id=callback.callback_id,
-            reason=callback.detail.kind,
-        )
-    else:
-        status = RunningSessionStatus(active_turn_id=active_turn.id)
-    metadata = agent_loop.session_logger.session_metadata
-    created_at = _parse_time_ms(metadata.start_time) if metadata else now_ms()
-    try:
-        model = agent_loop.config.get_active_model().alias
-    except ValueError:
-        model = None
-    workdir = project_workdir(agent_loop)
-    active_agent, _ = project_agents(agent_loop)
-    session = PublicSession(
-        id=agent_loop.session_id,
-        root_session_id=agent_loop.parent_session_id or agent_loop.session_id,
-        parent_session_id=agent_loop.parent_session_id,
-        title=agent_loop.session_logger.title,
-        preview=session_preview(agent_loop),
-        status=status,
-        created_at=created_at,
-        updated_at=now_ms(),
-        cwd=workdir,
-        workspace_roots=[
-            str(root) for root in agent_loop.harness_files.workspace_roots
-        ],
-        model=model,
-        agent=active_agent,
-        token_usage=token_usage(agent_loop),
-    )
-    return PublicSessionState(
-        event_id=0,
-        session=session,
-        history=all_history[-history_limit:] if include_history else None,
-        history_before_cursor=(
-            all_history[-history_limit].id
-            if include_history and len(all_history) > history_limit
-            else None
-        ),
-        turns=(turns[-(turns_limit or history_limit) :] if include_turns else None),
-        active_callbacks=open_callbacks,
-        retrying=retrying,
-    )
 
 
 def build_stored_public_state(
@@ -121,12 +37,14 @@ def build_stored_public_state(
             title=metadata.title,
             preview=message_preview(messages),
             status=IdleSessionStatus(),
-            created_at=_parse_time_ms(metadata.start_time),
+            created_at=time_ms(metadata.start_time),
             updated_at=(
-                _parse_time_ms(metadata.end_time)
+                time_ms(metadata.end_time)
                 if metadata.end_time is not None
                 else now_ms()
             ),
+            bumped_at=optional_time_ms(metadata.bumped_at),
+            archived_at=optional_time_ms(metadata.archived_at),
             cwd=cwd,
         ),
         history=history[-history_limit:] if include_history else None,
@@ -200,19 +118,6 @@ def history_page(
     })
 
 
-def token_usage(agent_loop: AgentLoop) -> TokenUsage:
-    stats = agent_loop.stats
-    return TokenUsage(
-        input_tokens=stats.session_prompt_tokens,
-        output_tokens=stats.session_completion_tokens,
-        total_tokens=stats.session_total_llm_tokens,
-    )
-
-
-def session_preview(agent_loop: AgentLoop) -> str:
-    return message_preview(agent_loop.messages)
-
-
 def message_preview(messages: Sequence[LLMMessage]) -> str:
     return next(
         (
@@ -224,10 +129,3 @@ def message_preview(messages: Sequence[LLMMessage]) -> str:
         ),
         "",
     )
-
-
-def _parse_time_ms(value: str) -> int:
-    try:
-        return int(datetime.fromisoformat(value).timestamp() * 1000)
-    except ValueError:
-        return now_ms()

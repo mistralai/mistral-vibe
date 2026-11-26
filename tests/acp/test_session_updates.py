@@ -695,6 +695,8 @@ def test_file_effects_and_todos_keep_rich_acp_semantics() -> None:
     assert edit_update.content[0].path == "app.py"
     assert edit_update.locations is not None
     assert edit_update.locations[0].path == str(Path("app.py").resolve())
+    assert edit_update.field_meta is not None
+    assert edit_update.field_meta["tool_name"] == "arbitrary_edit_provider"
 
     assert isinstance(todo_updates[0], ToolCallStart)
     assert todo_updates[0].tool_call_id == "todo-effect"
@@ -708,7 +710,7 @@ def test_batched_file_edit_emits_ordered_call_and_result_diffs() -> None:
         **_entry_fields("batch-edit", PublicEntryGenerationStatus.IN_PROGRESS),
         title="Edit",
         detail=FileEditEffectDetail(
-            tool_name="file_system.search_replace",
+            tool_name="file_system.edit",
             input=FileEditEffectBatchInput(
                 file_path="app.py",
                 changes=[
@@ -744,6 +746,8 @@ def test_batched_file_edit_emits_ordered_call_and_result_diffs() -> None:
     result = replay_history_entry(completed)[0]
 
     assert isinstance(call, ToolCallStart)
+    assert call.field_meta is not None
+    assert call.field_meta["tool_name"] == "edit"
     assert call.content is not None
     assert [
         item.old_text
@@ -751,6 +755,8 @@ def test_batched_file_edit_emits_ordered_call_and_result_diffs() -> None:
         if isinstance(item, FileEditToolCallContent)
     ] == ["one", "two"]
     assert isinstance(result, ToolCallStart)
+    assert result.field_meta is not None
+    assert result.field_meta["tool_name"] == "edit"
     assert result.content is not None
     assert [
         (item.path, item.old_text, item.new_text)
@@ -1010,6 +1016,7 @@ def test_interrupted_subagent_is_failed_and_keeps_task_metadata() -> None:
             tool_name="extension_delegate",
             input=SubagentEffectInput(task="Explore", agent="explore"),
             child_session_id="child-1",
+            agent_name="explore",
             display=_display("Running subagent"),
         ),
         state=CompletedEffectState(
@@ -1034,6 +1041,27 @@ def test_interrupted_subagent_is_failed_and_keeps_task_metadata() -> None:
         "turn_count": 2,
         "response": "Interrupted",
     }
+
+
+def test_an_agent_change_checkpoint_stays_out_of_the_conversation() -> None:
+    checkpoint = PublicCheckpointEntry(
+        **_entry_fields("agent-change-1", PublicEntryGenerationStatus.COMPLETED),
+        kind="agent_change",
+        message="Agent changed to ask",
+        details={"agent": "ask"},
+    )
+
+    assert replay_history_entry(checkpoint) == []
+    assert (
+        session_updates_for_event(
+            HistoryEntryUpdated(
+                previous=checkpoint,
+                entry=checkpoint,
+                patch=[JsonPatchOperation(op="replace", path="/message", value="x")],
+            )
+        )
+        == []
+    )
 
 
 def test_checkpoints_and_session_titles_use_public_identity_and_metadata() -> None:
@@ -1146,3 +1174,26 @@ def test_every_effect_kind_maps_to_an_acp_tool_kind() -> None:
     # a mapping here raises KeyError the first time ACP replays or streams an
     # entry carrying it - on session/load of a session another frontend made.
     assert [kind for kind in ToolEffectKind if kind not in _TOOL_KINDS] == []
+
+
+def test_in_progress_edit_diff_shows_crlf_edit_strings_with_lf() -> None:
+    edit = PublicEffectEntry(
+        **_entry_fields("edit-effect", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="Edit",
+        detail=FileEditEffectDetail(
+            tool_name="edit",
+            input=FileEditEffectInput(
+                file_path="app.py", old_string="a\r\nb\r", new_string="A\r\nB\r"
+            ),
+            display=_display("Editing app.py"),
+        ),
+        state=RunningEffectState(output_text=""),
+    )
+
+    update = replay_history_entry(edit)[0]
+
+    assert isinstance(update, ToolCallStart)
+    assert update.content is not None
+    diff = update.content[0]
+    assert isinstance(diff, FileEditToolCallContent)
+    assert (diff.old_text, diff.new_text) == ("a\nb\n", "A\nB\n")

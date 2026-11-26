@@ -4,19 +4,15 @@ from dataclasses import dataclass
 from typing import Any, assert_never, cast
 from uuid import uuid4
 
+from vibe.app_server._effect_output_cap import capped_effect_state, capped_output_append
+from vibe.app_server._history_projection import project_message_content
 from vibe.app_server._patch import apply_json_patch
-from vibe.app_server._projection import project_message_content
-from vibe.app_server._root_session import rebind_history
 from vibe.app_server._tool_projection import project_effect_detail, project_effect_state
 from vibe.app_server._utils import now_ms
 from vibe.app_server.models import (
     AgentChangedNoticeDetail,
-    AgentSummary,
     BlockedEffectState,
-    CallbackDetail,
-    CallbackOutput,
     CancelledEffectState,
-    ContextClearedNoticeDetail,
     EffectCallDisplay,
     EffectDetail,
     EffectResultDisplay,
@@ -28,9 +24,6 @@ from vibe.app_server.models import (
     HookSeverity,
     JsonPatchOperation,
     NoticeDetail,
-    OpenCallbackState,
-    PlanReviewEndedNoticeDetail,
-    PlanReviewStartedNoticeDetail,
     PublicCallbackEntry,
     PublicCheckpointEntry,
     PublicEffectEntry,
@@ -43,7 +36,6 @@ from vibe.app_server.models import (
     PublicReasoningEntry,
     RunningEffectState,
     SessionTitleUpdatedNoticeDetail,
-    SubagentEffectDetail,
     TextContentBlock,
     WaitingForInputNoticeDetail,
     validate_history_entry,
@@ -66,9 +58,6 @@ from vibe.core.types import (
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
-    ContextClearedEvent,
-    PlanReviewEndedEvent,
-    PlanReviewRequestedEvent,
     ReasoningEvent,
     SessionTitleUpdatedEvent,
     ToolCallEvent,
@@ -99,7 +88,6 @@ class EventProjector:
         self._reasoning_entries: dict[str, str] = {}
         self._effect_entries: dict[str, str] = {}
         self._checkpoint_entries: dict[str, str] = {}
-        self._callback_entries: dict[str, str] = {}
 
     def project(
         self,
@@ -138,112 +126,11 @@ class EventProjector:
                         )
                     ]),
                 ]
-            case (
-                WaitingForInputEvent()
-                | AgentProfileChangedEvent()
-                | ContextClearedEvent()
-                | PlanReviewRequestedEvent()
-                | PlanReviewEndedEvent()
-            ):
+            case WaitingForInputEvent() | AgentProfileChangedEvent():
                 updates = [self._project_notice(event)]
             case _:
                 updates = []
         return updates
-
-    def project_agent(self, agent: AgentSummary) -> ProjectedUpdate:
-        return self._update_session([
-            JsonPatchOperation(
-                op="replace",
-                path="/agent",
-                value=agent.model_dump(mode="json", by_alias=True),
-            )
-        ])
-
-    def rebind_session(self, session_id: str) -> None:
-        self.session_id = session_id
-        self.history = rebind_history(self.history, session_id)
-        self._entries = {entry.id: entry for entry in self.history}
-
-    def link_subagent(
-        self, tool_call_id: str, child_session_id: str
-    ) -> list[ProjectedUpdate]:
-        entry_id, _, detail = self._subagent_effect(tool_call_id)
-        if detail.child_session_id == child_session_id:
-            return []
-        if detail.child_session_id is not None:
-            raise ValueError(f"Subagent effect is already linked: {tool_call_id}")
-        return [
-            self._patch(
-                entry_id,
-                [
-                    JsonPatchOperation(
-                        op="replace",
-                        path="/detail/childSessionId",
-                        value=child_session_id,
-                    )
-                ],
-            )
-        ]
-
-    def replace_subagent(
-        self, tool_call_id: str, old_session_id: str, new_session_id: str
-    ) -> list[ProjectedUpdate]:
-        entry_id, _, detail = self._subagent_effect(tool_call_id)
-        if detail.child_session_id != old_session_id:
-            raise ValueError(f"Subagent effect links another child: {tool_call_id}")
-        return [
-            self._patch(
-                entry_id,
-                [
-                    JsonPatchOperation(
-                        op="replace",
-                        path="/detail/childSessionId",
-                        value=new_session_id,
-                    )
-                ],
-            )
-        ]
-
-    def unlink_subagent(
-        self, tool_call_id: str, child_session_id: str
-    ) -> list[ProjectedUpdate]:
-        entry_id, _, detail = self._subagent_effect(tool_call_id)
-        if detail.child_session_id is None:
-            return []
-        if detail.child_session_id != child_session_id:
-            raise ValueError(f"Subagent effect links another child: {tool_call_id}")
-        return [
-            self._patch(
-                entry_id,
-                [
-                    JsonPatchOperation(
-                        op="replace", path="/detail/childSessionId", value=None
-                    )
-                ],
-            )
-        ]
-
-    def _subagent_effect(
-        self, tool_call_id: str
-    ) -> tuple[str, PublicEffectEntry, SubagentEffectDetail]:
-        entry_id = self._effect_entries.get(tool_call_id)
-        if entry_id is None:
-            raise ValueError(f"Subagent effect not found: {tool_call_id}")
-        entry = self._entries[entry_id]
-        if not isinstance(entry, PublicEffectEntry) or not isinstance(
-            entry.detail, SubagentEffectDetail
-        ):
-            raise ValueError(f"Effect is not a subagent: {tool_call_id}")
-        return entry_id, entry, entry.detail
-
-    def effect_detail(self, tool_call_id: str) -> EffectDetail:
-        entry_id = self._effect_entries.get(tool_call_id)
-        if entry_id is None:
-            raise ValueError(f"Effect not found: {tool_call_id}")
-        entry = self._entries[entry_id]
-        if not isinstance(entry, PublicEffectEntry):
-            raise ValueError(f"History entry is not an effect: {tool_call_id}")
-        return entry.detail
 
     def start_effect(
         self, entry_id: str, *, title: str, detail: EffectDetail
@@ -285,9 +172,12 @@ class EventProjector:
         effect_id = self._effect_entries.get(entry_id)
         if effect_id is None:
             raise ValueError(f"Effect not found: {entry_id}")
+        appended = capped_output_append(
+            _effect_output_text(cast(PublicEffectEntry, self._entries[effect_id])), text
+        )
         return self._patch(
             effect_id,
-            [JsonPatchOperation(op="append", path="/state/outputText", value=text)],
+            [JsonPatchOperation(op="append", path="/state/outputText", value=appended)],
         )
 
     def complete_effect(self, entry_id: str, state: EffectState) -> ProjectedUpdate:
@@ -300,7 +190,9 @@ class EventProjector:
                 JsonPatchOperation(
                     op="replace",
                     path="/state",
-                    value=state.model_dump(mode="json", by_alias=True),
+                    value=capped_effect_state(state).model_dump(
+                        mode="json", by_alias=True
+                    ),
                 ),
                 JsonPatchOperation(
                     op="replace", path="/generationStatus", value="completed"
@@ -326,88 +218,6 @@ class EventProjector:
             if entry.id in entry_ids
             and entry.generation_status is PublicEntryGenerationStatus.IN_PROGRESS
         ]
-
-    def open_callback(
-        self, callback_id: str, detail: CallbackDetail, title: str
-    ) -> list[ProjectedUpdate]:
-        updates: list[ProjectedUpdate] = []
-        related_entry_id = detail.related_entry_id
-        entry_id = f"callback:{callback_id}"
-        self._callback_entries[callback_id] = entry_id
-        entry = PublicCallbackEntry(
-            **self._entry_fields(entry_id, PublicEntryGenerationStatus.IN_PROGRESS),
-            callback_id=callback_id,
-            title=title,
-            detail=detail,
-            state=OpenCallbackState(),
-            related_entry_id=related_entry_id,
-        )
-        updates.append(self._add(entry))
-        if related_entry_id in self._entries:
-            updates.append(
-                self._patch(
-                    cast(str, related_entry_id),
-                    [
-                        JsonPatchOperation(
-                            op="replace",
-                            path="/state",
-                            value=BlockedEffectState(
-                                callback_id=callback_id
-                            ).model_dump(mode="json", by_alias=True),
-                        )
-                    ],
-                )
-            )
-        return updates
-
-    def resolve_callback(
-        self, callback_id: str, output: CallbackOutput
-    ) -> list[ProjectedUpdate]:
-        entry_id = self._callback_entries.get(callback_id)
-        if entry_id is None:
-            return []
-        entry = cast(PublicCallbackEntry, self._entries[entry_id])
-        updates = [
-            self._patch(
-                entry_id,
-                [
-                    JsonPatchOperation(
-                        op="replace",
-                        path="/state",
-                        value={
-                            "status": "answered",
-                            "output": output.model_dump(mode="json", by_alias=True),
-                        },
-                    ),
-                    JsonPatchOperation(
-                        op="replace", path="/generationStatus", value="completed"
-                    ),
-                ],
-            )
-        ]
-        if entry.related_entry_id in self._entries:
-            effect = self._entries[cast(str, entry.related_entry_id)]
-            if isinstance(effect, PublicEffectEntry):
-                output_text = (
-                    effect.state.output_text
-                    if isinstance(effect.state, BlockedEffectState)
-                    else ""
-                )
-                updates.append(
-                    self._patch(
-                        effect.id,
-                        [
-                            JsonPatchOperation(
-                                op="replace",
-                                path="/state",
-                                value=RunningEffectState(
-                                    output_text=output_text
-                                ).model_dump(mode="json", by_alias=True),
-                            )
-                        ],
-                    )
-                )
-        return updates
 
     def finalize(self, *, cancelled: bool = False) -> list[ProjectedUpdate]:
         updates: list[ProjectedUpdate] = []
@@ -573,7 +383,11 @@ class EventProjector:
 
     def _project_assistant(self, event: AssistantEvent) -> ProjectedUpdate:
         key = event.message_id or "assistant"
-        if entry_id := self._assistant_entries.get(key):
+        entry_id = self._assistant_entries.get(key)
+        if entry_id is not None and (
+            self._entries[entry_id].generation_status
+            is not PublicEntryGenerationStatus.COMPLETED
+        ):
             return self._patch(
                 entry_id,
                 [
@@ -582,7 +396,15 @@ class EventProjector:
                     )
                 ],
             )
+        # A tool call earlier in this streamed response force-completes the
+        # entry it was appended to (see _patch's frozen check above), but some
+        # OpenAI-compatible backends (seen with reasoning + speculative
+        # decoding) keep reusing the same message_id for text that streams in
+        # afterwards. Reusing it here would either patch an entry _patch
+        # already refuses to touch, or collide in _add, so start a fresh one.
         entry_id = event.message_id or str(uuid4())
+        if entry_id in self._entries:
+            entry_id = str(uuid4())
         self._assistant_entries[key] = entry_id
         return self._add(
             PublicMessageEntry(
@@ -594,12 +416,20 @@ class EventProjector:
 
     def _project_reasoning(self, event: ReasoningEvent) -> ProjectedUpdate:
         key = event.message_id or "reasoning"
-        if entry_id := self._reasoning_entries.get(key):
+        entry_id = self._reasoning_entries.get(key)
+        if entry_id is not None and (
+            self._entries[entry_id].generation_status
+            is not PublicEntryGenerationStatus.COMPLETED
+        ):
             return self._patch(
                 entry_id,
                 [JsonPatchOperation(op="append", path="/text", value=event.content)],
             )
+        # Same rationale as _project_assistant: a reused reasoning_message_id
+        # can name an entry a tool call already completed and froze.
         entry_id = event.message_id or str(uuid4())
+        if entry_id in self._entries:
+            entry_id = str(uuid4())
         self._reasoning_entries[key] = entry_id
         return self._add(
             PublicReasoningEntry(
@@ -765,12 +595,7 @@ def _effect_output_text(entry: PublicEffectEntry) -> str:
 
 
 type NoticeEvent = (
-    WaitingForInputEvent
-    | AgentProfileChangedEvent
-    | ContextClearedEvent
-    | SessionTitleUpdatedEvent
-    | PlanReviewRequestedEvent
-    | PlanReviewEndedEvent
+    WaitingForInputEvent | AgentProfileChangedEvent | SessionTitleUpdatedEvent
 )
 
 
@@ -786,24 +611,9 @@ def _notice_data(event: NoticeEvent) -> tuple[str, NoticeDetail]:
         case AgentProfileChangedEvent():
             message = f"Agent changed to {event.agent_name}"
             detail = AgentChangedNoticeDetail(agent_name=event.agent_name)
-        case ContextClearedEvent():
-            message = "Context cleared"
-            detail = ContextClearedNoticeDetail(
-                plan_file_path=(
-                    str(event.plan_file_path)
-                    if event.plan_file_path is not None
-                    else None
-                )
-            )
         case SessionTitleUpdatedEvent():
             message = "Session title updated"
             detail = SessionTitleUpdatedNoticeDetail(title=event.title)
-        case PlanReviewRequestedEvent():
-            message = "Plan ready for review"
-            detail = PlanReviewStartedNoticeDetail(file_path=str(event.file_path))
-        case PlanReviewEndedEvent():
-            message = "Plan review ended"
-            detail = PlanReviewEndedNoticeDetail()
         case _:
             assert_never(event)
     return message, detail

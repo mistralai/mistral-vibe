@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from vibe.core.skills.models import ManifestEntry
 from vibe.core.skills.registry import _manifest
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 
 
 def test_upsert_replaces_by_name() -> None:
@@ -69,6 +70,29 @@ async def test_load_malformed_returns_empty(tmp_path: Path) -> None:
     path = tmp_path / "bad.toml"
     path.write_text("this is = = not valid toml [[[")
     assert (await _manifest.load(path)).skills == []
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        ("this is = = not valid toml [[[", "invalid TOML"),
+        ('[[skills]]\nname = "a"\n', "skills.0.skill_id: Field required"),
+    ],
+)
+def test_read_refuses_a_manifest_it_cannot_parse(
+    tmp_path: Path, content: str, reason: str
+) -> None:
+    path = tmp_path / "skills.toml"
+    path.write_text(content)
+
+    with pytest.raises(_manifest.ManifestReadError) as exc_info:
+        _manifest.read_sync(path)
+
+    assert reason in exc_info.value.reason
+
+
+def test_read_missing_manifest_is_empty(tmp_path: Path) -> None:
+    assert _manifest.read_sync(tmp_path / "nope.toml").skills == []
 
 
 @pytest.mark.asyncio

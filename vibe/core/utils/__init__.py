@@ -17,16 +17,7 @@ if TYPE_CHECKING:
     )
     from vibe.core.utils.matching import name_matches
     from vibe.core.utils.merge import MergeConflictError, MergeStrategy
-    from vibe.core.utils.pacing import AdaptivePacer
-    from vibe.core.utils.retry import (
-        RetryCategory,
-        RetryObserver,
-        RetryReason,
-        StreamHTTPError,
-        async_generator_retry,
-        async_retry,
-    )
-    from vibe.core.utils.sse import iter_sse_lines
+    from vibe.core.utils.retry import async_retry
     from vibe.core.utils.tags import (
         CANCELLATION_TAG,
         KNOWN_TAGS,
@@ -55,20 +46,14 @@ __all__ = [
     "KNOWN_TAGS",
     "TOOL_ERROR_TAG",
     "VIBE_STOP_EVENT_TAG",
-    "AdaptivePacer",
     "AsyncExecutor",
     "CancellationReason",
     "ConversationLimitException",
     "MergeConflictError",
     "MergeStrategy",
-    "RetryCategory",
-    "RetryObserver",
-    "RetryReason",
-    "StreamHTTPError",
     "TaggedText",
     "WindowsShell",
     "WindowsShellKind",
-    "async_generator_retry",
     "async_retry",
     "get_platform_display_name",
     "get_platform_id",
@@ -78,7 +63,6 @@ __all__ = [
     "is_dangerous_directory",
     "is_user_cancellation_event",
     "is_windows",
-    "iter_sse_lines",
     "kill_async_subprocess",
     "name_matches",
     "resolve_windows_shell",
@@ -100,14 +84,7 @@ _MAPPING: dict[str, tuple[str, str]] = {
     "name_matches": ("vibe.core.utils.matching", "name_matches"),
     "MergeConflictError": ("vibe.core.utils.merge", "MergeConflictError"),
     "MergeStrategy": ("vibe.core.utils.merge", "MergeStrategy"),
-    "AdaptivePacer": ("vibe.core.utils.pacing", "AdaptivePacer"),
-    "RetryCategory": ("vibe.core.utils.retry", "RetryCategory"),
-    "RetryObserver": ("vibe.core.utils.retry", "RetryObserver"),
-    "RetryReason": ("vibe.core.utils.retry", "RetryReason"),
-    "StreamHTTPError": ("vibe.core.utils.retry", "StreamHTTPError"),
-    "async_generator_retry": ("vibe.core.utils.retry", "async_generator_retry"),
     "async_retry": ("vibe.core.utils.retry", "async_retry"),
-    "iter_sse_lines": ("vibe.core.utils.sse", "iter_sse_lines"),
     "CANCELLATION_TAG": ("vibe.core.utils.tags", "CANCELLATION_TAG"),
     "KNOWN_TAGS": ("vibe.core.utils.tags", "KNOWN_TAGS"),
     "TOOL_ERROR_TAG": ("vibe.core.utils.tags", "TOOL_ERROR_TAG"),

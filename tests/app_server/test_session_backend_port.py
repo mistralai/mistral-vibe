@@ -1,37 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import cast
 
 import pytest
 
-from tests.conftest import build_test_agent_loop
-from tests.stubs.app_server import build_test_app_server
-from vibe.app_server._legacy_session_backend import (
-    LegacySessionBackend,
-    LegacySessionBackendHost,
-)
+from vibe.app_server import server as server_module
+from vibe.app_server._dispatch import DispatchResult, RequestFailure
+from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._session_backend_port import (
     SessionBackend,
     SessionBackendError,
+    SessionBackendEvent,
     SessionBackendHost,
+    SessionBackendQueuedTurnEditing,
     SessionBackendQueuedTurnSteering,
+    SessionEventSubscription,
 )
-from vibe.app_server.client import AppServerClient
-from vibe.app_server.events import HistoryEntryAdded, ServerWarning
-from vibe.app_server.models import PublicError, TextContentBlock
+from vibe.app_server.models import IdleSessionStatus, PublicSession, PublicSessionState
 from vibe.app_server.protocol import (
-    ClientCapabilities,
-    ClientInfo,
-    ContextInjectParams,
+    EmptyResponse,
     ProtocolErrorCode,
-    ServerWarningParams,
-    SessionReadParams,
-    SessionSettingsUpdateParams,
+    ServerRequest,
+    SessionMarkAsSeenParams,
+    SessionMarkAsUnseenParams,
+    SessionReadResponse,
 )
 from vibe.app_server.server import _SESSION_BACKEND_METHODS, AppServer
-from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
+from vibe.core.config.harness_files import HarnessFilesManager
 
 
 def test_session_backend_contract_covers_the_complete_session_lifecycle() -> None:
@@ -40,6 +39,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "enqueue_turn",
         "guard_request",
         "inject_context",
+        "install_agent",
         "interrupt_turn",
         "read",
         "read_turn_queue",
@@ -48,33 +48,53 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "replace_queued_turn",
         "respond_to_callback",
         "resume_turn_queue",
+        "retry_turn",
         "session_id",
         "shutdown",
         "start_turn",
         "steer_turn",
         "subscribe",
         "switch_agent",
+        "switch_approval_policy",
+        "uninstall_agent",
         "update_settings",
         "write_config",
+        "write_model_config",
     }
 
     assert _SESSION_BACKEND_METHODS == {
+        "agents/install",
+        "agents/uninstall",
         "callback/result",
         "config/reload",
+        "config/model/write",
         "config/write",
         "session/agent/update",
+        "session/approvalPolicy/update",
         "session/compact",
         "session/context/inject",
         "session/settings/update",
         "session/turn/enqueue",
+        "session/turn/queue/edit/abandon",
+        "session/turn/queue/edit/cancel",
+        "session/turn/queue/edit/save",
+        "session/turn/queue/edit/start",
         "session/turn/queue/read",
         "session/turn/queue/remove",
         "session/turn/queue/replace",
         "session/turn/queue/steer",
         "session/turn/queue/resume",
         "turn/interrupt",
+        "turn/retry",
         "turn/start",
         "turn/steer",
+    }
+    assert _protocol_members(SessionBackendQueuedTurnEditing) == {
+        "abandon_active_queued_turn_edit",
+        "abandon_queued_turn_edit",
+        "cancel_queued_turn_edit",
+        "save_queued_turn_edit",
+        "start_queued_turn_edit",
     }
     assert _protocol_members(SessionBackendQueuedTurnSteering) == {"steer_queued_turn"}
 
@@ -106,7 +126,9 @@ def test_session_backend_errors_keep_semantic_code_and_data() -> None:
     assert ProtocolErrorCode.CALLBACK_CLOSED.value == "callback_closed"
 
 
-def test_app_server_passes_services_to_session_backend_host_factory() -> None:
+def test_app_server_passes_services_to_session_backend_host_factory(
+    process_services: ProcessServices,
+) -> None:
     captured_services: object | None = None
     expected_host = cast(SessionBackendHost, object())
 
@@ -116,24 +138,193 @@ def test_app_server_passes_services_to_session_backend_host_factory() -> None:
         return expected_host
 
     _, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, session_backend_host_factory=factory)
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=factory,
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
 
-    assert captured_services is server
+    assert captured_services is server.session_link
+    assert server.session_link.server is server
     assert server._session_backend_host is expected_host
 
 
-def test_app_server_rejects_empty_session_backend_host_factory_result() -> None:
+def test_app_server_rejects_empty_session_backend_host_factory_result(
+    process_services: ProcessServices,
+) -> None:
     def empty_factory(_: object) -> SessionBackendHost:
         return cast(SessionBackendHost, None)
 
     _, server_transport = memory_transport_pair()
 
     with pytest.raises(TypeError, match="must return a SessionBackendHost"):
-        AppServer(server_transport, session_backend_host_factory=empty_factory)
+        AppServer(
+            server_transport,
+            oidc_tenants=process_services.oidc_tenants,
+            platform_credential_lenders=process_services.platform_credential_lenders,
+            session_backend_host_factory=empty_factory,
+            host_handler=HostRequestHandler(
+                HarnessFilesManager(sources=("user", "project")),
+                org_config=process_services.org_config,
+                worktrees=process_services.worktrees,
+                experiments=process_services.experiments,
+                model_catalog=process_services.model_catalog,
+            ),
+        )
 
 
 @pytest.mark.asyncio
-async def test_app_server_shutdown_waits_for_host_cleanup() -> None:
+async def test_pin_requires_the_optional_host_capability(
+    process_services: ProcessServices,
+) -> None:
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await server._dispatch_backend_host_operation(
+            "session/pin", {"sessionId": "saved-session", "pinned": True}
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_mark_as_seen_requires_the_optional_host_capability(
+    process_services: ProcessServices,
+) -> None:
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await server._dispatch_backend_host_operation(
+            "session/markAsSeen", {"sessionId": "saved-session"}
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_mark_as_seen_routes_to_the_selected_backend_host(
+    process_services: ProcessServices,
+) -> None:
+    received: SessionMarkAsSeenParams | None = None
+
+    class SeenStateHost:
+        async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse:
+            nonlocal received
+            received = params
+            return EmptyResponse()
+
+        async def mark_as_unseen(
+            self, params: SessionMarkAsUnseenParams
+        ) -> EmptyResponse:
+            return EmptyResponse()
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(
+            SessionBackendHost, SeenStateHost()
+        ),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+
+    result = await server._dispatch_backend_host_operation(
+        "session/markAsSeen", {"sessionId": "saved-session"}
+    )
+
+    assert received == SessionMarkAsSeenParams(session_id="saved-session")
+    assert result is not None
+    assert result.response == EmptyResponse()
+
+
+@pytest.mark.asyncio
+async def test_mark_as_unseen_routes_to_the_selected_backend_host(
+    process_services: ProcessServices,
+) -> None:
+    received: SessionMarkAsUnseenParams | None = None
+
+    class SeenStateHost:
+        async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse:
+            return EmptyResponse()
+
+        async def mark_as_unseen(
+            self, params: SessionMarkAsUnseenParams
+        ) -> EmptyResponse:
+            nonlocal received
+            received = params
+            return EmptyResponse()
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(
+            SessionBackendHost, SeenStateHost()
+        ),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+
+    result = await server._dispatch_backend_host_operation(
+        "session/markAsUnseen", {"sessionId": "saved-session"}
+    )
+
+    assert received == SessionMarkAsUnseenParams(session_id="saved-session")
+    assert result is not None
+    assert result.response == EmptyResponse()
+
+
+@pytest.mark.asyncio
+async def test_app_server_shutdown_waits_for_host_cleanup(
+    process_services: ProcessServices,
+) -> None:
     """*Prepare*: A Session Host whose shutdown remains active.
     *Do*: Close the App Server before allowing Host cleanup to finish.
     *Assert*: App Server shutdown waits until Host cleanup is complete.
@@ -153,7 +344,16 @@ async def test_app_server_shutdown_waits_for_host_cleanup() -> None:
     host = SlowShutdownHost()
     server = AppServer(
         server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _services: cast(SessionBackendHost, host),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
     )
 
     # Do
@@ -169,124 +369,82 @@ async def test_app_server_shutdown_waits_for_host_cleanup() -> None:
     assert finished.is_set()
 
 
+@pytest.mark.parametrize(
+    ("method", "announced"),
+    [("session/resume", 1), ("session/continue", 1), ("session/start", 0)],
+)
 @pytest.mark.asyncio
-async def test_app_server_root_is_the_legacy_session_backend() -> None:
-    client_transport, server_transport = memory_transport_pair()
-    server = build_test_app_server(build_test_agent_loop(), server_transport)
-    client = AppServerClient(client_transport, run_peer=server.serve)
-    session = await AppServerSession.start(
-        client,
-        client_info=ClientInfo(name="test", version="0"),
-        capabilities=ClientCapabilities(),
-    )
-    try:
-        host = server._session_backend_host
-        backend = server._require_root()
-        _accept_session_backend_host(host)
-        _accept_session_backend(backend)
-        assert isinstance(backend, LegacySessionBackend)
-        assert not isinstance(backend, SessionBackendQueuedTurnSteering)
+async def test_only_a_reopened_session_announces_its_running_turn(
+    method: str, announced: int, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A root that can announce its running turn.
+    *Do*: Attach it the way each lifecycle request does.
+    *Assert*: Only resume and continue announce it, and they do so before the
+      event forwarder starts. A new session's first turn announces itself.
+    """
+    # Prepare
+    order: list[str] = []
 
-        event_task = server._backend_event_task
-        assert event_task is not None
-        event_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await event_task
+    class RunningTurnRoot:
+        session_id = "session-1"
 
-        response = await backend.read(SessionReadParams(session_id=session.session_id))
-        subscription = await backend.subscribe(
-            SessionReadParams(session_id=session.session_id)
-        )
-        with pytest.raises(SessionBackendError) as exc_info:
-            await backend.subscribe(SessionReadParams(session_id=session.session_id))
-        assert exc_info.value.code is ProtocolErrorCode.CONFLICT
-        injected = await backend.inject_context(
-            ContextInjectParams(
-                session_id=session.session_id,
-                input=[TextContentBlock(text="remember this")],
-                as_message=True,
+        async def announce_running_turn(self) -> None:
+            order.append("announce")
+            await asyncio.sleep(0)
+
+        async def subscribe(self, params: object) -> SessionEventSubscription:
+            async def events() -> AsyncIterator[SessionBackendEvent]:
+                order.append("forward")
+                if False:
+                    yield cast(SessionBackendEvent, None)
+
+            return SessionEventSubscription(
+                snapshot=SessionReadResponse(
+                    state=PublicSessionState(
+                        event_id=0,
+                        session=PublicSession(
+                            id=self.session_id,
+                            status=IdleSessionStatus(),
+                            created_at=1,
+                            updated_at=1,
+                        ),
+                    ),
+                    last_event_id=0,
+                ),
+                events=events(),
             )
-        )
-        envelope = await anext(subscription.events)
-        await backend.inject_context(
-            ContextInjectParams(
-                session_id=session.session_id,
-                input=[TextContentBlock(text="drop this event")],
-                as_message=True,
-            )
-        )
-        backend._events.get_nowait()
-        await backend.inject_context(
-            ContextInjectParams(
-                session_id=session.session_id,
-                input=[TextContentBlock(text="detect the gap")],
-                as_message=True,
-            )
-        )
-        settings_response = await backend.update_settings(
-            SessionSettingsUpdateParams(session_id=session.session_id, max_turns=3)
-        )
 
-        assert isinstance(host, LegacySessionBackendHost)
-        assert response.state.session.id == session.session_id
-        assert subscription.snapshot.state.session.id == session.session_id
-        assert (
-            subscription.snapshot.last_event_id == subscription.snapshot.state.event_id
-        )
-        assert isinstance(envelope.event, HistoryEntryAdded)
-        assert envelope.event.entry == injected.response.entries[0]
-        assert settings_response.response.model_dump() == {}
-        with pytest.raises(SessionBackendError) as gap_exc_info:
-            await anext(subscription.events)
-        assert gap_exc_info.value.code is ProtocolErrorCode.STALE_CURSOR
-        replacement = await backend.subscribe(
-            SessionReadParams(session_id=session.session_id)
-        )
-        assert replacement.snapshot.state.session.id == session.session_id
-    finally:
-        await session.close()
+        async def flush_events(self) -> None:
+            await asyncio.sleep(0)
 
-
-@pytest.mark.asyncio
-async def test_legacy_backend_subscription_forwards_direct_events_and_closes() -> None:
-    client_transport, server_transport = memory_transport_pair()
-    server = build_test_app_server(build_test_agent_loop(), server_transport)
-    client = AppServerClient(client_transport, run_peer=server.serve)
-    session = await AppServerSession.start(
-        client,
-        client_info=ClientInfo(name="test", version="0"),
-        capabilities=ClientCapabilities(),
-    )
-    backend = server._require_root()
-    assert isinstance(backend, LegacySessionBackend)
-    event_task = server._backend_event_task
-    assert event_task is not None
-    event_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await event_task
-    subscription = await backend.subscribe(
-        SessionReadParams(session_id=session.session_id)
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
     )
 
-    handled = await backend.publish_notification(
-        "warning", ServerWarningParams(warning=PublicError(message="careful"))
+    # Do
+    await server._activate_lifecycle_backend(
+        method, cast(SessionBackend, RunningTurnRoot()), 1
     )
-    envelope = await anext(subscription.events)
-    ignored = await backend.publish_notification(
-        "unknown/event", ServerWarningParams(warning=PublicError(message="ignored"))
-    )
+    forwarder = server._backend_event_task
+    if forwarder is not None:
+        await asyncio.wait_for(forwarder, timeout=1)
 
-    assert handled is True
-    assert ignored is False
-    assert isinstance(envelope.event, ServerWarning)
-    assert envelope.event_id is None
-    assert envelope.method == "warning"
-
-    next_event = asyncio.ensure_future(anext(subscription.events))
-    await backend.shutdown()
-    with pytest.raises(StopAsyncIteration):
-        await next_event
-    await client.close()
+    # Assert
+    assert order.count("announce") == announced
+    assert "forward" in order
+    if announced:
+        assert order.index("announce") < order.index("forward")
 
 
 def _accept_session_backend(backend: SessionBackend) -> None:
@@ -299,3 +457,67 @@ def _accept_session_backend_host(backend: SessionBackendHost) -> None:
 
 def _protocol_members(protocol: type[object]) -> set[str]:
     return {name for name in protocol.__dict__ if not name.startswith("_")}
+
+
+@pytest.mark.parametrize("stream", ["delivers", "is_stuck"])
+@pytest.mark.asyncio
+async def test_resume_sends_open_callbacks_after_the_held_turn_announcement(
+    stream: str, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A resumed root holding its turn announcement for its event
+        stream, which either delivers it or never does.
+    *Do*: Finish the `session/resume` request.
+    *Assert*: Open callbacks go out once the announcement was delivered; a stuck
+        stream delays them only until the timeout, then they go out anyway.
+    """
+    # Prepare
+    order: list[str] = []
+    held = asyncio.Event()
+
+    class ResumedRoot:
+        session_id = "session-1"
+
+        async def wait_for_held_events(self) -> None:
+            await held.wait()
+            order.append("announced")
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+    server._root = cast(SessionBackend, ResumedRoot())
+
+    async def redeliver(_attach_method: str) -> None:
+        order.append("callbacks")
+
+    monkeypatch.setattr(server, "_redeliver_open_callbacks", redeliver)
+    monkeypatch.setattr(
+        server_module, "_RUNNING_TURN_ANNOUNCEMENT_TIMEOUT_SECONDS", 0.05
+    )
+    request = ServerRequest(
+        id=1, method="session/resume", params={"sessionId": "session-1"}
+    )
+
+    # Do
+    finishing = asyncio.create_task(
+        server._after_response(
+            request, DispatchResult(EmptyResponse(), session_attached=True)
+        )
+    )
+    if stream == "delivers":
+        held.set()
+    await asyncio.wait_for(finishing, timeout=1)
+
+    # Assert
+    expected = ["announced", "callbacks"] if stream == "delivers" else ["callbacks"]
+    assert order == expected

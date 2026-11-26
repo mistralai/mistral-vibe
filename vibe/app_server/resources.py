@@ -6,21 +6,23 @@ from vibe.app_server._integration_resources import (
     PluginCatalogDiff,
     PluginCatalogResource,
     SkillsResource,
-    VibeCodeResource,
 )
 from vibe.app_server._runtime_resources import (
     AccountResource,
     AgentResource,
     ConfigResource,
     IdentityResource,
+    ProviderAuthResource,
     RuntimeResource,
 )
 from vibe.app_server._service_resources import (
     FeedbackResource,
     NarrationResource,
     TelemetryResource,
+    VoiceResource,
 )
 from vibe.app_server._session_resources import (
+    GoalResource,
     LoopsResource,
     ReviewResource,
     SessionResource,
@@ -41,6 +43,7 @@ class AppServerResources:
     ) -> None:
         self.account = AccountResource(connection, state)
         self.identity = IdentityResource(connection, state)
+        self.provider_auth = ProviderAuthResource(connection, state)
         self.config = ConfigResource(connection, state)
         self.agents = AgentResource(connection, state)
         self.runtime = RuntimeResource(connection, state)
@@ -52,10 +55,11 @@ class AppServerResources:
         self.review = ReviewResource(connection, state)
         self.workspace = WorkspaceResource(connection, state)
         self.loops = LoopsResource(connection, state)
+        self.goal = GoalResource(connection, state)
         self.telemetry = TelemetryResource(connection, state)
         self.narration = NarrationResource(connection, state)
+        self.voice = VoiceResource(connection, state)
         self.feedback = FeedbackResource(connection, state)
-        self.vibe_code = VibeCodeResource(connection, state)
 
     async def refresh(self) -> None:
         await self.runtime.refresh()
@@ -65,9 +69,9 @@ class AppServerResources:
         if await self.runtime.consume_notification(notification):
             self.config.publish_change(previous_config)
             return True
-        if await self.mcp.consume_notification(notification):
+        if await self.voice.consume_notification(notification):
             return True
-        return await self.vibe_code.consume_notification(notification)
+        return await self.mcp.consume_notification(notification)
 
     async def consume_event(self, event: AppServerEvent) -> bool:
         return await self.shell.consume_event(event)

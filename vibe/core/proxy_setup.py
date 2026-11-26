@@ -13,7 +13,7 @@ SUPPORTED_PROXY_VARS: dict[str, str] = {
     "SSL_CERT_DIR": "Path to directory containing SSL certificates",
 }
 
-# Proxy URL vars need an http(s):// scheme, else httpx crashes on startup (VIBE-4084).
+# Proxy URL vars need an http(s):// scheme, else httpx2 crashes on startup (VIBE-4084).
 PROXY_URL_VARS: frozenset[str] = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"})
 
 
@@ -45,6 +45,9 @@ def set_proxy_var(key: str, value: str) -> None:
         )
 
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+    # Proxy settings can name internal hosts, so the file is created
+    # owner-only; an existing file keeps its current mode.
+    GLOBAL_ENV_FILE.path.touch(mode=0o600, exist_ok=True)
     set_key(GLOBAL_ENV_FILE.path, key, value)
 
 

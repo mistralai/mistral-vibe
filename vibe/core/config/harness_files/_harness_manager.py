@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from vibe.core.config.harness_files._paths import (
     GLOBAL_AGENTS_DIR,
@@ -31,8 +32,19 @@ class HarnessFilesManager:
     cwd: Path | None = field(default=None)
     _additional_dirs: tuple[Path, ...] = ()
     _session_root: Path | None = None
+    # Writable without being opened as a project: no config, skills, hooks or
+    # AGENTS.md are read from them.
+    writable_roots: tuple[Path, ...] = ()
+    # The session's other project folders: writable like ``writable_roots``,
+    # and also named in the prompt.
+    access_roots: tuple[Path, ...] = ()
     trust_store: TrustedFoldersManager = field(
         default_factory=lambda: trusted_folders_manager, compare=False, repr=False
+    )
+    # The user config an embedding host supplies for its sessions, read in
+    # place of the user config file. Changes saved to it stay in memory.
+    user_config: Mapping[str, Any] | None = field(
+        default=None, compare=False, repr=False
     )
 
     def for_session(
@@ -55,22 +67,21 @@ class HarnessFilesManager:
             _session_root=here if here in listed else None,
         )
 
-    def moved_to(self, cwd: Path) -> HarnessFilesManager:
-        """The manager for a session that has moved to *cwd*.
-
-        Unlike :meth:`for_session`, which merges, the directory being left stops
-        being a workspace root and the arrival takes its place. A sequence of
-        moves therefore never widens the set. Roots added for other reasons,
-        such as ``--add-dir`` entries, are kept, including the one the session
-        is sitting in. Only the position a move recorded is replaced, so
-        leaving a directory cannot revoke a root the user opened.
-        """
-        arriving = cwd.resolve()
-        return replace(self, cwd=arriving, _session_root=arriving)
+    def trusting(self, root: Path) -> HarnessFilesManager:
+        """This manager with *root* trusted for this process only, never persisted."""
+        trust_store = self.trust_store.for_session()
+        trust_store.trust_for_session(root)
+        return replace(self, trust_store=trust_store)
 
     @property
-    def _effective_cwd(self) -> Path:
-        return self.cwd or Path.cwd()
+    def _effective_cwd(self) -> Path | None:
+        if self.cwd is not None:
+            return self.cwd
+        try:
+            return Path.cwd()
+        except FileNotFoundError:
+            # The process cwd was deleted while Vibe runs: it holds no project files.
+            return None
 
     @property
     def _listed_roots(self) -> list[Path]:
@@ -80,18 +91,25 @@ class HarnessFilesManager:
 
     @property
     def workspace_roots(self) -> list[Path]:
-        cwd = self._effective_cwd.resolve()
+        if (effective := self._effective_cwd) is None:
+            return self._listed_roots
+        cwd = effective.resolve()
         return [cwd, *(root for root in self._listed_roots if root != cwd)]
 
     @property
     def cwd_is_user_config_home(self) -> bool:
         """True when the cwd's ``.vibe`` dir is the user config dir itself."""
-        return (self._effective_cwd / ".vibe").resolve() == VIBE_HOME.path.resolve()
+        cwd = self._effective_cwd
+        return cwd is not None and (cwd / ".vibe").resolve() == VIBE_HOME.path.resolve()
 
     @property
     def project_source_enabled(self) -> bool:
         """True when the project layer is eligible for this cwd."""
-        return "project" in self.sources and not self.cwd_is_user_config_home
+        return (
+            "project" in self.sources
+            and self._effective_cwd is not None
+            and not self.cwd_is_user_config_home
+        )
 
     @property
     def _trusted_workdir(self) -> Path | None:
@@ -99,7 +117,7 @@ class HarnessFilesManager:
         if not self.project_source_enabled:
             return None
         cwd = self._effective_cwd
-        if self.trust_store.is_trusted(cwd) is not True:
+        if cwd is None or self.trust_store.is_trusted(cwd) is not True:
             return None
         return cwd
 

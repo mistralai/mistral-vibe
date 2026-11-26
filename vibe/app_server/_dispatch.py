@@ -16,6 +16,8 @@ class DispatchResult:
     on_response_abandoned: Callable[[], None] | None = None
     runtime_updated: bool = False
     session_attached: bool = False
+    # The attach checked the client could answer the session's open callbacks.
+    callbacks_checked: bool = False
 
 
 class RequestFailure(Exception):

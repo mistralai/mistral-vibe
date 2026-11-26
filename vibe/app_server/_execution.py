@@ -1,17 +1,42 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
-from enum import StrEnum, auto
+from collections.abc import Iterable, Sequence
 
-
-class SessionExecutionConflict(RuntimeError):
-    pass
-
+from vibe.observability.logging import logger
 
 SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def raise_if_cancelled(errors: Sequence[BaseException]) -> None:
+    """Re-raise the first cancellation among collected errors, logging the rest."""
+    cancelled: asyncio.CancelledError | None = None
+    dropped: list[BaseException] = []
+    for exc in errors:
+        found = _find_cancellation(exc) if cancelled is None else None
+        if found is None:
+            dropped.append(exc)
+            continue
+        cancelled = found
+        if isinstance(exc, BaseExceptionGroup):
+            _, rest = exc.split(asyncio.CancelledError)
+            if rest is not None:
+                dropped.append(rest)
+    if cancelled is None:
+        return
+    for exc in dropped:
+        logger.warning("Shutdown error dropped for a cancellation", exc_info=exc)
+    raise cancelled
+
+
+def _find_cancellation(exc: BaseException) -> asyncio.CancelledError | None:
+    if isinstance(exc, asyncio.CancelledError):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for inner in exc.exceptions:
+            if (found := _find_cancellation(inner)) is not None:
+                return found
+    return None
 
 
 async def cancel_tasks[ResultT](
@@ -32,6 +57,11 @@ async def cancel_tasks[ResultT](
             task.result()
         except asyncio.CancelledError:
             pass
+        except BaseExceptionGroup as group:
+            # Shutdowns that collect their errors wrap the cancellation sent here.
+            _, rest = group.split(asyncio.CancelledError)
+            if rest is not None:
+                errors.append(rest)
         except BaseException as exc:
             errors.append(exc)
     if pending:
@@ -39,54 +69,3 @@ async def cancel_tasks[ResultT](
             TimeoutError(f"Timed out cancelling {len(pending)} {label} task(s)")
         )
     return errors
-
-
-class SessionExecutionKind(StrEnum):
-    LIFECYCLE = auto()
-    TURN = auto()
-    TELEPORT = auto()
-    SHELL = auto()
-
-
-@dataclass(frozen=True, slots=True)
-class ActiveSessionExecution:
-    kind: SessionExecutionKind
-    id: str
-
-
-class SessionExecution:
-    def __init__(self) -> None:
-        self._active: ActiveSessionExecution | None = None
-
-    @property
-    def active(self) -> ActiveSessionExecution | None:
-        return self._active
-
-    def begin(
-        self, kind: SessionExecutionKind, operation_id: str
-    ) -> ActiveSessionExecution:
-        if active := self._active:
-            raise SessionExecutionConflict(
-                f"Session is already running {active.kind.value} {active.id}"
-            )
-        execution = ActiveSessionExecution(kind=kind, id=operation_id)
-        self._active = execution
-        return execution
-
-    def finish(self, execution: ActiveSessionExecution) -> None:
-        if self._active == execution:
-            self._active = None
-
-    @contextmanager
-    def reserve(self, kind: SessionExecutionKind, operation_id: str) -> Iterator[None]:
-        execution = self.begin(kind, operation_id)
-        try:
-            yield
-        finally:
-            self.finish(execution)
-
-    def require_idle(self) -> None:
-        if active := self._active:
-            raise SessionExecutionConflict(
-                f"Session is busy running {active.kind.value} {active.id}"
-            )

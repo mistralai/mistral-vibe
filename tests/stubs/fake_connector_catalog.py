@@ -11,6 +11,8 @@ from vibe.app_server.connector_catalog import (
     ConnectorCatalogReadResult,
     ConnectorCatalogService,
     ConnectorCatalogUnavailableError,
+    FollowedCatalog,
+    SharedConnectorCatalog,
 )
 from vibe.app_server.protocol import ConnectorAuthReadParams, ConnectorAuthReadResponse
 from vibe.core.config import VibeConfigSchema
@@ -21,7 +23,7 @@ class FakeConnectorCatalogService(ConnectorCatalogService):
     """Test catalog owner backed by the same fixture as the legacy executor."""
 
     def __init__(self, registry: FakeConnectorRegistry) -> None:
-        super().__init__(implicit_source_enabled=False)
+        super().__init__(SharedConnectorCatalog(), implicit_source_enabled=False)
         self._registry = registry
         self._catalog = ResolvedConnectorCatalog(
             provider_fingerprint="fake-provider",
@@ -47,13 +49,18 @@ class FakeConnectorCatalogService(ConnectorCatalogService):
             ),
         )
 
-    def read_catalog(
+    async def read_catalog(
         self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
     ) -> ConnectorCatalogReadResult:
         del orchestrator
         if self._registry.bootstrap_error() is not None:
             return ConnectorCatalogReadResult(catalog=None, disposition="not_loaded")
         return ConnectorCatalogReadResult(catalog=self._catalog, disposition="memory")
+
+    async def read_cached_catalog(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+    ) -> ResolvedConnectorCatalog | None:
+        return (await self.read_catalog(orchestrator)).catalog
 
     async def resolve_catalog(
         self,
@@ -74,3 +81,9 @@ class FakeConnectorCatalogService(ConnectorCatalogService):
         return ConnectorAuthReadResponse(
             url=await self._registry.get_auth_url(params.name)
         )
+
+    async def follow(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+    ) -> FollowedCatalog | None:
+        del orchestrator
+        return None

@@ -1,0 +1,388 @@
+# Configuration reference
+
+This page describes configuration resolution and the app-server API.
+[ADR 0005](../adr/0005-layered-configuration.md) defines the constraints;
+[ADR 0002](../adr/0002-core-engine-and-delivery-surfaces.md) defines ownership.
+The schema, orchestrator and adapter remain authoritative for implemented behavior.
+
+## Current layer stack
+
+The effective order is:
+
+1. `DefaultConfigLayer`, materialized from `VibeConfigSchema` defaults;
+2. `ModelCatalogLayer`, materialized from the cached or fetched model catalog
+   when `enable_model_catalog` is on (the default); it contributes models, which
+   every layer above can override field by field, and the aliases a pin can
+   name them by. While it lists at least one model, the built-in default
+   models from layer 1 are not available anymore, so a catalog alias may take
+   a built-in's name;
+3. `GrowthbookLayer`, materialized from remote or hydrated experiment
+   assignments. It adds no models: the catalog lists them and recommends its
+   own default; when it lists none (off, not fetched, or not served), the
+   built-in models (Mistral Large 4, then Mistral Medium 3.5) remain, unless
+   `enable_builtin_models` is off: then only the `[[models]]` entries of the
+   layers above remain, and with none the config fails validation with "No
+   models are configured. Define at least one model under [[models]]." The
+   highest layer that sets `enable_builtin_models` decides; it is read before
+   the layers merge, since it decides what layer 1 contributes. The
+   `vibe_cli_model_catalog_filter` flag filters the catalog's
+   data before the merge, as if the catalog itself had sent it filtered:
+   `hide` drops models, `order` lists ids first in the picker, `default`
+   picks the default, and `settings` sets per-model fields (request settings,
+   display name, thinking levels, image support and prices; never the
+   context window, `name`, `provider` or `alias`). A model is named by its
+   id or one of its catalog aliases; a name that matches no catalog model is
+   ignored with a warning, an unknown key silently, and a malformed key, item
+   or setting is dropped on its own with a warning. The filter reaches only
+   users GrowthBook reaches, and the client applies it, like an
+   `allowed_models` the org's admin config sets: neither is access control,
+   which only the server can enforce;
+4. the user TOML layer (`~/.vibe/config.toml`) when the `"user"` source is
+   enabled, followed by the project TOML layer (a discovered trusted
+   `.vibe/config.toml`) when the `"project"` source is enabled;
+5. `VIBE_*` environment values;
+6. session/runtime overrides;
+7. the active agent layer (`AgentProfileLayer`, named `agent-profile`);
+8. the active approval policy layer (an `AgentProfileLayer` named
+   `approval-policy`); and
+9. the enforced admin layer (`AdminConfigLayer`), which shadows every layer
+   below it.
+
+`AgentProfileLayer` ships as a statically installed empty slot positioned just
+below the admin layer. `AgentManager` owns it and the approval policy layer it
+inserts right above it: it fills both for the initial agent and policy and, on
+a switch of either, replaces both in place, then rebuilds the orchestrator once
+(`rebuild`, a `run_sync` bridge over `build`). The policy outranks the agent,
+except that a policy never loosens a tool permission the agent itself set to
+`ask` or `never`. What runs without asking belongs to the policy alone: an
+agent file keeps only the keys an agent may set (instructions, model keys,
+tools and skills lists, system prompt, shell timeouts, a narrowing `ask` or
+`never` permission); `AgentRegistry` drops every other key and reports each one
+(`agent.setting_ignored`), and an agent never selects a policy. A policy
+override (a file named after a built-in policy) is read from user and org
+agent directories only; a project's is ignored
+(`approval_policy.project_override_ignored`). A policy that bypasses permissions (`auto-approve`)
+skips every `ask`, so it disables the tools the agent set to `never` instead. The admin layer outranks both. The effective config is
+the single merged result; there is no separate profile-free "base" config.
+
+`default_agent` names the agent and `default_approval_policy` the policy. A
+layer whose `default_agent` names a built-in approval policy, as configs
+written before the two were split do, is read as that layer's
+`default_approval_policy` before the merge (`VibeConfigSchema.prepare_layers`),
+so the policy keeps that layer's precedence and origin.
+
+The user and project TOML layers are installed together so a trusted project
+config inherits unspecified values from the user config; per-field merge
+strategies (`REPLACE` / `UNION` / `CONCAT` / `SHALLOW` / `DEEP`) decide how
+overlapping fields combine, with the project layer taking priority. An untrusted
+or absent project layer is skipped from the merge by the builder while the user
+layer still contributes.
+
+One exception: a project config or an agent profile may turn usage telemetry
+off, never on. Their `enable_telemetry = true` is dropped before the merge, so
+the value falls back to the layers below them (the user config, then the
+default), and the config carries a validation warning naming the source;
+`enable_telemetry = false` is honoured. A cloned repository's
+`.vibe/config.toml` or `.vibe/agents/*.toml` therefore cannot undo the user's
+opt-out. The rule applies to every agent profile, the user's own included.
+The environment and the org admin config still decide above the project
+config; an agent profile's `false` wins over the environment, as any profile
+value does.
+
+The default write target is selected from the installed layers:
+
+- `~/.vibe/config.toml` is the default write target whenever the user source is
+  enabled, including when a trusted project config is discovered: project
+  discovery walks up parent directories, so in a monorepo the closest project
+  file is rarely the scope the writer meant;
+- project-only composition uses the project layer, creating
+  `.vibe/config.toml` on first write when absent;
+- composition without a persistent source uses the runtime override layer.
+
+`active_model` uses the same write-target resolution as every other field.
+When a session already has a pinned model, the app server additionally mirrors
+an implicit `active_model` write into the runtime override layer; this does not
+change the target of the original write. An explicit persistent target,
+including one selected through `/config`, changes only that layer. A write
+explicitly targeting the session override changes that override directly.
+Accepted user input establishes the session model pin. Live metadata persistence
+records the resolved alias as `active_model` and the provider name as
+`model_name`; later host-only mutations preserve that config snapshot.
+
+The thinking level travels with the model pick and is session-scoped the same
+way, except that it lives under a model entry rather than beside it: the
+app server mirrors the session's level into the runtime override layer as a
+field of the active model, so a level picked in one session is not the level
+another session reopens on. Session metadata records it at the same turn
+boundary as the model, and records the effective level, so a model change moves
+the recorded level to the model now active.
+
+A model declared by a layer above the override — an agent profile, an admin
+policy — is exempt: that layer both outranks the override and may be replaced
+while the session runs, which would leave the override as the model's only and
+incomplete definition. The level of such a model stays the layer's to set, and
+the session neither scopes nor records it.
+
+An `active_model` that names one of a catalog model's `aliases` is first
+resolved to that model's ID. An `active_model` absent from the merged model
+list is then normalized to the empty, unpinned sentinel. Default resolution
+then applies: the catalog filter's `default`, then the model catalog's
+recommendation, then the built-in default Mistral Large 4 (available only while
+the catalog lists no models and `enable_builtin_models` is on), then the first
+available model, each skipped when
+`allowed_models` excludes it. The
+invalid source value is left untouched and reported as a validation warning
+that names no cause.
+
+A model whose `provider` no layer defines is left out of the merged config the
+same way, with a log line naming the model and the provider, and applies again
+once the provider returns. A pin on it gets the missing-model fallback, and its
+warning names the provider. When no model has a defined provider, the models
+are kept, so the config still loads.
+
+A model entry without `provider` only overrides a model another layer defines.
+When no layer defines that model, the entry is left out of the merged config and
+reported as a validation warning; it applies again once the model returns.
+Missing-model warnings are never suppressed while a catalog fetch is pending:
+the session-start wait (VIBE-5122) is the only hold. A field write to a model
+the catalog layer or the admin layer defines stays settings-only for the same
+reason — the layer redefines the model at launch, and copied identity would
+keep a retired model running.
+
+A `compaction_model` on another provider than the active model yields to the
+active model: compaction rides the active model's connection, so it has no route
+to a second provider. The source value is left untouched and reported as a
+validation warning rather than rejected, so a model pick, including a restored
+session pin, never fails on it.
+
+A model's automatic compaction threshold is resolved in this order:
+
+1. the model's own `auto_compact_threshold` (a field of its `[models.<id>]`
+   entry), from the highest of the layers listed above that sets one on that
+   model;
+2. the top-level `auto_compact_threshold`, from the highest layer that sets it;
+3. neither: the session derives one from the model's context window.
+
+A top-level threshold never replaces a model's own, whichever layer sets it,
+the admin config included: since the model catalog sets a threshold on most
+models, a top-level admin value reaches only the models it leaves without one.
+To apply one value to every model, an admin sets it on each model, with an entry
+naming the model by its catalog ID and its provider (the managed-config form
+accepts no entry without `provider`):
+
+```toml
+[[models]]
+name = "mistral-large-4-0"
+provider = "mistral"
+auto_compact_threshold = 200000
+```
+
+The catalog's other values for that model stay; the model picker lists it
+under the admin's models. The entry defines the model on its own: once the
+catalog stops listing that model, it still stays in the picker, without its
+context window, until the admin removes the entry.
+
+The `/config` row `auto_compact_threshold` shows the threshold the active model
+uses and the layer it comes from. It edits the model's own threshold when the
+model has one, else the top-level one, and is read-only when the value it shows
+comes from the admin config.
+
+Clients that let a user pick a scope (the `/config` screen) offer the default
+target, the trusted project layer, and the session override layer, in that
+order; each write op names its target layer explicitly.
+
+An untrusted project layer loads empty and is skipped by the merge builder.
+When the user source is enabled, implicit writes fall back to the user layer.
+A user or project TOML value overrides the corresponding GrowthBook assignment.
+
+A/B test assignments that affect session behavior are product configuration
+inputs. Map them into config fields through `GrowthbookLayer`, consume the
+effective `VibeConfigSchema` in app-server composition, and pass resolved values
+through Runtime capabilities. Direct `ExperimentManager` branching bypasses
+TOML, environment and session override precedence.
+
+Session options such as enabled tools, disabled tools, and ephemeral MCP
+servers are override-layer values. Forks and child sessions receive independent
+orchestrator copies. Child-only values, such as child session logging, are
+written to the copied override layer rather than persisted into the parent's
+TOML.
+
+## Settings Vibe does not use
+
+`VibeConfigSchema.check_layer_keys` checks the keys of the user TOML, a
+supplied user config, the trusted project TOML and the active agent profile
+against the schema (`vibe.core.config._setting_keys`). It reports:
+
+- a key that is not a setting, with the closest setting name when there is one;
+- a retired setting, such as `include_model_info`; and
+- a setting with no effect under the unified harness, such as `[tools.grep]` or
+  `tools.read_file.max_read_bytes`.
+
+A setting removed together with the feature it toggled, such as
+`show_greeting`, is not reported whatever its value: no value can ask for
+anything Vibe still does.
+
+A tool setting is checked against the tool's own settings model. Settings of a
+tool that is not builtin, such as an MCP tool, are not checked.
+
+By default each finding is a warning. It is logged, shown at startup, written to
+stderr and the export by `vibe -p`, and returned in `validation_warnings` by
+`config/read`. With `strict_config = true` in a config file, or
+`VIBE_STRICT_CONFIG=1`, the config is refused with `UnusedConfigKeysError`
+instead. Clients receive `invalid_params` with data `{"kind": "configuration"}`
+for a session start, a session read, and a picker read without a session
+(`config/read`, `agents/list`, `skills/list`). `VIBE_STRICT_CONFIG` takes a boolean,
+such as `1`, `true`, `yes` or `on` to refuse and `0`, `false`, `no` or `off` to
+warn; any other non-empty value is refused, because the environment layer would
+otherwise drop it and leave strict mode off.
+
+`vibe config schema` prints the JSON schema of every setting, served by
+`config/schema`. It includes each builtin tool's settings under `tools`, marks
+retired settings as deprecated, and sets `additionalProperties: false` so an
+editor can flag unknown keys.
+
+## App-server config boundary
+
+`ConfigView` is a redacted public projection, not a second writable config
+schema. It contains only values a client must render or apply and never contains
+resolved API keys, tokens, connector credentials, or arbitrary environment
+values. Clients must not infer writable paths from its shape.
+
+The resource catalogue is defined by
+[`vibe.app_server.protocol`](../../vibe/app_server/protocol.py):
+
+- `config/read` returns the effective redacted view (a single merged config;
+  no separate base view);
+- `config/reload` re-reads configured sources and optionally rebuilds runtime
+  state;
+- `config/write` validates and persists JSON-pointer edits, applying `set` and
+  `remove` ops that each optionally target a named layer;
+- `config/proxy/read` and `config/proxy/write` manage the supported global
+  proxy and certificate `.env` entries; and
+- `config/schema` exposes the live schema used by ACP settings clients.
+
+The proxy resource is deliberately separate from the TOML orchestrator.
+`config/schema` is configuration-form metadata; it is not a list of valid
+`config/write` paths and is not the public app-server protocol schema.
+
+For `config/write`, the server:
+
+1. validates the target session and any active rewrite reservation;
+2. converts the ops into schema-aware patches and preflights the merged config;
+3. persists accepted layer edits and rebuilds the effective snapshot;
+4. applies the derived configuration or defers it to the next turn boundary; and
+5. returns canonical runtime state and mutation status, with `runtime/updated`
+   notifications for accepted changes.
+
+`config/reload` requires an idle session. A supported model-only write may be
+accepted mid-turn with pending application; other execution-setting changes
+conflict while a turn is active. An accepted configuration write is therefore
+distinct from its application to execution. Settings pickers retain their
+idle-only product policy under [0012](../adr/0012-two-phase-slash-command-execution.md).
+
+One TOML-layer write uses a temporary file, `fsync`, and atomic replacement.
+The general orchestrator is not transactional across several target layers;
+each op may name a target layer, and ops without one route to the selected
+writable layer.
+
+The public API accepts `{op, path, value, target_layer}` ops and a
+client-supplied `reloadRuntime` choice. It does not expose resource revisions,
+complete provenance or per-field runtime-impact metadata. Clients use explicit
+layer targets rather than infer them from a redacted view.
+
+### Provenance and locked settings
+
+The environment and admin layers outrank every persistent write target and
+cannot be written through the config API. A value either one sets is
+**locked** for writes to a layer below it: the write is persisted, but the
+session keeps running the higher layer's value.
+
+- `config/fields/read` returns each field's `origin` (the layer its value comes
+  from) and `locked` (the origin is the environment or admin layer above the
+  default write target). Older servers send neither; clients treat a missing
+  `locked` as writable.
+- `config/write` keeps a shadowed write and lists it in `shadowed`
+  (`{path, origin}` per top-level field), so a client can say why the value it
+  wrote does not run. Only whole top-level fields are checked. The session's
+  override and agent profile layers are session choices and never lock.
+
+### Session-less usage telemetry
+
+`config/telemetry/read` and `config/telemetry/update` serve a settings screen
+with no session open. They read the user config with the environment, the held
+org admin config and cached experiments applied, and no project config:
+`{enabled, origin, locked}`. Since a project config or agent profile can only turn
+telemetry off for its own sessions, a session never sends more than this
+setting says: it runs `enabled` or, where they opt out, `false`. Inside such a
+session, `config/fields/read` reports the field with origin `project-toml` or
+`agent-profile`. An update writes `enable_telemetry` to the user
+config, or answers `rejected` with a reason while the environment
+(`VIBE_ENABLE_TELEMETRY`) or the org admin config decides it. Once written,
+every session open in the process re-reads its config files, applies the
+change when idle or at its next turn boundary, and announces it with
+`runtime/updated`.
+
+### Config change notifications
+
+A connection that calls `config/subscribe` receives `config/changed` (no
+params) when the config a session opened now would run may have changed: the
+process's held org admin config changed (refreshed every 10 minutes, or
+adopted from another process), its model catalog changed (a plan upgrade can
+unlock models), or a session-less settings update landed. The client re-reads
+what it shows. It is opt-in, so clients that reject unknown notifications are
+unaffected. An attached session keeps reporting its own config with
+`runtime/updated`.
+
+Each process holds its own model catalog. A `config/read` refreshes an old
+one in the background, and announces a changed catalog with `config/changed`.
+To a model picker showing a model the plan does not include, or a session
+running one, a catalog is old after 30 seconds, so a client re-reading the
+models as the user returns from upgrading their plan sees them unlocked. A
+session on a runnable model refreshes it every 10 minutes. A turn on a locked model waits up to 2 seconds
+for that refresh before it is refused.
+
+A model picker opening sends `config/read` with `refreshModelCatalog: true`.
+When the catalog locks a model, it is fetched right away, whatever its age,
+and the read answers once the fetch ends. On a session read, an idle session
+loads the new catalog and announces it with `runtime/updated`. If the fetch
+fails, the read answers with the catalog already held.
+
+## Client-local application
+
+Persistence ownership and runtime application are separate:
+
+- model, agent, permission, tool, MCP, connector, hook, workspace, and session
+  settings are applied by the server;
+- committed theme, clipboard, terminal-notification, and audio settings are
+  applied from accepted server state; temporary presentation previews may
+  remain local; and
+- microphone and speaker enumeration, recording, playback, and device failures
+  remain client-local state.
+
+Audio managers consume the redacted public view. They do not import the private
+config schema. A local hardware failure may produce a client warning, but it
+must not silently mutate server config.
+
+Before attachment, launchers may read startup configuration for process setup.
+The session-less `setup/*` API persists onboarding choices and credentials;
+`config/write` serves attached sessions. The server owns keyring and
+`$VIBE_HOME/.env` credential custody.
+
+## Administrator environment variables
+
+`VIBE_CUSTOM_CONSOLE_URL` pins the console URL for VS Code and Vibe CLI
+sign-in. It supports centrally managed deployments: when set, sign-in is
+prefilled with that console and redirected into its normal login flow, and the
+domain can no longer be changed. The manual API-key sign-in path stays
+available.
+
+The value may be a full URL or a bare domain. Scheme-less values are upgraded
+to `https://`; an explicit `http://` is kept (useful for local auth gateways);
+trailing slashes are stripped. The variable name is matched case-insensitively.
+An unset, empty, or invalid value means no pin, and an invalid value logs a
+warning rather than blocking sign-in.
+
+The pin fixes the browser sign-in host only. In a split-horizon deployment
+whose configured browser auth base matches the pin, the configured
+`browser_auth_api_base_url` is preserved (the API base otherwise derives as
+`{pin}/api`), and account calls keep the CLI-reachable API base's origin.

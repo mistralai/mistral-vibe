@@ -34,14 +34,15 @@ from vibe.setup.auth.api_key_persistence import (
     remove_api_key,
     resolve_api_key_provider,
 )
-from vibe.setup.auth.whoami import resolve_tenant_domains
-from vibe.setup.onboarding.context import (
+from vibe.setup.auth.onboarding_context import (
     OnboardingContext,
     browser_auth_account_base,
     browser_auth_requires_origin_rewrite,
     is_valid_custom_domain,
+    pinned_console_api_base,
     resolve_browser_auth_urls,
 )
+from vibe.setup.auth.whoami import resolve_tenant_domains
 
 SIGN_IN_TARGET_MISTRAL = "mistral"
 SIGN_IN_TARGET_CUSTOM = "custom"
@@ -63,7 +64,7 @@ class ApiKeyPersister(Protocol):
     ) -> str: ...
 
 
-type OnboardingContextLoader = Callable[[], OnboardingContext]
+type OnboardingContextLoader = Callable[[], Awaitable[OnboardingContext]]
 type BrowserSignInServiceFactory = Callable[[ProviderConfig], BrowserSignInServicePort]
 type ApiKeyRemover = Callable[[ProviderConfig], None]
 type CredentialsPersister = Callable[
@@ -80,11 +81,38 @@ class PendingBrowserSignIn:
     provider: ProviderConfig
 
 
+@dataclass(frozen=True, slots=True)
+class AuthStatusReport:
+    """Everything the auth/status endpoint reports, from one context load."""
+
+    state: AuthState
+    custom_domain: str | None
+    custom_domain_locked: bool
+    # Why the config is degraded, when it is: a machine-readable reason the
+    # client can surface instead of a confident answer over the defaults.
+    config_error: str | None = None
+
+
 def _custom_domain_of(provider: ProviderConfig) -> str | None:
     base_url = provider.browser_auth_base_url
     if not base_url or base_url == DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL:
         return None
     return base_url
+
+
+def _is_same_tenant(requested: ProviderConfig, current: ProviderConfig) -> bool:
+    """Compare the sign-in URLs that identify a tenant.
+
+    Configured URLs may be hand-written (trailing slash, no scheme), so both
+    sides go through the normalization applied to a requested custom domain.
+    """
+    if not requested.browser_auth_base_url or not current.browser_auth_base_url:
+        return False
+    return resolve_browser_auth_urls(
+        requested.browser_auth_base_url, requested.browser_auth_api_base_url
+    ) == resolve_browser_auth_urls(
+        current.browser_auth_base_url, current.browser_auth_api_base_url
+    )
 
 
 def _account_base_of(provider: ProviderConfig) -> str | None:
@@ -116,7 +144,7 @@ class AcpAuthController:
     def __init__(
         self,
         *,
-        context_loader: OnboardingContextLoader | None = None,
+        context_loader: OnboardingContextLoader,
         service_factory: BrowserSignInServiceFactory | None = None,
         api_key_persister: ApiKeyPersister = persist_api_key,
         api_key_remover: ApiKeyRemover = remove_api_key,
@@ -124,7 +152,7 @@ class AcpAuthController:
         tenant_domain_resolver: TenantDomainResolver = resolve_tenant_domains,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
     ) -> None:
-        self._load_context = context_loader or OnboardingContext.load
+        self._load_context = context_loader
         self._service_factory = service_factory or self._build_service
         self._persist_api_key = api_key_persister
         self._remove_api_key = api_key_remover
@@ -137,8 +165,8 @@ class AcpAuthController:
         )
         self._pending: dict[str, PendingBrowserSignIn] = {}
 
-    def browser_methods(self, *, delegated: bool) -> list[AuthMethodAgent]:
-        context = self._load_context()
+    async def browser_methods(self, *, delegated: bool) -> list[AuthMethodAgent]:
+        context = await self._load_context()
         if not context.supports_browser_sign_in:
             return []
         methods = [self._browser_method("browser-auth")]
@@ -155,9 +183,12 @@ class AcpAuthController:
             return await self._authenticate_delegated(arguments)
         raise InvalidRequestError(f"Unsupported auth method: {method_id}")
 
-    def status(self) -> AuthState:
+    async def status(self) -> AuthState:
+        return self._assess_state(await self._load_context())
+
+    def _assess_state(self, context: OnboardingContext) -> AuthState:
         load_dotenv_values(env_path=GLOBAL_ENV_FILE.path)
-        provider = self._load_context().provider
+        provider = context.provider
         return assess_auth_state(
             provider,
             process_env_had_value_before_dotenv_load=bool(
@@ -166,18 +197,27 @@ class AcpAuthController:
             ),
         )
 
-    def custom_domain(self) -> str | None:
-        return _custom_domain_of(self._load_context().provider)
+    async def status_report(self) -> AuthStatusReport:
+        context = await self._load_context()
+        pinned = context.pinned_console_url
+        return AuthStatusReport(
+            state=self._assess_state(context),
+            custom_domain=(
+                pinned if pinned is not None else _custom_domain_of(context.provider)
+            ),
+            custom_domain_locked=pinned is not None,
+            config_error=context.config_error,
+        )
 
-    def sign_out(self) -> None:
-        provider = self._load_context().provider
-        state = self.status()
+    async def sign_out(self) -> None:
+        context = await self._load_context()
+        state = self._assess_state(context)
         if not state.sign_out_available:
             raise InvalidRequestError(
                 f"Sign out is not available for auth state: {state.kind.value}"
             )
         try:
-            self._remove_api_key(provider)
+            self._remove_api_key(context.provider)
         except (OSError, ValueError, KeyringError) as exc:
             raise InternalError(f"Failed to sign out: {exc}") from exc
 
@@ -187,7 +227,18 @@ class AcpAuthController:
         action = arguments.get("action")
         if action not in {None, "start"}:
             raise InvalidRequestError(f"Unsupported browser auth action: {action}")
-        provider = self._resolve_sign_in_provider(arguments)
+        context = await self._enabled_context()
+        provider = self._resolve_sign_in_provider(arguments, context)
+        # Some ACP clients call authenticate on every connection. The stored key
+        # belongs to the tenant configured on the active provider, so a request
+        # for that same tenant has nothing to sign in to. One context load backs
+        # the tenant check and the state assessment, so both describe the same
+        # config even if the files change mid-request.
+        if (
+            _is_same_tenant(provider, context.provider)
+            and self._assess_state(context).can_use_active_provider
+        ):
+            return AuthenticateResponse()
         service = self._service_factory(provider)
         try:
             api_key = await service.authenticate()
@@ -213,7 +264,8 @@ class AcpAuthController:
         )
 
     async def _start_delegated(self, arguments: dict[str, Any]) -> AuthenticateResponse:
-        provider = self._resolve_sign_in_provider(arguments)
+        context = await self._enabled_context()
+        provider = self._resolve_sign_in_provider(arguments, context)
         service = self._service_factory(provider)
         try:
             attempt = await service.start_attempt()
@@ -277,7 +329,7 @@ class AcpAuthController:
                 custom_domain=custom_domain is not None,
             )
         }
-        context = self._load_context()
+        context = await self._load_context()
         # Use the CLI-reachable connector origin (not the browser-only console)
         # for /whoami and the persisted console URL, so split-horizon tenant
         # resolution hits a host the CLI can reach.
@@ -321,8 +373,18 @@ class AcpAuthController:
             )
         return meta
 
-    def _resolve_sign_in_provider(self, arguments: dict[str, Any]) -> ProviderConfig:
-        provider = self._enabled_provider()
+    def _resolve_sign_in_provider(
+        self, arguments: dict[str, Any], context: OnboardingContext
+    ) -> ProviderConfig:
+        provider = context.provider
+        pinned = context.pinned_console_url
+        if pinned is not None:
+            # An administrator-pinned console URL wins over any requested target
+            # so users cannot point Vibe at a different deployment. A split-
+            # horizon API base configured for the pinned console is preserved.
+            return self._provider_for_console_url(
+                provider, pinned, pinned_console_api_base(provider, pinned)
+            )
         target = arguments.get("signInTarget")
         if target is None:
             return provider
@@ -355,24 +417,30 @@ class AcpAuthController:
             raise InvalidRequestError(
                 f"Invalid custom sign-in API base URL: {api_base_arg!r}"
             )
-        base_url, api_base_url = resolve_browser_auth_urls(domain, api_base_arg or None)
+        return self._provider_for_console_url(provider, domain, api_base_arg or None)
+
+    @staticmethod
+    def _provider_for_console_url(
+        provider: ProviderConfig, domain: str, api_base_url: str | None = None
+    ) -> ProviderConfig:
+        base_url, api_base = resolve_browser_auth_urls(domain, api_base_url)
         return provider.model_copy(
             update={
                 "browser_auth_base_url": base_url,
-                "browser_auth_api_base_url": api_base_url,
-                "browser_auth_allow_origin_rewrite": (
-                    browser_auth_requires_origin_rewrite(base_url, api_base_url)
+                "browser_auth_api_base_url": api_base,
+                "browser_auth_allow_origin_rewrite": browser_auth_requires_origin_rewrite(
+                    base_url, api_base
                 ),
             }
         )
 
-    def _enabled_provider(self) -> ProviderConfig:
-        context = self._load_context()
+    async def _enabled_context(self) -> OnboardingContext:
+        context = await self._load_context()
         if not context.supports_browser_sign_in:
             raise InvalidRequestError(
                 "Browser sign-in is not available for the configured provider."
             )
-        return context.provider
+        return context
 
     @staticmethod
     def _browser_method(method_id: str) -> AuthMethodAgent:

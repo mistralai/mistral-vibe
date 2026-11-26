@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Iterable, Mapping
 import fnmatch
 import glob
 import os
 from pathlib import Path, PurePath
+import re
+import sys
 from typing import Annotated
 
 from pydantic import AfterValidator
 
-from vibe.core.config.harness_files import (
-    HarnessFilesManager,
-    get_harness_files_manager,
-)
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.permissions import (
@@ -23,6 +20,13 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.workspace import Workspace
+from vibe.permissions import (
+    PathGrantScope,
+    parse_path_grant_pattern,
+    path_grant_pattern,
+    path_grant_pattern_matches,
+    path_pattern_matches,
+)
 from vibe.utils.paths import (
     normalize_windows_input_path,
     normalize_windows_path,
@@ -48,24 +52,6 @@ def matches_sensitive_pattern(resolved_path: str, patterns: list[str]) -> bool:
     return any(lowered.match(pattern.lower()) for pattern in patterns)
 
 
-_active_file_display_harness: ContextVar[HarnessFilesManager | None] = ContextVar(
-    "active_file_display_harness", default=None
-)
-
-
-@contextmanager
-def file_display_harness(harness_files: HarnessFilesManager | None) -> Iterator[None]:
-    if harness_files is None:
-        yield
-        return
-
-    token = _active_file_display_harness.set(harness_files)
-    try:
-        yield
-    finally:
-        _active_file_display_harness.reset(token)
-
-
 def _make_absolute(path_str: str, cwd: Path) -> Path:
     path = Path(normalize_windows_path(path_str)).expanduser()
     if target_pure_path(str(path)).is_absolute():
@@ -82,6 +68,17 @@ def resolve_tool_path(raw: str | None, cwd: Path) -> Path:
     return path.resolve() if path.is_absolute() else path
 
 
+def shell_path_scope_root(path_str: str) -> str | None:
+    """Return a recursive grant root only for a known, traversable directory."""
+    target = Path(path_str)
+    try:
+        if target.is_dir() and os.access(target, os.R_OK | os.X_OK):
+            return str(target)
+    except OSError:
+        pass
+    return None
+
+
 def ambient_workspace() -> Workspace:
     """Fallback workspace for a caller with no session, rooted at the process cwd."""
     try:
@@ -91,66 +88,183 @@ def ambient_workspace() -> Workspace:
     return Workspace.for_session(Path.cwd(), project_roots)
 
 
-def _resolve_display_target(path_str: str, cwd: Path) -> Path | None:
-    """Resolve user-provided absolute, relative, or home-relative paths."""
-    try:
-        path = Path(path_str).expanduser()
-        if not path.is_absolute():
-            path = cwd / path
-        return Path(os.path.normpath(path))
-    except (ValueError, OSError):
-        return None
-
-
-def _display_relative_to_cwd(path: Path, cwd: Path) -> str | None:
-    """Return a stable cwd-relative display path, or None when outside cwd."""
-    try:
-        rel = path.relative_to(cwd)
-    except ValueError:
-        return None
-    if str(rel) == ".":
-        return path.name
-    return str(rel)
-
-
-def display_file_path(path_str: str) -> str:
-    """Path relative to the session cwd, for display.
-
-    Falls back to the original string when the path can't be resolved, or the
-    resolved absolute path when it does not sit under the session cwd.
-    """
-    manager = _active_file_display_harness.get()
-    cwd_raw = (
-        (manager.cwd or Path.cwd()).expanduser() if manager is not None else Path.cwd()
-    )
-    cwd = Path(os.path.normpath(str(cwd_raw)))
-    path = _resolve_display_target(path_str, cwd)
-    if path is None:
-        return path_str
-
-    if relative_path := _display_relative_to_cwd(path, cwd):
-        return relative_path
-    return str(path)
-
-
 def resolve_path_permission(
-    path_str: str, *, cwd: Path, allowlist: list[str], denylist: list[str]
+    path_str: str, *, workspace: Workspace, allowlist: list[str], denylist: list[str]
 ) -> PermissionContext | None:
     """Resolve permission for a file path against glob patterns.
 
     Returns NEVER on denylist match, ALWAYS on allowlist match, None otherwise.
     """
-    file_str = str(_make_absolute(path_str, cwd).resolve())
+    file_str = str(_make_absolute(path_str, workspace.cwd).resolve())
 
-    for pattern in denylist:
+    for pattern in _with_resolved_path_globs(denylist):
         if fnmatch.fnmatch(file_str, pattern):
             return PermissionContext(permission=ToolPermission.NEVER)
 
-    for pattern in allowlist:
-        if fnmatch.fnmatch(file_str, pattern):
+    for pattern in with_resolved_path_grants(allowlist, workspace):
+        if path_pattern_matches(file_str, pattern):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
     return None
+
+
+def _with_resolved_path_globs(patterns: Iterable[str]) -> list[str]:
+    """The globs, plus each absolute glob with the links in its literal prefix followed.
+
+    Deny entries must cover every spelling allowlist grants match, or ``/tmp/secret``
+    would not deny ``/private/tmp/secret`` that a ``/tmp`` grant allows on macOS.
+    The original glob is kept, so following links only ever widens a denial.
+    """
+    expanded: list[str] = []
+    for pattern in patterns:
+        expanded.append(pattern)
+        resolved = _resolved_path_glob(pattern)
+        if resolved is not None and resolved != pattern:
+            expanded.append(resolved)
+    return expanded
+
+
+def _resolved_path_glob(pattern: str) -> str | None:
+    path = Path(pattern)
+    if not path.is_absolute():
+        return None
+    parts = path.parts
+    literal = next(
+        (i for i, part in enumerate(parts) if any(c in part for c in "*?[")), len(parts)
+    )
+    try:
+        prefix = Path(*parts[:literal]).resolve()
+    except (OSError, ValueError):
+        return None
+    return str(prefix.joinpath(*parts[literal:]))
+
+
+def with_resolved_path_grants(
+    patterns: Iterable[str], workspace: Workspace
+) -> list[str]:
+    """The patterns, plus each absolute path grant or glob with its links followed.
+
+    Tools match the resolved path a call reaches (``/tmp`` is ``/private/tmp`` on
+    macOS), but a grant written by hand keeps the spelling the user typed. Links
+    the agent could repoint are not followed, or repointing one would move the
+    grant to a directory the user never named: a link inside the workspace, and
+    the last literal component unless it is one of macOS's system links.
+    """
+    expanded: list[str] = []
+    for pattern in patterns:
+        expanded.append(pattern)
+        resolved = (
+            _resolved_path_grant(pattern, workspace)
+            if parse_path_grant_pattern(pattern) is not None
+            else _resolved_allow_glob(pattern, workspace)
+        )
+        if resolved is not None and resolved != pattern:
+            expanded.append(resolved)
+    return expanded
+
+
+def _resolved_path_grant(pattern: str, workspace: Workspace) -> str | None:
+    if (parsed := parse_path_grant_pattern(pattern)) is None:
+        return None
+    scope, granted = parsed
+    path = Path(granted)
+    if not path.is_absolute():
+        return None
+    if (target := _resolved_written_path(path, workspace)) is None:
+        return None
+    return path_grant_pattern(str(target), scope)
+
+
+def _resolved_allow_glob(pattern: str, workspace: Workspace) -> str | None:
+    path = Path(pattern)
+    if not path.is_absolute():
+        return None
+    parts = path.parts
+    literal = next(
+        (i for i, part in enumerate(parts) if any(c in part for c in "*?[")), len(parts)
+    )
+    # A wildcard right below the root leaves no literal component to follow.
+    if literal <= 1:
+        return None
+    prefix = _resolved_written_path(Path(*parts[:literal]), workspace)
+    if prefix is None:
+        return None
+    return str(prefix.joinpath(*parts[literal:]))
+
+
+def _resolved_written_path(path: Path, workspace: Workspace) -> Path | None:
+    """``path`` with its parents' links followed, outside the workspace only."""
+    if (parent := _follow_links_outside(path.parent, workspace)) is None:
+        return None
+    target = str(parent / path.name)
+    if sys.platform == "darwin":
+        target = _MACOS_SYSTEM_LINKS.get(target, target)
+    return Path(target)
+
+
+def _follow_links_outside(path: Path, workspace: Workspace) -> Path | None:
+    """``path`` with its links followed, or ``None`` if one lies in the workspace."""
+    followed = Path(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            # ``..`` climbs from where the links led, as the OS reads it.
+            followed = followed.parent if part == ".." else followed / part
+            if not (followed.is_symlink() or followed.is_junction()):
+                continue
+            if workspace.allows(followed):
+                return None
+            followed = followed.resolve()
+    except (OSError, ValueError):
+        return None
+    return followed
+
+
+_MACOS_SYSTEM_LINKS = {
+    "/etc": "/private/etc",
+    "/tmp": "/private/tmp",
+    "/var": "/private/var",
+}
+
+
+def ungranted_paths(
+    paths: Mapping[str, str], allowlist: Iterable[str], workspace: Workspace
+) -> dict[str, str]:
+    """The resolved paths no path grant of ``allowlist`` covers, symlinks followed.
+
+    ``paths`` maps each resolved path to the spelling the call supplied for it.
+    """
+    grants = with_resolved_path_grants(allowlist, workspace)
+    return {
+        path: supplied
+        for path, supplied in paths.items()
+        if not any(path_grant_pattern_matches(path, grant) for grant in grants)
+    }
+
+
+def names_a_link(token: str, cwd: Path) -> bool:
+    """Whether a bare name is a symlink or a Windows junction in ``cwd``.
+
+    Either can lead anywhere a path can, so the name has to be resolved like one.
+    """
+    try:
+        candidate = cwd / token
+        return candidate.is_symlink() or candidate.is_junction()
+    except (OSError, ValueError):
+        return False
+
+
+_STREAM_DEVICES = frozenset({"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"})
+_FD_DEVICE = re.compile(r"/dev/fd/[0-9]+")
+
+
+def is_stream_device_path(path_str: str) -> bool:
+    """Whether the path names the null device or a standard stream, not a file.
+
+    Read as written: ``..`` after ``/dev/fd/3`` climbs from wherever that
+    descriptor points, so normalizing it away would hide the real target.
+    """
+    path = path_str.rstrip("/")
+    return path in _STREAM_DEVICES or _FD_DEVICE.fullmatch(path) is not None
 
 
 def is_path_within_workdir(
@@ -192,7 +306,7 @@ def resolve_file_tool_permission(
 
     if (
         result := resolve_path_permission(
-            path_str, cwd=cwd, allowlist=allowlist, denylist=denylist
+            path_str, workspace=workspace, allowlist=allowlist, denylist=denylist
         )
     ) is not None:
         return result
@@ -218,15 +332,15 @@ def resolve_file_tool_permission(
     if not is_path_within_workdir(path_str, workspace=workspace):
         if config_permission == ToolPermission.NEVER:
             return PermissionContext(permission=ToolPermission.NEVER)
-        resolved = file_path.resolve()
-        parent_dir = str(resolved.parent)
-        parent_glob = str(Path(parent_dir) / "*")
+        resolved = str(file_path.resolve())
         required.append(
             RequiredPermission(
                 scope=PermissionScope.OUTSIDE_DIRECTORY,
-                invocation_pattern=parent_glob,
-                session_pattern=parent_glob,
-                label=f"outside workdir ({parent_glob})",
+                invocation_pattern=resolved,
+                session_pattern=path_grant_pattern(resolved, PathGrantScope.EXACT),
+                label=f"outside workdir ({resolved})",
+                path_scope_root=shell_path_scope_root(resolved),
+                supplied_pattern=str(file_path),
             )
         )
 

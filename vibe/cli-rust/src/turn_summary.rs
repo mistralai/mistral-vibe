@@ -1,0 +1,289 @@
+//! Turn summary tracker and narrator state.
+
+use std::sync::Arc;
+
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::app::App;
+use crate::narrator_manager::{self, ReadAloudTracking, Speech};
+use crate::server::{
+    method, Client, EntryHead, NarrationSummarizeParams, NarrationSummarizeResponse, PublicTurn,
+};
+
+/// One turn's accumulated data.
+#[derive(Debug, Default)]
+pub struct TurnSummaryData {
+    pub user_message: String,
+    pub message_id: Option<String>,
+    pub assistant_fragments: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl TurnSummaryData {
+    /// The fragments joined with no separator.
+    pub fn assistant_text(&self) -> String {
+        self.assistant_fragments.concat()
+    }
+}
+
+/// Accumulates one turn's data; each `start_turn` retires the previous turn's
+/// data by bumping its generation.
+#[derive(Debug, Default)]
+pub struct TurnSummaryTracker {
+    data: Option<TurnSummaryData>,
+    generation: u64,
+}
+
+impl TurnSummaryTracker {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn start_turn(&mut self, user_message: &str) {
+        self.generation += 1;
+        self.data = Some(TurnSummaryData {
+            user_message: user_message.to_owned(),
+            ..Default::default()
+        });
+    }
+
+    pub fn track_user_message(&mut self, message_id: &str) {
+        if let Some(data) = &mut self.data {
+            data.message_id = Some(message_id.to_owned());
+        }
+    }
+
+    pub fn track_assistant_text(&mut self, content: &str) {
+        if let Some(data) = &mut self.data {
+            if !content.is_empty() {
+                data.assistant_fragments.push(content.to_owned());
+            }
+        }
+    }
+
+    pub fn set_error(&mut self, message: &str) {
+        if let Some(data) = &mut self.data {
+            data.error = Some(message.to_owned());
+        }
+    }
+
+    pub fn cancel_turn(&mut self) {
+        self.data = None;
+    }
+
+    /// Consume the turn's data, with the generation its summary must match.
+    pub fn end_turn(&mut self) -> Option<(TurnSummaryData, u64)> {
+        self.data.take().map(|data| (data, self.generation))
+    }
+}
+
+/// Narrator manager state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NarratorState {
+    #[default]
+    Idle,
+    Summarizing,
+    Speaking,
+}
+
+/// A summarize answer or a clip's playback progress, as it lands on the main thread.
+pub enum Event {
+    Summary {
+        generation: u64,
+        summary: Option<String>,
+    },
+    Speaking {
+        id: u64,
+    },
+    Finished {
+        id: u64,
+    },
+    Failed {
+        id: u64,
+        error_type: &'static str,
+    },
+}
+
+/// Client-side narrator state.
+#[derive(Default)]
+pub struct Narrator {
+    pub state: NarratorState,
+    pub summary: TurnSummaryTracker,
+    /// Summary request in flight, aborted by `cancel`.
+    cancel: Option<tokio::task::AbortHandle>,
+    /// Animation frame of the narrator row.
+    pub frame: usize,
+    /// The TTS client exists only with a `speech` config.
+    pub speech_config: Option<crate::tts::SpeechConfig>,
+    pub speech: Option<Speech>,
+    pub speech_id: u64,
+    pub tracking: ReadAloudTracking,
+}
+
+/// Start a turn's summary; server turn starts pass an empty user message.
+/// A disabled narrator accumulates nothing.
+pub fn on_turn_start(app: &mut App, user_message: &str) {
+    app.narrator.summary.start_turn(user_message);
+    if !app.session.startup_config.narrator_enabled {
+        app.narrator.summary.cancel_turn();
+    }
+}
+
+pub fn on_user_message(app: &mut App, message_id: &str) {
+    app.narrator.summary.track_user_message(message_id);
+}
+
+pub fn on_assistant_text(app: &mut App, content: &str) {
+    app.narrator.summary.track_assistant_text(content);
+}
+
+pub fn on_turn_error(app: &mut App, message: &str) {
+    app.narrator.summary.set_error(message);
+}
+
+pub fn on_turn_cancel(app: &mut App) {
+    app.narrator.summary.cancel_turn();
+}
+
+/// Narrator tracking, entryAdded half: the user entry's id and
+/// the assistant entry's text feed the turn summary tracker.
+pub fn track_narrator_added(app: &mut App, params: &Value, entry: &EntryHead) {
+    let Some(id) = entry.id.as_deref() else {
+        return;
+    };
+    match entry.message_role() {
+        Some("user") => on_user_message(app, id),
+        Some("assistant") => on_assistant_text(app, &entry_text(&params["entry"])),
+        _ => {}
+    }
+}
+
+/// Narrator tracking, entryUpdated half: assistant text appends.
+pub fn track_narrator_updated(app: &mut App, params: &Value) {
+    let Some(id) = params.get("entryId").and_then(Value::as_str) else {
+        return;
+    };
+    if !app.view.transcript.is_assistant_message(id) {
+        return;
+    }
+    let ops = params.get("patch").and_then(Value::as_array);
+    let delta = crate::transcript::patch::appended_text(
+        ops.map(Vec::as_slice).unwrap_or(&[]),
+        "/content/0/text",
+    );
+    if !delta.is_empty() {
+        on_assistant_text(app, &delta);
+    }
+}
+
+/// A message entry's text blocks, joined with a blank line like the server's
+/// `PublicMessageEntry.text`.
+fn entry_text(entry: &Value) -> String {
+    let message = crate::server::MessageEntry::deserialize(entry);
+    message
+        .map(|message| message.text("\n\n"))
+        .unwrap_or_default()
+}
+
+/// The failed turn's error message for the summary request: the raw wire
+/// message, else its code.
+pub fn turn_error_message(turn: &PublicTurn) -> String {
+    turn.error_message()
+        .or(turn.error_code())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// An `incomplete_stream` failure with no
+/// queued server work auto-retries, and the retried turn's summary carries no
+/// error.
+pub fn retries_incomplete_stream(app: &App, turn: &PublicTurn) -> bool {
+    turn.error_code() == Some("incomplete_stream") && app.queue.is_empty()
+}
+
+/// Request the turn's summary to read aloud.
+pub fn on_turn_end(app: &mut App, client: &Arc<Client>) {
+    let Some((data, generation)) = app.narrator.summary.end_turn() else {
+        return;
+    };
+    let can_speak = app.narrator.speech_config.is_some() && crate::audio_player::SUPPORTED;
+    if !app.session.startup_config.narrator_enabled || !can_speak {
+        return;
+    }
+    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.events.clone()) else {
+        return;
+    };
+    app.narrator.state = NarratorState::Summarizing;
+    app.narrator.frame = 0;
+    narrator_manager::on_read_aloud_requested(app);
+    let client = client.clone();
+    let handle = crate::work::spawn(async move {
+        let assistant_text = data.assistant_text();
+        let summary = match serde_json::to_value(NarrationSummarizeParams {
+            session_id,
+            user_message: data.user_message,
+            assistant_text,
+            error: data.error,
+            message_id: data.message_id,
+        }) {
+            Ok(params) => client
+                .request(method::NARRATION_SUMMARIZE, params)
+                .await
+                .ok(),
+            Err(err) => {
+                tracing::warn!(%err, "narration/summarize params failed to serialize");
+                None
+            }
+        }
+        .and_then(|value| {
+            serde_json::from_value::<NarrationSummarizeResponse>(value)
+                .ok()
+                .and_then(|response| response.summary)
+        });
+        let event = Event::Summary {
+            generation,
+            summary,
+        };
+        let _ = tx.send(event.into()).await;
+    });
+    app.narrator.cancel = Some(handle.abort_handle());
+}
+
+/// Cancel the narrator; returns whether it was active.
+pub fn cancel(app: &mut App) -> bool {
+    let active = app.narrator.state != NarratorState::Idle;
+    if active {
+        narrator_manager::on_read_aloud_ended(app, "canceled", None);
+    }
+    if let Some(handle) = app.narrator.cancel.take() {
+        handle.abort();
+    }
+    narrator_manager::stop(app);
+    app.narrator.state = NarratorState::Idle;
+    active
+}
+
+/// Apply a summary event; a summary landing after `cancel` stays silent.
+pub fn apply_event(app: &mut App, event: Event) {
+    let Event::Summary {
+        generation,
+        summary,
+    } = event
+    else {
+        return narrator_manager::apply_event(app, event);
+    };
+    app.narrator.cancel = None;
+    match summary {
+        Some(text)
+            if generation == app.narrator.summary.generation()
+                && app.narrator.state == NarratorState::Summarizing =>
+        {
+            narrator_manager::speak(app, text)
+        }
+        _ => app.narrator.state = NarratorState::Idle,
+    }
+}
+
+#[cfg(test)]
+mod tests;

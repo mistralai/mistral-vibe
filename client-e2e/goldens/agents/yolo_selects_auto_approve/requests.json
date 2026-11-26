@@ -1,0 +1,13 @@
+[
+ {
+  "method": "session/start",
+  "params": {
+   "agentConfig": {
+    "autoApprove": true,
+    "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal"
+   },
+   "historyLimit": 200
+  }
+ }
+]

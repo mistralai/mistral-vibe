@@ -60,6 +60,35 @@ def make_json_patch(
     target: dict[str, Any],
     *,
     append_paths: Collection[str] = (),
+    whole_keys: Collection[str] = (),
+) -> list[JsonPatchOperation]:
+    """The ops that turn `source` into `target`.
+
+    A changed top-level key in `whole_keys` travels as one `replace` of its
+    whole value, never as per-item ops, for clients that follow it as a list.
+    """
+    whole = [key for key in whole_keys if source.get(key) != target.get(key)]
+    operations = _diff(
+        {key: value for key, value in source.items() if key not in whole_keys},
+        {key: value for key, value in target.items() if key not in whole_keys},
+        append_paths,
+    )
+    for key in whole:
+        if key not in target:
+            operations.append(JsonPatchOperation(op="remove", path=f"/{key}"))
+        elif key not in source:
+            operations.append(
+                JsonPatchOperation(op="add", path=f"/{key}", value=target[key])
+            )
+        else:
+            operations.append(
+                JsonPatchOperation(op="replace", path=f"/{key}", value=target[key])
+            )
+    return operations
+
+
+def _diff(
+    source: dict[str, Any], target: dict[str, Any], append_paths: Collection[str]
 ) -> list[JsonPatchOperation]:
     operations: list[JsonPatchOperation] = []
     for raw_operation in make_patch(source, target).patch:

@@ -1,0 +1,70 @@
+//! Plugin catalogue round-trips, answered on the main thread as `CommandEvent::Plugins`.
+
+use std::future::Future;
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+
+use super::{text, Event};
+use crate::app::App;
+use crate::server::request_error::describe;
+use crate::server::{method, Client, PluginCatalogState, RequestFailure};
+
+/// A reload's changes and the catalogue after it; `None` from a backend without plugins.
+pub type Diff = Option<(Vec<text::Change>, PluginCatalogState)>;
+
+/// Run `task` off the main thread; false when there is no session to ask.
+pub(super) fn spawn<F, Fut>(app: &mut App, client: &Arc<Client>, task: F) -> bool
+where
+    F: FnOnce(Arc<Client>, String) -> Fut + Send + 'static,
+    Fut: Future<Output = Event> + Send + 'static,
+{
+    crate::commands::spawn_session(app, client, task)
+}
+
+/// Two reads either side of `plugin/reload`; one when a running turn defers it.
+pub(super) async fn reload(client: &Client, session_id: &str) -> Event {
+    let before = match read(client, session_id).await {
+        Ok(Some(before)) => before,
+        other => return Event::Reloaded(other.map(|_| None)),
+    };
+    let answer = match client
+        .request(method::PLUGIN_RELOAD, json!({"sessionId": session_id}))
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => return Event::Reloaded(Err(describe(&error))),
+    };
+    if answer.get("deferred").and_then(Value::as_bool) == Some(true) {
+        return Event::ReloadDeferred;
+    }
+    Event::Reloaded(match read(client, session_id).await {
+        Ok(Some(after)) => Ok(Some((text::changes(&before, &after), after))),
+        other => other.map(|_| None),
+    })
+}
+
+pub(super) async fn read(
+    client: &Client,
+    session_id: &str,
+) -> Result<Option<PluginCatalogState>, String> {
+    let params = json!({"sessionId": session_id});
+    let value = match client.request(method::PLUGIN_CATALOG_READ, params).await {
+        Ok(value) => value,
+        Err(error) if no_plugin_backend(&error) => return Ok(None),
+        Err(error) => return Err(describe(&error)),
+    };
+    let catalog = value.get("plugins").cloned().unwrap_or_else(|| json!({}));
+    serde_json::from_value(catalog)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// The legacy backend answers plugin methods with `not_implemented`.
+fn no_plugin_backend(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<RequestFailure>(),
+        Some(RequestFailure::Rpc(rpc))
+            if matches!(rpc.code().as_str(), "not_implemented" | "method_not_found" | "-32601")
+    )
+}

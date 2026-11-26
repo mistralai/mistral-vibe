@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import TextIOWrapper
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import sys
+from typing import Any
 
 from vibe.config_values import DEFAULT_LOG_LEVEL
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
+from vibe.utils.secrets import redact
 
 logger = logging.getLogger("vibe")
+
+# Asyncio tasks and to_thread workers inherit it, so every record a multiplexed channel
+# emits names the channel without threading an argument through the harness.
+app_server_channel: ContextVar[str | None] = ContextVar(
+    "app_server_channel", default=None
+)
+
+# The id of the headless run a record belongs to, in a process serving many runs.
+# Inherited the same way, so a run's records name it.
+headless_run: ContextVar[str | None] = ContextVar("headless_run", default=None)
 
 # The experimental Unified Harness Runtime logs under its own top-level logger, which
 # propagates to the root rather than to "vibe". Route it to the same file handler so
@@ -43,23 +59,32 @@ class StructuredLogFormatter(logging.Formatter):
         pid = os.getpid()
         level = record.levelname
         message = encode_log_message(record.getMessage())
+        if (channel := app_server_channel.get()) is not None:
+            message = f"channel={channel} {message}"
+        if (run := headless_run.get()) is not None:
+            message = f"run={encode_log_message(run)} {message}"
 
         line = f"{timestamp} {ppid} {pid} {level} {message}"
         if record.exc_info:
             exc_text = encode_log_message(self.formatException(record.exc_info))
             line = f"{line} {exc_text}"
-        return line
+        return redact(line)
 
 
-class _VibeFileHandler(RotatingFileHandler):
+class OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    def _open(self) -> TextIOWrapper[Any]:
+        # Rotation reopens with umask-derived modes; an existing file keeps its own.
+        try:
+            os.close(
+                os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            )
+        except FileExistsError:
+            pass
+        return super()._open()
+
+
+class _VibeFileHandler(OwnerOnlyRotatingFileHandler):
     pass
-
-
-# The Unified Harness runtime logs under this top-level logger. It is not a child
-# of the "vibe" logger, so it propagates to the root logger -- which carries no Vibe
-# file handler -- and its diagnostics never reach vibe.log. Capture it alongside
-# Vibe's own logger so `--experimental-harness` sessions are observable.
-_HARNESS_LOGGER_NAME = "mistralai_vibe_local_harness"
 
 
 def init_file_logging(
@@ -80,11 +105,25 @@ def init_file_logging(
         ):
             continue
         if shared_handler is None:
-            resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
             max_bytes = int(os.environ.get("LOG_MAX_BYTES", 10 * 1024 * 1024))
-            shared_handler = _VibeFileHandler(
-                resolved_log_file, maxBytes=max_bytes, backupCount=0, encoding="utf-8"
-            )
+            try:
+                resolved_log_file.parent.mkdir(
+                    parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True
+                )
+                shared_handler = _VibeFileHandler(
+                    resolved_log_file,
+                    maxBytes=max_bytes,
+                    backupCount=0,
+                    encoding="utf-8",
+                )
+            except OSError as error:
+                # A log file the user cannot write, or one another program
+                # locks on Windows, must not stop the process from serving.
+                print(
+                    f"Vibe file logging is off: cannot open {resolved_log_file}: {error}",
+                    file=sys.stderr,
+                )
+                return
             shared_handler.setFormatter(StructuredLogFormatter())
         candidate.setLevel(logging.DEBUG)
         candidate.addHandler(shared_handler)
@@ -214,6 +253,7 @@ def decode_log_message(encoded: str) -> str:
 __all__ = [
     "LOG_LEVELS",
     "LogLevelChain",
+    "OwnerOnlyRotatingFileHandler",
     "StructuredLogFormatter",
     "decode_log_message",
     "encode_log_message",

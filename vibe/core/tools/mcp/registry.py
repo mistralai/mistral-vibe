@@ -25,7 +25,6 @@ from vibe.core.tools.mcp.descriptor_cache import (
     descriptor_cache_key,
 )
 from vibe.core.tools.mcp.tools import (
-    MCPHttpAuthorizationRuntime,
     authorization_required_result,
     create_mcp_http_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
@@ -35,6 +34,7 @@ from vibe.core.tools.mcp.tools import (
 )
 from vibe.core.tools.remote import AuthStatus, RemoteTool
 from vibe.core.utils import run_sync
+from vibe.core.utils.exceptions import leaf_exceptions
 from vibe.observability.logging import logger
 
 
@@ -101,14 +101,9 @@ class MCPRegistry:
 
     @staticmethod
     def _format_mcp_error(exc: BaseException) -> str:
-        if isinstance(exc, BaseExceptionGroup):
-            messages = [
-                formatted
-                for child in exc.exceptions
-                if (formatted := MCPRegistry._format_mcp_error(child))
-            ]
-            return "; ".join(messages)
-        return str(exc)
+        return "; ".join(
+            message for leaf in leaf_exceptions(exc) if (message := str(leaf))
+        )
 
     @staticmethod
     def _format_failed(exc: BaseException) -> str:
@@ -230,7 +225,7 @@ class MCPRegistry:
         )
         if record is None:
             return None
-        tools = self._build_tools(server, record.descriptors, reference)
+        tools = self._build_tools(server, record.descriptors)
         self._store_cache_entry(
             key,
             server.name,
@@ -321,7 +316,7 @@ class MCPRegistry:
                     return None
                 return (
                     descriptors,
-                    self._build_tools(server, descriptors, reference),
+                    self._build_tools(server, descriptors),
                     authorization,
                 )
             case _:
@@ -356,11 +351,7 @@ class MCPRegistry:
             if retried is None:
                 return None
             descriptors, authorization = retried
-        return (
-            descriptors,
-            self._build_tools(server, descriptors, reference),
-            authorization,
-        )
+        return (descriptors, self._build_tools(server, descriptors), authorization)
 
     async def _reject_and_retry_discovery(
         self,
@@ -433,10 +424,7 @@ class MCPRegistry:
             return None
 
     def _build_tools(
-        self,
-        server: MCPServer,
-        descriptors: tuple[RemoteTool, ...],
-        reference: MCPAuthorizationRef,
+        self, server: MCPServer, descriptors: tuple[RemoteTool, ...]
     ) -> dict[str, type[BaseTool]]:
         tools: dict[str, type[BaseTool]] = {}
         for remote in descriptors:
@@ -447,32 +435,13 @@ class MCPRegistry:
                         remote=remote,
                         alias=server.name,
                         server_hint=server.prompt,
-                        env=server.env or None,
-                        cwd=server.cwd,
-                        startup_timeout_sec=server.startup_timeout_sec,
-                        tool_timeout_sec=server.tool_timeout_sec,
-                        sampling_enabled=server.sampling_enabled,
                     )
                 else:
-                    provider = self._authorization_provider
                     proxy = create_mcp_http_proxy_tool_class(
                         url=server.url,
                         remote=remote,
                         alias=server.name,
                         server_hint=server.prompt,
-                        headers=(server.http_headers() if provider is None else None),
-                        authorization_runtime=(
-                            MCPHttpAuthorizationRuntime(
-                                provider=provider,
-                                reference=reference,
-                                required_sink=self._publish_authorization_required,
-                            )
-                            if provider is not None
-                            else None
-                        ),
-                        startup_timeout_sec=server.startup_timeout_sec,
-                        tool_timeout_sec=server.tool_timeout_sec,
-                        sampling_enabled=server.sampling_enabled,
                     )
                 tools[proxy.get_name()] = proxy
             except Exception as exc:
@@ -639,25 +608,12 @@ class MCPRegistry:
         if descriptor_revision is not None:
             self._descriptor_revisions[alias] = descriptor_revision
 
-    def record_disabled_authorization(
-        self, alias: str, descriptor_revision: str
-    ) -> None:
-        self._drop_alias_cache(alias)
-        self._needs_auth.discard(alias)
-        self._force_refresh.discard(alias)
-        self._descriptor_revisions[alias] = descriptor_revision
-
     def descriptor_revision(self, alias: str) -> str:
         return self._descriptor_revisions.get(alias, "")
 
     def invalidate(self, alias: str) -> None:
         self._drop_alias_cache(alias)
         self._force_refresh.add(alias)
-
-    def disabled_aliases(self) -> set[str]:
-        return {
-            alias for alias, server in self._servers_by_alias.items() if server.disabled
-        }
 
     def status(self) -> dict[str, AuthStatus]:
         statuses: dict[str, AuthStatus] = {}

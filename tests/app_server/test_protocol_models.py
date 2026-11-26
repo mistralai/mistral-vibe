@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from uuid import UUID
+
 from pydantic import ValidationError
 import pytest
 
 from vibe.app_server._model import validate_wire
+from vibe.app_server._session_peers import RenameSessionArgs
 from vibe.app_server.models import (
     IdleSessionStatus,
     MCPSourceSummary,
+    PublicError,
     PublicQueuedTurn,
     PublicRetryCategory,
     PublicRetryState,
@@ -16,8 +21,11 @@ from vibe.app_server.models import (
     PublicSessionState,
     PublicTurn,
     PublicTurnQueue,
+    PublicTurnQueueEditState,
     PublicTurnStatus,
     TextContentBlock,
+    TurnErrorCode,
+    validate_history_entry,
 )
 from vibe.app_server.protocol import (
     SERVER_METHODS,
@@ -27,9 +35,12 @@ from vibe.app_server.protocol import (
     CallbackResultError,
     CallbackResultResponse,
     EventWatermarkResponse,
+    FeedbackShouldShowResponse,
     InitializeParams,
     InvalidParamsData,
     InvalidParamsIssue,
+    LoopsCreateParams,
+    LoopsUpdateParams,
     MessageAnnotations,
     PageRequest,
     ProtocolError,
@@ -39,6 +50,7 @@ from vibe.app_server.protocol import (
     SessionForkResponse,
     SessionHistoryListParams,
     SessionImageContentBlock,
+    SessionPeerRenameParams,
     SessionReadResponse,
     SessionResourceLinkContentBlock,
     SessionResumeResponse,
@@ -50,6 +62,14 @@ from vibe.app_server.protocol import (
     TurnEnqueueParams,
     TurnEnqueueResponse,
     TurnInterruptResponse,
+    TurnQueueEditAbandonParams,
+    TurnQueueEditAbandonResponse,
+    TurnQueueEditCancelParams,
+    TurnQueueEditCancelResponse,
+    TurnQueueEditSaveParams,
+    TurnQueueEditSaveResponse,
+    TurnQueueEditStartParams,
+    TurnQueueEditStartResponse,
     TurnQueueReadResponse,
     TurnQueueRemoveParams,
     TurnQueueRemoveResponse,
@@ -64,6 +84,13 @@ from vibe.app_server.protocol import (
     TurnSteerResponse,
     TurnUserInputEntry,
 )
+
+
+@pytest.mark.parametrize("method", ["tools/list", "stats/read", "diagnostics/list"])
+def test_retired_methods_are_not_advertised(method: str) -> None:
+    assert method not in SERVER_METHODS
+
+
 from vibe.user_content import UserDisplayContent
 
 
@@ -107,6 +134,53 @@ def test_wire_models_serialize_camel_case_and_reject_snake_case_wire_keys() -> N
         validate_wire(SessionHistoryListParams, {"session_id": "session-1"})
 
 
+def test_feedback_response_serializes_cooldown_and_accepts_legacy_shape() -> None:
+    response = FeedbackShouldShowResponse(show=True, snooze_duration_seconds=604_800)
+
+    assert response.model_dump(mode="json") == {
+        "show": True,
+        "snoozeDurationSeconds": 604_800,
+    }
+    assert (
+        validate_wire(
+            FeedbackShouldShowResponse, {"show": True}
+        ).snooze_duration_seconds
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retryable"),
+    [
+        (PublicTurnStatus.FAILED, TurnErrorCode.BACKEND_ERROR, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.RATE_LIMIT, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.RESPONSE_TOO_LONG, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.INCOMPLETE_STREAM, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.CONTEXT_TOO_LONG, False),
+        (PublicTurnStatus.FAILED, TurnErrorCode.INVALID_API_KEY, False),
+        (PublicTurnStatus.FAILED, None, False),
+        (PublicTurnStatus.INTERRUPTED, None, True),
+        (PublicTurnStatus.COMPLETED, None, False),
+        (PublicTurnStatus.IN_PROGRESS, None, False),
+    ],
+)
+def test_public_turn_is_retryable_from_its_status_and_error_code(
+    status: PublicTurnStatus, code: TurnErrorCode | None, retryable: bool
+) -> None:
+    error = PublicError(message="failed", code=code) if code else None
+
+    turn = PublicTurn(
+        id="turn-1", session_id="session-1", status=status, started_at=1, error=error
+    )
+    from_wire = validate_wire(
+        PublicTurn, {**turn.model_dump(mode="json"), "retryable": not retryable}
+    )
+
+    assert turn.retryable is retryable
+    assert turn.model_dump(mode="json")["retryable"] is retryable
+    assert from_wire.retryable is retryable
+
+
 def test_public_session_state_carries_optional_retry_state() -> None:
     session = PublicSession(
         id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
@@ -128,6 +202,8 @@ def test_public_session_state_carries_optional_retry_state() -> None:
         "turnId": "turn-1",
         "category": "rate_limited",
         "detail": "HTTP 429",
+        "retryAt": None,
+        "retryAttempt": None,
     }
 
 
@@ -150,6 +226,54 @@ def test_public_session_harness_field_defaults_to_none() -> None:
 
     assert session.harness is None
     assert session.model_dump(mode="json")["harness"] is None
+
+
+def test_public_session_says_only_a_missing_folder_is_missing() -> None:
+    bare = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    gone = bare.model_copy(update={"cwd_missing": True})
+
+    assert "cwdMissing" not in bare.model_dump(mode="json", by_alias=True)
+    assert gone.model_dump(mode="json", by_alias=True)["cwdMissing"] is True
+
+
+def test_public_session_leaves_out_an_unknown_repository_root() -> None:
+    bare = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    grouped = bare.model_copy(update={"repository_root": "/work/repository"})
+
+    assert "repositoryRoot" not in bare.model_dump(mode="json", by_alias=True)
+    assert grouped.model_dump(mode="json", by_alias=True)["repositoryRoot"] == (
+        "/work/repository"
+    )
+    assert (
+        PublicSession.model_validate(
+            bare.model_dump(mode="json", by_alias=True)
+        ).repository_root
+        is None
+    )
+
+
+def test_public_session_serializes_nullable_bumped_at() -> None:
+    session = PublicSession(
+        id="session-1",
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=1,
+        bumped_at=42,
+    )
+
+    assert session.model_dump(mode="json")["bumpedAt"] == 42
+
+
+def test_public_session_without_bumped_at_ranks_by_created_at() -> None:
+    session = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=7, updated_at=99
+    )
+
+    assert session.model_dump(mode="json")["bumpedAt"] == 7
 
 
 @pytest.mark.parametrize("harness", ["legacy", "unified"])
@@ -184,7 +308,8 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
         "instructions": "Use the project conventions.",
         "workdir": "/workspace",
         "workspaceRoots": ["/workspace", "/shared"],
-        "agent": "plan",
+        "agent": "reviewer",
+        "approvalPolicy": "ask",
         "tools": [
             {
                 "name": "select_customer",
@@ -200,7 +325,34 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
     assert config.completion.model == "mistral-large-latest"
     assert config.workdir == "/workspace"
     assert config.workspace_roots == ["/workspace", "/shared"]
+    assert (config.agent, config.approval_policy) == ("reviewer", "ask")
     assert config.tools[0].input_schema == {"type": "object"}
+
+
+@pytest.mark.parametrize("project", [{"kind": "local"}, {"kind": "cloud", "id": ""}])
+def test_session_start_rejects_a_project_stamp_without_a_project(
+    project: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError):
+        validate_wire(SessionStartParams, {"project": project})
+
+
+def test_session_start_takes_no_project() -> None:
+    params = validate_wire(SessionStartParams, {"project": {"kind": "none"}})
+
+    assert params.project is not None
+    assert params.project.kind == "none"
+
+
+def test_a_session_start_without_a_project_refuses_a_worktree() -> None:
+    with pytest.raises(ValidationError):
+        validate_wire(
+            SessionStartParams,
+            {
+                "project": {"kind": "none"},
+                "agentConfig": {"worktree": {"kind": "auto"}},
+            },
+        )
 
 
 def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
@@ -218,8 +370,10 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
             "hooks": [],
             "cwd": "/workspace",
             "workspaceRoots": [],
+            "accessRoots": [],
             "worktree": None,
             "agent": None,
+            "approvalPolicy": None,
             "autoApprove": False,
             "enabledTools": None,
             "disabledTools": [],
@@ -229,11 +383,26 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
             "headless": True,
             "trustWorkspace": False,
             "mcpServers": [],
+            "terminalKey": None,
+            "systemPrompt": None,
         },
         "historyLimit": 100,
         "idempotencyKey": None,
+        "project": None,
         "kind": "normal",
+        "title": None,
+        "model": None,
+        "reasoningEffort": None,
+        "sessionOnly": False,
+        "firstTurn": None,
+        "startedBySessionId": None,
+        "spawnedBySessionId": None,
     }
+
+
+def test_a_blank_session_system_prompt_is_refused() -> None:
+    with pytest.raises(ValidationError, match="system prompt must not be blank"):
+        AgentConfig(system_prompt=" \n")
 
 
 def test_initialize_accepts_the_desktop_entrypoint_off_the_wire() -> None:
@@ -252,6 +421,50 @@ def test_initialize_accepts_the_desktop_entrypoint_off_the_wire() -> None:
 
     assert params.client_info.entrypoint == "desktop"
     assert params.client_info.name == "vibe_desktop"
+
+
+def test_initialize_takes_the_client_instance_desktop_reports() -> None:
+    params = validate_wire(
+        InitializeParams,
+        {
+            "clientInfo": {"name": "vibe_desktop", "version": "1.2.3"},
+            "clientInstance": "/Users/me/Library/Application Support/le-chat-desktop",
+        },
+    )
+
+    assert params.client_instance == (
+        "/Users/me/Library/Application Support/le-chat-desktop"
+    )
+
+
+def test_initialize_ignores_capabilities_this_server_does_not_know() -> None:
+    """A client may declare a capability ahead of the servers that use it."""
+    params = validate_wire(
+        InitializeParams,
+        {
+            "clientInfo": {"name": "vibe_desktop", "version": "1.2.3"},
+            "capabilities": {
+                "callbackKinds": ["approval"],
+                "sessionSpawn": True,
+                "aCapabilityFromTheFuture": {"enabled": True},
+            },
+        },
+    )
+
+    assert params.capabilities.callback_kinds == ["approval"]
+    assert params.capabilities.session_spawn is True
+    assert "aCapabilityFromTheFuture" not in params.capabilities.model_dump(
+        by_alias=True
+    )
+    # Only the extension point is lenient: the handshake itself stays strict.
+    with pytest.raises(ValidationError):
+        validate_wire(
+            InitializeParams,
+            {
+                "clientInfo": {"name": "vibe_desktop", "version": "1.2.3"},
+                "unknownTopLevelField": True,
+            },
+        )
 
 
 def test_page_request_uses_canonical_pagination_shape() -> None:
@@ -310,6 +523,20 @@ def test_turn_queue_protocol_models_use_camel_case() -> None:
         queue_item_id="queue-1",
         entries=params.entries,
     )
+    edit_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    edit_start = TurnQueueEditStartParams(
+        session_id="session-1", queue_item_id="queue-1", edit_id=edit_id
+    )
+    edit_save = TurnQueueEditSaveParams(
+        session_id="session-1",
+        queue_item_id="queue-1",
+        edit_id=edit_id,
+        idempotency_key="save-1",
+        entries=params.entries,
+    )
+    edit_cancel = TurnQueueEditCancelParams(
+        session_id="session-1", queue_item_id="queue-1", edit_id=edit_id
+    )
     remove = TurnQueueRemoveParams(session_id="session-1", queue_item_id="queue-1")
     notification = TurnQueueUpdatedParams(
         event_id=3, session_id="session-1", emitted_at=30, queue=queue
@@ -334,6 +561,19 @@ def test_turn_queue_protocol_models_use_camel_case() -> None:
         "entries": params.model_dump(mode="json")["entries"],
         "queueItemId": "queue-1",
     }
+    assert edit_start.model_dump(mode="json") == {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "editId": str(edit_id),
+    }
+    assert edit_save.model_dump(mode="json") == {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "editId": str(edit_id),
+        "idempotencyKey": "save-1",
+        "entries": params.model_dump(mode="json")["entries"],
+    }
+    assert edit_cancel.model_dump(mode="json") == edit_start.model_dump(mode="json")
     assert remove.model_dump(mode="json") == {
         "sessionId": "session-1",
         "queueItemId": "queue-1",
@@ -356,6 +596,30 @@ def test_turn_queue_protocol_models_use_camel_case() -> None:
         ).idempotency_key
         is None
     )
+
+
+def test_queued_turn_edit_save_requires_an_idempotency_key() -> None:
+    with pytest.raises(ValidationError):
+        validate_wire(
+            TurnQueueEditSaveParams,
+            {
+                "sessionId": "session-1",
+                "queueItemId": "queue-1",
+                "editId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "entries": [
+                    {"role": "user", "content": [{"type": "text", "text": "edited"}]}
+                ],
+            },
+        )
+
+
+def test_public_turn_queue_exposes_only_the_edited_item_identity() -> None:
+    queue = _turn_queue().model_copy(
+        update={"editing": PublicTurnQueueEditState(queue_item_id="queue-1")}
+    )
+
+    assert queue.model_dump(mode="json")["editing"] == {"queueItemId": "queue-1"}
+    assert "editId" not in queue.model_dump_json()
 
 
 def test_canonical_enqueue_rejects_the_old_vibe_payload() -> None:
@@ -445,6 +709,98 @@ def test_turn_steer_preserves_user_display_content() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("input_fields", "expected_input_entry_id"),
+    [
+        pytest.param({}, None, id="omitted"),
+        pytest.param({"inputEntryId": None}, None, id="null"),
+        pytest.param({"inputEntryId": "steer-1"}, "steer-1", id="linked"),
+    ],
+)
+def test_public_models_serialize_nullable_input_entry_id(
+    input_fields: dict[str, str | None], expected_input_entry_id: str | None
+) -> None:
+    """*Prepare*: Turn, message, and callback payloads with absent or linked input.
+    *Do*: Parse and serialize the public app-server models.
+    *Assert*: Missing input IDs become null without mutating the original payloads.
+    """
+    # Prepare
+    turn = {
+        "id": "turn-1",
+        "sessionId": "session-1",
+        "status": "in_progress",
+        "startedAt": 1,
+        **input_fields,
+    }
+    entry_base = {
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "createdAt": 2,
+        "updatedAt": 2,
+        "generationStatus": "completed",
+        "relatedEntryId": None,
+        **input_fields,
+    }
+    entries = [
+        {
+            **entry_base,
+            "type": "message",
+            "id": "assistant-1",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Done"}],
+            "source": "harness",
+        },
+        {
+            **entry_base,
+            "type": "callback",
+            "id": "callback-entry-1",
+            "callbackId": "callback-1",
+            "relatedEntryId": "effect-1",
+            "title": "Choose an option",
+            "detail": {
+                "kind": "user_input",
+                "request": {
+                    "questions": [
+                        {
+                            "question": "Continue?",
+                            "options": [{"label": "Yes"}, {"label": "No"}],
+                        }
+                    ]
+                },
+            },
+            "state": {"status": "open"},
+        },
+    ]
+    original_turn = deepcopy(turn)
+    original_entries = deepcopy(entries)
+
+    # Do
+    parsed_turn = validate_wire(PublicTurn, turn)
+    parsed_entries = [validate_history_entry(entry) for entry in entries]
+    serialized_turn = parsed_turn.model_dump(mode="json", by_alias=True)
+    serialized_entries = [
+        entry.model_dump(mode="json", by_alias=True) for entry in parsed_entries
+    ]
+
+    # Assert
+    assert parsed_turn.input_entry_id == expected_input_entry_id
+    assert serialized_turn["inputEntryId"] == expected_input_entry_id
+    assert [entry.input_entry_id for entry in parsed_entries] == [
+        expected_input_entry_id,
+        expected_input_entry_id,
+    ]
+    assert [entry["inputEntryId"] for entry in serialized_entries] == [
+        expected_input_entry_id,
+        expected_input_entry_id,
+    ]
+    assert [entry["relatedEntryId"] for entry in serialized_entries] == [
+        None,
+        "effect-1",
+    ]
+    assert turn == original_turn
+    assert entries == original_entries
+
+
 def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:
     with pytest.raises(ValidationError, match="final turn input entry"):
         TurnEnqueueParams(
@@ -463,6 +819,10 @@ def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:
 def test_turn_queue_methods_are_advertised() -> None:
     assert {
         "session/turn/enqueue",
+        "session/turn/queue/edit/cancel",
+        "session/turn/queue/edit/abandon",
+        "session/turn/queue/edit/save",
+        "session/turn/queue/edit/start",
         "session/turn/queue/read",
         "session/turn/queue/remove",
         "session/turn/queue/replace",
@@ -478,6 +838,42 @@ def test_turn_queue_methods_are_advertised() -> None:
     }.isdisjoint(SERVER_METHODS)
 
 
+def test_background_process_output_method_is_advertised() -> None:
+    """*Prepare*: The app-server's public method catalogue.
+    *Do*: Inspect the background-process output method.
+    *Assert*: Clients can discover the typed output read capability.
+    """
+    # Prepare
+    method = "session/backgroundProcess/output"
+
+    # Do
+    is_advertised = method in SERVER_METHODS
+
+    # Assert
+    assert is_advertised
+
+
+def test_turn_queue_abandonment_uses_only_the_edit_identity() -> None:
+    """*Prepare*: A queue edit identity belonging to one Session.
+    *Do*: Serialize the abandonment request and response.
+    *Assert*: The request carries no content and the response is empty.
+    """
+    # Prepare
+    identity = {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "editId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }
+
+    # Do
+    params = TurnQueueEditAbandonParams.model_validate(identity)
+    response = TurnQueueEditAbandonResponse()
+
+    # Assert
+    assert params.model_dump(mode="json") == identity
+    assert response.model_dump(mode="json") == {}
+
+
 def test_turn_queue_command_results_are_minimal() -> None:
     assert TurnEnqueueResponse(queue_item_id="queue-1").model_dump(mode="json") == {
         "queueItemId": "queue-1"
@@ -485,6 +881,13 @@ def test_turn_queue_command_results_are_minimal() -> None:
     assert TurnQueueReplaceResponse(queue_item_id="queue-1").model_dump(
         mode="json"
     ) == {"queueItemId": "queue-1"}
+    assert TurnQueueEditStartResponse(queue_item_id="queue-1").model_dump(
+        mode="json"
+    ) == {"queueItemId": "queue-1"}
+    assert TurnQueueEditSaveResponse(queue_item_id="queue-1").model_dump(
+        mode="json"
+    ) == {"queueItemId": "queue-1"}
+    assert TurnQueueEditCancelResponse().model_dump(mode="json") == {}
     assert TurnQueueReadResponse(queue=_turn_queue()).model_dump(mode="json") == {
         "queue": _turn_queue().model_dump(mode="json")
     }
@@ -673,12 +1076,13 @@ def test_validate_backend_wire_ignores_unknown_fields() -> None:
 
     result = validate_backend_wire(
         TokenUsage,
-        {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "cachedInputTokens": 4},
+        {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "newHarnessField": 4},
     )
 
     assert result.input_tokens == 1
     assert result.output_tokens == 2
     assert result.total_tokens == 3
+    assert result.cached_input_tokens == 0
 
 
 def test_validate_backend_wire_respects_model_defaults() -> None:
@@ -710,3 +1114,161 @@ def test_validate_backend_wire_still_requires_fields_without_defaults() -> None:
 
     with pytest.raises(ValidationError):
         validate_backend_wire(_Needs, {"unrelated": 1})
+
+
+def test_cumulative_budgets_validate_values_in_every_mode() -> None:
+    """*Prepare*: Interactive and headless session configs with cumulative budgets.
+    *Do*: Validate zero, interactive, negative, and non-finite budget values.
+    *Assert*: Budgets need no headless flag; negative and non-finite values fail.
+    """
+    # Prepare / Do / Assert
+    config = AgentConfig(headless=True, max_session_tokens=0, max_price=0)
+    assert config.max_session_tokens == 0
+    assert config.max_price == 0
+    interactive = AgentConfig(max_session_tokens=10, max_price=1.5)
+    assert interactive.max_session_tokens == 10
+    assert interactive.max_price == 1.5
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
+        AgentConfig(max_session_tokens=-1)
+    with pytest.raises(ValueError, match="finite number"):
+        AgentConfig(max_price=float("nan"))
+
+
+@pytest.mark.parametrize(
+    "schedule", [{"interval": "30s", "cron": "0 9 * * *"}, {}], ids=["both", "neither"]
+)
+def test_loops_create_takes_exactly_one_schedule(schedule: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="Exactly one of interval or cron"):
+        LoopsCreateParams.model_validate({"sessionId": "s", "prompt": "p", **schedule})
+    with pytest.raises(ValidationError, match="Exactly one of interval or cron"):
+        LoopsUpdateParams.model_validate({
+            "sessionId": "s",
+            "loopId": "l",
+            "prompt": "p",
+            **schedule,
+        })
+
+
+def test_loops_update_requires_the_loop_id() -> None:
+    with pytest.raises(ValidationError, match="loopId"):
+        LoopsUpdateParams.model_validate({
+            "sessionId": "s",
+            "interval": "30s",
+            "prompt": "p",
+        })
+
+
+def test_loops_create_keeps_an_interval_only_payload_unchanged() -> None:
+    params = LoopsCreateParams(session_id="s", interval="30s", prompt="p")
+
+    assert params.model_dump(mode="json", by_alias=True) == {
+        "sessionId": "s",
+        "interval": "30s",
+        "prompt": "p",
+    }
+
+
+# Desktop's UpdateSessionInputSchema (code-server-contract/src/session/types.ts)
+# uses String.trim via Zod: ECMA-262 WhiteSpace + LineTerminator, not str.strip.
+_JS_TRIM_CHARACTERS = tuple(
+    map(
+        chr,
+        [
+            0x0009,
+            0x000A,
+            0x000B,
+            0x000C,
+            0x000D,
+            0x0020,
+            0x00A0,
+            0x1680,
+            0x2000,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            0x2006,
+            0x2007,
+            0x2008,
+            0x2009,
+            0x200A,
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+            0xFEFF,
+        ],
+    )
+)
+_JS_NONTRIM_CHARACTERS = tuple(
+    map(chr, [0x001C, 0x001D, 0x001E, 0x001F, 0x0085, 0x180E, 0x200B, 0x2060])
+)
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("whitespace", _JS_TRIM_CHARACTERS, ids=ascii)
+@pytest.mark.parametrize(
+    "title", ["x" * 255, "😀" * 127 + "a"], ids=["ascii-255", "emoji-255"]
+)
+def test_peer_rename_trims_each_ecmascript_whitespace_before_length_checks(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams],
+    whitespace: str,
+    title: str,
+) -> None:
+    params = model.model_validate({
+        "session_id": "other",
+        "title": f"{whitespace}{title}{whitespace}",
+    })
+    assert params.title == title
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("whitespace", _JS_TRIM_CHARACTERS, ids=ascii)
+@pytest.mark.parametrize(
+    "title", ["", "x" * 256, "😀" * 128], ids=["empty", "ascii-256", "emoji-256"]
+)
+def test_peer_rename_rejects_empty_and_256_units_after_ecmascript_trimming(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams],
+    whitespace: str,
+    title: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({
+            "session_id": "other",
+            "title": f"{whitespace}{title}{whitespace}",
+        })
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("character", _JS_NONTRIM_CHARACTERS, ids=ascii)
+def test_peer_rename_preserves_non_ecmascript_whitespace_and_counts_it(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams], character: str
+) -> None:
+    assert model(session_id="other", title=character).title == character
+    boundary = character + "x" * 253 + character
+    assert model(session_id="other", title=f" \ufeff{boundary}\n").title == boundary
+    with pytest.raises(ValidationError):
+        model(session_id="other", title=character + "x" * 254 + character)
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("title", [None, 12, {}, []])
+def test_peer_rename_trimming_leaves_non_string_validation_to_pydantic(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams], title: object
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({"session_id": "other", "title": title})
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+def test_peer_rename_trims_mixed_ecmascript_whitespace_only_at_the_ends(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams],
+) -> None:
+    whitespace = "".join(_JS_TRIM_CHARACTERS)
+    title = f"First{whitespace}second"
+    params = model(session_id="other", title=f"{whitespace}{title}{whitespace}")
+    assert params.title == title
+    with pytest.raises(ValidationError):
+        model(session_id="other", title=whitespace)

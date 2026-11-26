@@ -1,0 +1,54 @@
+[
+ {
+  "method": "workspace/trust/folders/list",
+  "params": {}
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "trusted-folders",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "workspace/trust/folders/update",
+  "params": {
+   "path": "/srv/repo",
+   "state": "untrusted"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.trusted_folder.updated",
+   "properties": {
+    "action": "untrust"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "workspace/trust/folders/update",
+  "params": {
+   "path": "/srv/scratch",
+   "state": "undecided"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.trusted_folder.updated",
+   "properties": {
+    "action": "forget"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

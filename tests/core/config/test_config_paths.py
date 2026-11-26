@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -71,6 +72,38 @@ class TestTrustedWorkdir:
         monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr._trusted_workdir == tmp_path
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows refuses to delete the process cwd"
+)
+class TestDeletedProcessCwd:
+    @pytest.fixture
+    def deleted_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        cwd = tmp_path / "deleted"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        cwd.rmdir()
+        return cwd
+
+    def test_reads_no_project_files(self, deleted_cwd: Path) -> None:
+        mgr = HarnessFilesManager(sources=("user", "project"))
+        assert mgr.project_source_enabled is False
+        assert mgr.project_prompts_dirs == []
+        assert mgr.hook_files == [VIBE_HOME.path / "hooks.toml"]
+
+    def test_still_reads_the_user_config(self, deleted_cwd: Path) -> None:
+        mgr = HarnessFilesManager(sources=("user", "project"))
+        assert mgr.config_file == VIBE_HOME.path / "config.toml"
+
+    def test_workspace_roots_keep_the_listed_roots(
+        self, deleted_cwd: Path, tmp_path: Path
+    ) -> None:
+        mgr = HarnessFilesManager(
+            sources=("user", "project"), _additional_dirs=(tmp_path,)
+        )
+        assert mgr.workspace_roots == [tmp_path]
 
 
 class TestProjectToolsDirs:

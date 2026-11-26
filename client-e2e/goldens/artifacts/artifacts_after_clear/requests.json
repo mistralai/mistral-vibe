@@ -1,0 +1,20 @@
+[
+ {
+  "method": "artifacts/list",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/history/clear",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "artifacts/list",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ }
+]

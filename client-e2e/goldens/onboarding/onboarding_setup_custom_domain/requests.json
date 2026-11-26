@@ -1,0 +1,30 @@
+[
+ {
+  "method": "setup/status",
+  "params": {}
+ },
+ {
+  "method": "setup/store-credential",
+  "params": {
+   "apiKey": "test-key-123",
+   "customDomain": true,
+   "provider": "mistral"
+  }
+ },
+ {
+  "method": "setup/submit-choices",
+  "params": {
+   "consoleBaseUrl": "https://my.example",
+   "provider": {
+    "apiBase": "https://api.mistral.ai/v1",
+    "apiKeyEnvVar": "MISTRAL_API_KEY",
+    "browserAuthAllowOriginRewrite": false,
+    "browserAuthApiBaseUrl": "https://my.example/api",
+    "browserAuthBaseUrl": "https://my.example",
+    "name": "mistral"
+   },
+   "theme": "atom-one-dark",
+   "vibeBaseUrl": "https://chat.mistral.ai"
+  }
+ }
+]

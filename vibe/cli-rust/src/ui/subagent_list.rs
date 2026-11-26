@@ -1,0 +1,180 @@
+//! Subagent status list inside the rail window, open while focused from the rail or viewing a child.
+
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::Frame;
+
+use super::{list_cursor, scrollbar, theme};
+use crate::app::App;
+use crate::mouse;
+use crate::server::PublicChildSession;
+use crate::subagents::{
+    display_name, status_label, status_tone, StatusTone, MAIN_SESSION_ID, MAX_ROWS,
+};
+
+/// List height: the Main row and the children, up to one page; the rail window frames it.
+pub fn height(app: &App) -> u16 {
+    if !open(app) {
+        return 0;
+    }
+    let rows = app.subagents.list.rows.len();
+    (rows + 1).min(MAX_ROWS) as u16
+}
+
+/// The list opens from the rail's agents item and stays while a child is viewed.
+fn open(app: &App) -> bool {
+    app.subagents.list.shown
+        && (app.subagents.list.focused || app.subagents.viewed_subagent_id.is_some())
+}
+
+/// Row-render inputs snapshotted before the frame mutates the hitmap.
+struct Rows {
+    highlighted: usize,
+    selected: Option<String>,
+    mouse: Option<String>,
+    focused: bool,
+    children: Vec<PublicChildSession>,
+}
+
+impl Rows {
+    fn snapshot(app: &App) -> Self {
+        let list = &app.subagents.list;
+        Self {
+            highlighted: list.options.selected(),
+            selected: list.selected_session_id.clone(),
+            mouse: list.mouse_session_id.clone(),
+            focused: list.focused,
+            children: list.rows.clone(),
+        }
+    }
+
+    /// The mouse row wins, else the highlight while focused.
+    fn marker_id(&self) -> Option<String> {
+        if let Some(mouse) = &self.mouse {
+            return Some(mouse.clone());
+        }
+        self.focused
+            .then(|| self.row_id(self.highlighted))
+            .flatten()
+    }
+
+    /// The id of a rendered row: Main or the child at `index - 1`.
+    fn row_id(&self, index: usize) -> Option<String> {
+        if index == 0 {
+            return Some(MAIN_SESSION_ID.to_owned());
+        }
+        self.children.get(index - 1).map(|row| row.id.clone())
+    }
+}
+
+pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
+    let rows = Rows::snapshot(app);
+    if !open(app) || area.height == 0 {
+        app.subagents.list.options.layout(&[], Rect::default());
+        return;
+    }
+    mouse::register_region(app, area, mouse::MouseTarget::SubagentList);
+    app.subagents.list.area = area;
+    let marker = rows.marker_id();
+    let total = rows.children.len() + 1;
+    let viewport = (area.height as usize).min(MAX_ROWS);
+    let list_area = Rect {
+        height: viewport as u16,
+        ..area
+    };
+    let scroll = app.subagents.list.options.layout_rows(total, list_area);
+    let overflows = total > viewport;
+    for (top, index) in (area.y..).zip((scroll..total).take(viewport)) {
+        let row_area = Rect {
+            y: top,
+            width: area.width.saturating_sub(u16::from(overflows)),
+            height: 1,
+            ..area
+        };
+        let marked = marker.as_deref() == rows.row_id(index).as_deref();
+        let line = match index {
+            0 => main_row(&rows, marked),
+            _ => child_row(&rows, &rows.children[index - 1], marked),
+        };
+        if marked {
+            f.buffer_mut().set_style(row_area, list_cursor::style());
+        }
+        let padded = Rect {
+            x: area.x + 1,
+            width: area.width.saturating_sub(2),
+            ..row_area
+        };
+        f.render_widget(ratatui::widgets::Paragraph::new(line), padded);
+    }
+    if overflows && area.width > 0 {
+        let bar = Rect {
+            x: area.right() - 1,
+            width: 1,
+            ..list_area
+        };
+        let target = mouse::MouseTarget::SubagentList;
+        scrollbar::draw_large(app, f, target, bar, total, viewport, scroll);
+    }
+}
+
+/// The main row: bold `Main conversation`, current while in main chat.
+fn main_row(rows: &Rows, marked: bool) -> Line<'static> {
+    let style = row_style(marked);
+    Line::from(vec![
+        current_marker(rows.selected.is_none(), marked),
+        Span::styled("Main conversation", style.add_modifier(Modifier::BOLD)),
+    ])
+}
+
+/// The green `›` on the session being viewed (the list's current value).
+fn current_marker(current: bool, marked: bool) -> Span<'static> {
+    let style = match marked {
+        true => list_cursor::style(),
+        false => Style::default().fg(list_cursor::current_color()),
+    };
+    Span::styled(list_cursor::marker(current), style)
+}
+
+/// A child row: `AgentType (name) [status] · N tokens`.
+fn child_row(rows: &Rows, session: &PublicChildSession, marked: bool) -> Line<'static> {
+    let current = rows.selected.as_deref() == Some(session.id.as_str());
+    let style = row_style(marked);
+    let status_color = match status_tone(session.status) {
+        StatusTone::Success => theme::success(),
+        StatusTone::Warning => theme::warning(),
+        StatusTone::Error => theme::error(),
+        StatusTone::Muted => theme::muted(),
+    };
+    let muted = match marked {
+        true => list_cursor::styles(true).1,
+        false => theme::muted_style(),
+    };
+    Line::from(vec![
+        current_marker(current, marked),
+        Span::styled(
+            display_name(&session.agent_type),
+            style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" ({}) ", display_name(&session.name)), style),
+        Span::styled(
+            format!("[{}]", status_label(session.status)),
+            list_cursor::accent(style, status_color),
+        ),
+        Span::styled(
+            format!(
+                " · {} tokens",
+                crate::utils::text::format_compact_count(session.context_tokens())
+            ),
+            muted,
+        ),
+    ])
+}
+
+/// A row's text: the list-cursor bar under keyboard focus or the mouse, plain otherwise.
+fn row_style(marked: bool) -> Style {
+    match marked {
+        true => list_cursor::style(),
+        false => Style::default().fg(theme::foreground()),
+    }
+}

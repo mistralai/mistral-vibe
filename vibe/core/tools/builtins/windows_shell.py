@@ -1,28 +1,30 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator
+import glob
 import os
 from pathlib import Path, PureWindowsPath
 import re
-import shlex
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
 
 from vibe import VIBE_ROOT
 from vibe.core.scratchpad import is_scratchpad_path
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-    ToolPermission,
+from vibe.core.tools.base import BaseTool, BaseToolState, ToolPermission
+from vibe.core.tools.builtins._powershell_lexer import (
+    PowerShellArgument,
+    powershell_pipeline_inputs,
+    powershell_redirection_targets,
+    powershell_redirections,
+    split_powershell_arguments,
+    split_powershell_commands,
 )
+from vibe.core.tools.builtins._shell_permission_analysis import RedirectWrite
 from vibe.core.tools.builtins.bash import (
     BashToolConfig,
     CapturedShellResult,
-    completed_shell_result,
+    SensitiveReadPaths,
+    _is_working_directory_command,
 )
 from vibe.core.tools.builtins.experimental_bash import (
     BashLogFile,
@@ -40,27 +42,27 @@ from vibe.core.tools.builtins.experimental_bash import (
     ExperimentalBash,
     ExperimentalBashArgs,
     ExperimentalBashToolConfig,
-    ManagedShellError,
     _BashPermissionMixin,
     _matches_pattern,
 )
 from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
 from vibe.core.tools.builtins.managed_shell._windows import (
-    build_windows_shell_argv,
     git_bash_shell_available,
     resolve_powershell_shell,
 )
 from vibe.core.tools.builtins.managed_shell.backend import ManagedShellBackendError
-from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import PermissionContext, RequiredPermission
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.tools.utils import (
+    ToolPath,
+    is_path_within_workdir,
+    matches_sensitive_pattern,
+    names_a_link,
+    resolve_tool_path,
+    ungranted_paths,
+)
+from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
 from vibe.observability.logging import logger
-from vibe.utils.io import decode_console_safe
-from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -152,166 +154,6 @@ def _powershell_treatment_available() -> bool:
     return powershell_shell_available() and not git_bash_shell_available()
 
 
-def _flush_windows_command_part(parts: list[str], buffer: list[str]) -> None:
-    part = "".join(buffer).strip()
-    if part:
-        parts.append(part)
-    buffer.clear()
-
-
-def _find_powershell_group_end(
-    command: str, opening_index: int, opening: str, closing: str
-) -> int | None:
-    depth = 1
-    quote: str | None = None
-    escaped = False
-    index = opening_index + 1
-
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            escaped = False
-            index += 1
-            continue
-
-        if char == "`":
-            escaped = True
-            index += 1
-            continue
-
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            index += 1
-            continue
-
-        if quote == "'":
-            index += 1
-            continue
-
-        if quote == '"':
-            if command[index : index + 2] == "$(":
-                nested_end = _find_powershell_group_end(command, index + 1, "(", ")")
-                if nested_end is None:
-                    return None
-                index = nested_end + 1
-                continue
-            index += 1
-            continue
-
-        if char == opening:
-            depth += 1
-        elif char == closing:
-            depth -= 1
-            if depth == 0:
-                return index
-        index += 1
-
-    return None
-
-
-def _find_powershell_subexpression_end(command: str, start: int) -> int | None:
-    return _find_powershell_group_end(command, start + 1, "(", ")")
-
-
-def _append_powershell_group(
-    command: str, index: int, buffer: list[str], nested_expressions: list[str]
-) -> int | None:
-    opening = command[index]
-    if opening not in {"{", "("}:
-        return None
-    if opening == "{" and index > 0 and command[index - 1] in {"$", "@"}:
-        return None
-
-    closing = "}" if opening == "{" else ")"
-    group_end = _find_powershell_group_end(command, index, opening, closing)
-    if group_end is None:
-        return None
-    buffer.extend(command[index : group_end + 1])
-    nested_expressions.append(command[index + 1 : group_end])
-    return group_end + 1
-
-
-def _split_windows_command_parts(command: str) -> list[str]:
-    parts: list[str] = []
-    nested_expressions: list[str] = []
-    buffer: list[str] = []
-    quote: str | None = None
-    escaped = False
-    index = 0
-
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            buffer.append(char)
-            escaped = False
-            index += 1
-            continue
-
-        if char == "`" or (
-            char == "^" and command[index + 1 : index + 2] in {"&", "|", ";"}
-        ):
-            buffer.append(char)
-            escaped = True
-            index += 1
-            continue
-
-        if quote != "'" and command[index : index + 2] == "$(":
-            subexpression_end = _find_powershell_subexpression_end(command, index)
-            if subexpression_end is not None:
-                buffer.extend(command[index : subexpression_end + 1])
-                nested_expressions.append(command[index + 2 : subexpression_end])
-                index = subexpression_end + 1
-                continue
-
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            buffer.append(char)
-            index += 1
-            continue
-
-        if quote is None:
-            if (
-                next_index := _append_powershell_group(
-                    command, index, buffer, nested_expressions
-                )
-            ) is not None:
-                index = next_index
-                continue
-            pair = command[index : index + 2]
-            if pair in {"&&", "||"}:
-                _flush_windows_command_part(parts, buffer)
-                index += 2
-                continue
-            if char in {"&", "|", ";", "\n", "\r"}:
-                _flush_windows_command_part(parts, buffer)
-                index += 1
-                continue
-
-        buffer.append(char)
-        index += 1
-
-    _flush_windows_command_part(parts, buffer)
-    for nested_expression in nested_expressions:
-        parts.extend(_split_windows_command_parts(nested_expression))
-    return parts
-
-
-def _split_windows_command_tokens(command: str) -> list[str]:
-    try:
-        lexer = shlex.shlex(command, posix=True)
-        lexer.whitespace_split = True
-        lexer.escape = ""
-        return list(lexer)
-    except ValueError:
-        return command.split()
-
-
 def _strip_windows_executable_suffix(value: str) -> str:
     lowered = value.lower()
     for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:
@@ -348,7 +190,7 @@ def _windows_powershell_alias_target(executable: str) -> str | None:
 def _windows_command_match_forms(
     command: str, *, include_path_basename: bool = True
 ) -> list[str]:
-    tokens = _split_windows_command_tokens(command)
+    tokens = split_powershell_arguments(command)
     if not tokens:
         return []
 
@@ -379,7 +221,7 @@ def _windows_command_match_forms(
 
 def _windows_policy_pattern_forms(pattern: str) -> list[str]:
     normalized = pattern.lower()
-    tokens = _split_windows_command_tokens(pattern)
+    tokens = split_powershell_arguments(pattern)
     if not tokens:
         return [normalized]
 
@@ -413,13 +255,14 @@ def _windows_looks_like_option(token: str) -> bool:
     return bool(body) and "/" not in body and "\\" not in body and ":" not in body
 
 
-def _windows_looks_like_path(token: str) -> bool:
+def _windows_looks_like_path(token: str, cwd: Path) -> bool:
     value = token.strip("\"'")
     return (
         value.startswith(("~", ".", "\\\\"))
         or (len(value) >= _WINDOWS_DRIVE_PREFIX_LENGTH and value[1] == ":")
         or "/" in value
         or "\\" in value
+        or names_a_link(value, cwd)
     )
 
 
@@ -453,8 +296,13 @@ def _windows_home_value(environment: dict[str, str]) -> str | None:
 def _expand_windows_powershell_path(
     token: str, *, command_cwd: Path, environment: dict[str, str]
 ) -> tuple[str, bool]:
-    value = token.strip("\"'")
+    value = str(token) if isinstance(token, PowerShellArgument) else token.strip("\"'")
     unresolved = False
+
+    if isinstance(token, PowerShellArgument) and not token.dynamic:
+        if value == "~" or value.startswith(("~/", "~\\")):
+            value = f"{Path.home()}{value[1:]}"
+        return value, False
 
     def replace_variable(match: re.Match[str]) -> str:
         nonlocal unresolved
@@ -478,7 +326,9 @@ def _expand_windows_powershell_path(
         return match.group(0)
 
     value = _WINDOWS_POWERSHELL_VARIABLE.sub(replace_variable, value)
-    unresolved = unresolved or "$" in value or "@(" in value
+    unresolved = (
+        unresolved or "$" in value or "@(" in value or value.startswith(("(", "{"))
+    )
     if value == "~" or value.startswith(("~/", "~\\")):
         value = f"{Path.home()}{value[1:]}"
     return value, unresolved
@@ -491,81 +341,79 @@ def _windows_attached_parameter_value(token: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _read_windows_redirection_target(
-    command: str, index: int
-) -> tuple[str | None, int]:
-    if command[index : index + 1] == ">":
-        index += 1
-    while command[index : index + 1].isspace():
-        index += 1
-    if command[index : index + 1] == "&":
-        return None, index + 1
+_WINDOWS_DISCARD_TARGETS = {"$null", "nul", "nul:"}
 
-    target: list[str] = []
-    quote: str | None = None
-    escaped = False
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            target.append(char)
-            escaped = False
-            index += 1
+
+def _windows_file_redirection_targets(command: str) -> list[str]:
+    """Return output redirects that can write a file.
+
+    PowerShell's null variable and CMD's null device discard output. Descriptor
+    duplication such as ``2>&1`` has no target and never reaches this filter.
+    """
+    return [
+        target
+        for target in powershell_redirection_targets(command)
+        if target.casefold() not in _WINDOWS_DISCARD_TARGETS
+    ]
+
+
+# A target PowerShell opens exactly as written: an unquoted word with no
+# escape, variable or pattern, or a quoted one whose quotes expand nothing.
+_PLAIN_POWERSHELL_TARGET = re.compile(
+    r"(?P<word>[\w.\\/:+=~%-]+)|'(?P<single>[^'‘’‚‛\r\n]*)'|\"(?P<double>[^\"“”„`$\r\n]*)\""
+)
+# How a target left to the classifier starts: a relative name, ``~``, or a
+# variable or subexpression the command decides.
+_POWERSHELL_RELATIVE_START = re.compile(r"[\w.-]")
+_POWERSHELL_EXPANSION_START = re.compile(r"\$[\w{(:]")
+# Quotes, escapes and spaces a target may open with before its path does.
+_TARGET_PREFIX = "'\"‘’‚‛“”„` \t\r\n"
+
+
+def windows_redirect_writes(command: str) -> tuple[RedirectWrite, ...]:
+    """The files a PowerShell command's redirects write from a root.
+
+    A target from a root -- a drive, a share or the current drive's root -- is
+    placed only where it is spelled plainly. A relative, ``~`` or
+    variable-led target (``$env:TEMP\\x``) is not listed: it moves with what
+    the command sets, and is left to the classifier. Every other target is
+    listed with no path, an array (``> a, b``) included, so a spelling this
+    reader does not know is never taken for one it does.
+    """
+    writes: list[RedirectWrite] = []
+    for redirect in powershell_redirections(command):
+        spelling, value = redirect.spelling, redirect.value
+        if redirect.array:
+            writes.append(RedirectWrite(spelling, None))
             continue
-        if char == "`":
-            escaped = True
-            index += 1
+        if value.casefold() in _WINDOWS_DISCARD_TARGETS:
             continue
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            else:
-                target.append(char)
-            index += 1
+        plain = _PLAIN_POWERSHELL_TARGET.fullmatch(spelling)
+        path = (
+            next(text for text in plain.groups() if text is not None)
+            if plain is not None
+            else None
+        )
+        if path is not None and path == value:
+            if _windows_rooted(path):
+                writes.append(RedirectWrite(spelling, path))
             continue
-        if quote is None and (char.isspace() or char in {"&", "|", ";", ">"}):
-            break
-        target.append(char)
-        index += 1
-    return "".join(target).strip() or None, index
+        head = spelling.lstrip(_TARGET_PREFIX)
+        if _windows_rooted(head) or not (
+            head.startswith("~")
+            or _POWERSHELL_EXPANSION_START.match(head)
+            or _POWERSHELL_RELATIVE_START.match(head)
+        ):
+            writes.append(RedirectWrite(spelling, None))
+    return tuple(dict.fromkeys(writes))
 
 
-def _windows_redirection_targets(command: str) -> list[str]:
-    targets: list[str] = []
-    quote: str | None = None
-    escaped = False
-    index = 0
-
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            escaped = False
-            index += 1
-            continue
-        if char == "`":
-            escaped = True
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            index += 1
-            continue
-        if quote is not None or char != ">":
-            index += 1
-            continue
-
-        target, index = _read_windows_redirection_target(command, index + 1)
-        if target is not None:
-            targets.append(target)
-
-    return targets
+def _windows_rooted(path: str) -> bool:
+    pure = PureWindowsPath(path)
+    return bool(pure.drive or pure.root)
 
 
-def _windows_path_parent(
+def _windows_path(
     token: str,
     *,
     command_cwd: Path,
@@ -585,13 +433,13 @@ def _windows_path_parent(
             value = provider_path.group("path")
     if unresolved or unsupported_provider:
         return None, True
-    if not _windows_looks_like_path(value):
+    if not _windows_looks_like_path(value, command_cwd):
         return None, False
 
     windows_path = PureWindowsPath(value)
     host_path = Path(value)
     if windows_path.is_absolute() and not host_path.is_absolute():
-        return str(windows_path.parent), False
+        return str(windows_path), False
     if windows_path.drive and not windows_path.root:
         return None, True
 
@@ -604,7 +452,7 @@ def _windows_path_parent(
         str(resolved), scratchpad_dir=scratchpad_dir
     ):
         return None, False
-    return str(resolved) if resolved.is_dir() else str(resolved.parent), False
+    return str(resolved), False
 
 
 def _analyze_windows_paths(
@@ -614,41 +462,55 @@ def _analyze_windows_paths(
     workspace: Workspace,
     scratchpad_dir: Path | None,
     environment: dict[str, str],
-) -> tuple[set[str], set[str]]:
-    dirs: set[str] = set()
+    supplied_cwd: str | None = None,
+    sensitive_patterns: list[str] | None = None,
+    pipe_sources: list[str | None] | None = None,
+) -> tuple[dict[str, str], set[str], SensitiveReadPaths]:
+    """Resolved outside paths mapped to their supplied spelling, and dynamic tokens."""
+    paths: dict[str, str] = {}
     dynamic_paths: set[str] = set()
+    sensitive_files: set[str] = set()
+    requires_exact_read = False
+    cwd_changed = False
     if not is_path_within_workdir(
         str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
-        dirs.add(str(command_cwd))
+        paths[str(command_cwd)] = supplied_cwd or str(command_cwd)
 
     def collect(token: str) -> None:
-        parent, dynamic = _windows_path_parent(
+        path, dynamic = _windows_path(
             token,
             command_cwd=command_cwd,
             workspace=workspace,
             scratchpad_dir=scratchpad_dir,
             environment=environment,
         )
-        if parent is not None:
-            dirs.add(parent)
+        if path is not None:
+            paths.setdefault(path, token)
         if dynamic:
             dynamic_paths.add(token)
 
-    for part in command_parts:
-        tokens = _split_windows_command_tokens(part)
-        if not tokens:
-            continue
-        executable, arguments = _windows_invoked_command(tokens)
-        if executable != _windows_basename(executable):
-            collect(executable)
-        for target in _windows_redirection_targets(part):
-            collect(target)
+    def collect_read(token: str, literal: bool) -> None:
+        nonlocal requires_exact_read
+        if not sensitive_patterns:
+            return
+        if cwd_changed or not isinstance(token, PowerShellArgument) or token.dynamic:
+            requires_exact_read = True
+            return
+        resolved, ambiguous_path = _windows_sensitive_targets(
+            token, literal=literal, command_cwd=command_cwd
+        )
+        requires_exact_read = requires_exact_read or ambiguous_path
+        sensitive_files.update(
+            target
+            for target in resolved
+            if not is_scratchpad_path(target, scratchpad_dir=scratchpad_dir)
+            and matches_sensitive_pattern(target, sensitive_patterns)
+        )
 
-        command = _windows_command_name(executable)
-        if not command or command in _WINDOWS_NON_PATH_COMMANDS:
-            continue
-
+    def collect_arguments(command: str, arguments: list[str]) -> None:
+        # Workspace policy keeps its conservative original path inventory.
+        # Uncertain sensitive-reader roles must not erase outside obligations.
         for token in arguments:
             if _windows_looks_like_option(token):
                 if value := _windows_attached_parameter_value(token):
@@ -657,28 +519,302 @@ def _analyze_windows_paths(
                 if token.startswith("-") or command in _WINDOWS_SLASH_OPTION_COMMANDS:
                     continue
             collect(token)
-    return dirs, dynamic_paths
+
+    for index, part in enumerate(command_parts):
+        tokens = split_powershell_arguments(part)
+        if not tokens:
+            continue
+        executable, arguments = _windows_invoked_command(tokens)
+        if executable != _windows_basename(executable):
+            collect(executable)
+        for target in _windows_file_redirection_targets(part):
+            collect(target)
+
+        command = _windows_command_name(executable)
+        cwd_changed = cwd_changed or _windows_parent_directory_may_change(
+            tokens, executable
+        )
+        if not command or command in _WINDOWS_NON_PATH_COMMANDS:
+            continue
+        collect_arguments(command, arguments)
+        if sensitive_patterns and _windows_opaque_reader_invocation(tokens, executable):
+            # Unknown sensitive-file roles require the original command, while
+            # independent executable, redirect and outside-path duties remain.
+            requires_exact_read = True
+            continue
+
+        reader = _windows_read_path_inventory(executable, arguments)
+        if reader is not None:
+            read_paths, ambiguous = reader
+            requires_exact_read = requires_exact_read or bool(
+                sensitive_patterns
+                and (
+                    ambiguous
+                    or (
+                        not read_paths
+                        and pipe_sources is not None
+                        and _windows_reads_piped_files(
+                            _windows_reader_command(executable), pipe_sources[index]
+                        )
+                    )
+                )
+            )
+            for token, literal in read_paths:
+                collect_read(token, literal)
+    return (
+        paths,
+        dynamic_paths,
+        SensitiveReadPaths(sensitive_files, requires_exact_read),
+    )
 
 
-def _get_windows_env_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
-    env = {
-        "CI": "true",
-        "NONINTERACTIVE": "1",
-        "NO_TTY": "1",
-        "GIT_PAGER": "more",
-        "PAGER": "more",
+def _windows_reader_command(executable: str) -> str:
+    return _windows_powershell_alias_target(executable) or _windows_command_name(
+        executable
+    )
+
+
+def _windows_pipe_sources(command: str, command_parts: list[str]) -> list[str | None]:
+    """For each statement, the command piped into it, or ``None`` if none is."""
+    sources: list[str | None] = []
+    previous = ""
+    for part, piped in zip(
+        command_parts, powershell_pipeline_inputs(command), strict=True
+    ):
+        sources.append(previous if piped else None)
+        tokens = split_powershell_arguments(part)
+        previous = (
+            _windows_reader_command(_windows_invoked_command(tokens)[0])
+            if tokens
+            else ""
+        )
+    return sources
+
+
+def _windows_reads_piped_files(command: str, piped_from: str | None) -> bool:
+    """Whether a reader with no path operand opens files named by its input.
+
+    ``piped_from`` is the command before the ``|``, or ``None`` when there is
+    no pipe. Get-Content and Select-String bind piped file objects and path
+    strings to their path parameters, so ``dir .env | Get-Content`` reads
+    ``.env``. Select-String only searches the text it is given when Get-Content
+    produced it. Native readers receive piped text on stdin and open no file.
+    """
+    if piped_from is None or command not in _POWERSHELL_READER_VALUE_PARAMETERS:
+        return False
+    return not (command == "select-string" and piped_from == "get-content")
+
+
+def _windows_dynamic_invocation(tokens: list[str]) -> bool:
+    invoked = tokens[1] if tokens[0] == "&" and len(tokens) > 1 else tokens[0]
+    return isinstance(invoked, PowerShellArgument) and invoked.dynamic
+
+
+def _windows_parent_directory_may_change(tokens: list[str], executable: str) -> bool:
+    command = _windows_command_name(executable)
+    return (
+        _is_working_directory_command(command)
+        or tokens[0] == "."
+        or _windows_dynamic_invocation(tokens)
+        or command in {"invoke-expression", "iex"}
+        or executable.casefold().endswith(".ps1")
+    )
+
+
+def _windows_opaque_reader_invocation(tokens: list[str], executable: str) -> bool:
+    return _windows_dynamic_invocation(tokens) or _windows_command_name(executable) in {
+        "pwsh",
+        "powershell",
+        "cmd",
+        "invoke-expression",
+        "iex",
     }
-    if overrides:
-        env.update(overrides)
-    return env
 
 
-def _get_windows_base_env(overrides: dict[str, str] | None) -> dict[str, str]:
-    return {**os.environ, **_get_windows_env_overrides(overrides)}
+def _powershell_array_element(token: str) -> bool:
+    return isinstance(token, PowerShellArgument) and token.array_element
+
+
+# One reader inventory binds both workspace paths and sensitive-file reads.
+# Unknown/abbreviated parameter roles cannot nominate files for remembered grants.
+_POWERSHELL_COMMON_VALUE_PARAMETERS = frozenset({
+    "erroraction",
+    "warningaction",
+    "informationaction",
+    "progressaction",
+    "errorvariable",
+    "warningvariable",
+    "informationvariable",
+    "outvariable",
+    "outbuffer",
+    "pipelinevariable",
+})
+_POWERSHELL_COMMON_SWITCH_PARAMETERS = frozenset({
+    "verbose",
+    "debug",
+    "whatif",
+    "confirm",
+})
+_POWERSHELL_READER_VALUE_PARAMETERS = {
+    "get-content": frozenset({
+        "path",
+        "literalpath",
+        "filter",
+        "include",
+        "exclude",
+        "readcount",
+        "totalcount",
+        "tail",
+        "encoding",
+        "delimiter",
+        "stream",
+        "credential",
+    }),
+    "select-string": frozenset({
+        "path",
+        "literalpath",
+        "pattern",
+        "inputobject",
+        "include",
+        "exclude",
+        "context",
+        "encoding",
+        "culture",
+    }),
+}
+_POWERSHELL_READER_SWITCH_PARAMETERS = {
+    "get-content": frozenset({"raw", "wait", "force", "asbytestream"}),
+    "select-string": frozenset({
+        "simplematch",
+        "casesensitive",
+        "quiet",
+        "list",
+        "notmatch",
+        "allmatches",
+        "noemphasis",
+        "raw",
+    }),
+}
+
+
+def _windows_read_path_inventory(
+    executable: str, arguments: list[str]
+) -> tuple[list[tuple[str, bool]], bool] | None:
+    command = _windows_reader_command(executable)
+    if command not in _POWERSHELL_READER_VALUE_PARAMETERS:
+        return _windows_native_read_path_inventory(command, arguments)
+
+    value_parameters = (
+        _POWERSHELL_READER_VALUE_PARAMETERS[command]
+        | _POWERSHELL_COMMON_VALUE_PARAMETERS
+    )
+    switch_parameters = (
+        _POWERSHELL_READER_SWITCH_PARAMETERS[command]
+        | _POWERSHELL_COMMON_SWITCH_PARAMETERS
+    )
+    candidates: list[tuple[str, bool]] = []
+    pattern_bound = command != "select-string"
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        index += 1
+        if isinstance(token, PowerShellArgument) and token.parameter:
+            name = token[1:].rstrip(":").casefold()
+            names = [
+                parameter
+                for parameter in value_parameters | switch_parameters
+                if parameter.startswith(name)
+            ]
+            if len(names) != 1:
+                return [], True
+            parameter = names[0]
+            if parameter in switch_parameters:
+                continue
+            if index == len(arguments):
+                return [], True
+            values = [arguments[index]]
+            index += 1
+            while index < len(arguments) and _powershell_array_element(
+                arguments[index]
+            ):
+                values.append(arguments[index])
+                index += 1
+            if parameter in {"filter", "include", "exclude", "stream"}:
+                # Filtering/alternate streams change which files are actually read.
+                return [], True
+            if parameter in {"path", "literalpath"}:
+                candidates.extend(
+                    (value, parameter == "literalpath") for value in values
+                )
+            if parameter == "pattern":
+                pattern_bound = True
+            continue
+        if not pattern_bound:
+            pattern_bound = True
+            while index < len(arguments) and _powershell_array_element(
+                arguments[index]
+            ):
+                index += 1
+            continue
+        candidates.append((token, False))
+    return candidates, False
+
+
+def _windows_native_read_path_inventory(
+    command: str, arguments: list[str]
+) -> tuple[list[tuple[str, bool]], bool] | None:
+    if command not in {"type", "more", "findstr"}:
+        return None
+    # Native readers' option and wildcard binding differs from cmdlets.
+    if any(
+        _windows_looks_like_option(token)
+        or re.match(r"^/[A-Za-z]+:", token)
+        or any(char in token for char in "*?[")
+        for token in arguments
+    ):
+        return [], True
+    return [(token, True) for token in arguments[int(command == "findstr") :]], False
+
+
+def _windows_sensitive_targets(
+    token: str, *, literal: bool, command_cwd: Path
+) -> tuple[set[str], bool]:
+    value = str(token)
+    if provider_path := _WINDOWS_POWERSHELL_PROVIDER_PATH.match(value):
+        if provider_path.group("provider").casefold() != "filesystem":
+            return set(), True
+        value = provider_path.group("path")
+    windows_path = PureWindowsPath(value)
+    if (windows_path.drive and not windows_path.root) or (
+        windows_path.is_absolute() and not Path(value).is_absolute()
+    ):
+        return set(), True
+    # PowerShell providers interpret backtick-escaped wildcards even inside
+    # single-quoted strings; -LiteralPath bypasses provider wildcard expansion.
+    if not literal:
+        pattern: list[str] = []
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == "`" and index + 1 < len(value):
+                index += 1
+                char = glob.escape(value[index])
+            pattern.append(char)
+            index += 1
+        value = "".join(pattern)
+    path = Path(value.replace("\\", os.sep)).expanduser()
+    if not path.is_absolute():
+        path = command_cwd / path
+    if literal or not any(char in value for char in "*?["):
+        return {str(path.resolve())}, False
+    return {
+        str(Path(match).resolve())
+        for match in glob.iglob(str(path), include_hidden=True)
+    }, False
 
 
 class WindowsShellToolConfig(ExperimentalBashToolConfig):
-    pass
+    shell_tool_name: ClassVar[str] = "powershell"
 
 
 class WindowsShellArgs(BaseModel):
@@ -714,7 +850,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         )
 
     def _is_standalone_denylisted(self, command: str) -> bool:
-        tokens = _split_windows_command_tokens(command)
+        tokens = split_powershell_arguments(command)
         if not tokens:
             return False
         _executable, arguments = _windows_invoked_command(tokens)
@@ -742,12 +878,11 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         )
 
     @staticmethod
-    def _has_find_execution_predicate(command: str) -> bool:
-        _ = command
-        return False
+    def _tokenize_command(command: str) -> list[str]:
+        return split_powershell_arguments(command)
 
     def _build_windows_context_permissions(
-        self, shell: str | None, env: dict[str, str] | None
+        self, command_parts: list[str], shell: str | None, env: dict[str, str] | None
     ) -> list[RequiredPermission]:
         required: list[RequiredPermission] = []
         if shell:
@@ -767,6 +902,19 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
                     label=f"custom environment ({names})",
                 )
             )
+        redirection_targets = {
+            target
+            for part in command_parts
+            for target in _windows_file_redirection_targets(part)
+        }
+        required.extend(
+            self._build_command_required_permission(
+                invocation_pattern=f"output redirection: {target}",
+                session_pattern=f"output redirection: {target}",
+                label=f"output redirection ({target})",
+            )
+            for target in sorted(redirection_targets)
+        )
         return required
 
     def _resolve_windows_permission(
@@ -777,37 +925,72 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         shell: str | None,
         env: dict[str, str] | None,
     ) -> PermissionContext | None:
-        command_parts = _split_windows_command_parts(command)
+        command_parts = split_powershell_commands(command)
         if not command_parts:
             return None
 
-        guardrail_permission = self._resolve_guardrail_permission(command_parts)
+        command_cwd = resolve_tool_path(cwd, self.cwd)
+        guardrail_permission = self._resolve_guardrail_permission(
+            command_parts, command_cwd=command_cwd
+        )
         if (
             guardrail_permission
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
 
-        command_cwd = resolve_tool_path(cwd, self.cwd)
-        outside_dirs, dynamic_paths = _analyze_windows_paths(
+        outside_paths, dynamic_paths, sensitive_reads = _analyze_windows_paths(
             command_parts,
             command_cwd=command_cwd,
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
             environment={**os.environ, **(env or {})},
+            supplied_cwd=cwd,
+            sensitive_patterns=self.config.sensitive_file_patterns,
+            pipe_sources=_windows_pipe_sources(command, command_parts),
         )
-        context_required = self._build_windows_context_permissions(shell, env)
-        if (
+        outside_paths = ungranted_paths(
+            outside_paths, self.config.allowlist, self.workspace
+        )
+        context_required = self._build_windows_context_permissions(
+            command_parts, shell, env
+        )
+        commands_cleared = (
             self._is_unconditionally_allowed(
-                command_parts, outside_dirs | dynamic_paths, context_required
+                command_parts,
+                sensitive_reads.files,
+                context_required,
+                dynamic_paths=dynamic_paths,
             )
             and not guardrail_permission
-        ):
+            and not sensitive_reads.requires_exact_command
+        )
+        if commands_cleared and not outside_paths:
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
+        # Cleared commands leave only the outside paths to answer for.
         required = self._build_required_permissions(
-            command_parts, outside_dirs, context_required
+            []
+            if commands_cleared or sensitive_reads.requires_exact_command
+            else command_parts,
+            outside_paths,
+            sensitive_reads.files,
         )
+        if sensitive_reads.requires_exact_command:
+            label = (
+                f"dynamic PowerShell path ({next(iter(dynamic_paths))})"
+                if len(dynamic_paths) == 1
+                else "dynamic sensitive-file read (PowerShell)"
+            )
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=command,
+                    session_pattern=command,
+                    label=label,
+                    literal=True,
+                )
+            )
+        required.extend(context_required)
         required.extend(
             self._build_command_required_permission(
                 invocation_pattern=f"dynamic path: {path}",
@@ -815,6 +998,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
                 label=f"dynamic PowerShell path ({path})",
             )
             for path in sorted(dynamic_paths)
+            if not sensitive_reads.requires_exact_command
         )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
@@ -830,9 +1014,7 @@ class WindowsShell(
     BaseTool[
         WindowsShellArgs, CapturedShellResult, WindowsShellToolConfig, BaseToolState
     ],
-    ToolUIData[WindowsShellArgs, CapturedShellResult],
 ):
-    effect_kind = ToolEffectKind.SHELL
     description: ClassVar[str] = "Run a PowerShell command."
     shell_rollout: ClassVar[str | None] = "managed"
     prompt_path = (
@@ -847,118 +1029,10 @@ class WindowsShell(
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return is_windows() and _powershell_treatment_available()
 
-    @classmethod
-    def format_call_display(cls, args: WindowsShellArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(
-            summary=f"powershell: {args.command}",
-            verb="Running",
-            message=args.command,
-            settled_verb="Ran",
-            settled_message=args.command,
-        )
-
-    @classmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if not isinstance(event.result, CapturedShellResult):
-            return ToolResultDisplay(
-                success=False, message=event.error or event.skip_reason or "No result"
-            )
-        return ToolResultDisplay(success=True, verb="Ran", message=event.result.command)
-
-    @classmethod
-    def get_status_text(cls) -> str:
-        return "Running Windows command"
-
     def resolve_permission(self, args: WindowsShellArgs) -> PermissionContext | None:
         return self._resolve_windows_permission(
             command=args.command, cwd=args.cwd, shell=args.shell, env=args.env
         )
-
-    async def run(
-        self, args: WindowsShellArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult, None]:
-        requested_timeout = (
-            float(args.timeout) if args.timeout is not None else args.timeout_seconds
-        )
-        timeout = self._resolve_timeout(requested_timeout)
-        max_bytes = self.config.max_output_bytes
-        proc: asyncio.subprocess.Process | None = None
-        try:
-            cwd = resolve_tool_path(args.cwd, self.cwd)
-            shell = resolve_powershell_shell(args.shell, self.config.shell)
-            argv = build_windows_shell_argv(shell, args.command)
-            if (
-                ctx is not None
-                and ctx.tool_io is not None
-                and ctx.tool_io.supports_terminal
-                and ctx.session_id is not None
-            ):
-                try:
-                    result = await ctx.tool_io.run_shell(
-                        ShellCommandRequest(
-                            session_id=ctx.session_id,
-                            tool_call_id=ctx.tool_call_id,
-                            command=argv[0],
-                            args=argv[1:],
-                            env=_get_windows_env_overrides(args.env),
-                            cwd=cwd,
-                            timeout=timeout,
-                            max_output_bytes=max_bytes,
-                        )
-                    )
-                except TimeoutError:
-                    raise ToolError(
-                        f"Command timed out after {timeout:g}s: {args.command!r}"
-                    ) from None
-                yield completed_shell_result(
-                    command=args.command,
-                    shell=shell,
-                    stdout=result.stdout[:max_bytes],
-                    stderr=result.stderr[:max_bytes],
-                    exit_code=result.returncode,
-                )
-                return
-
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                cwd=str(cwd),
-                env=_get_windows_base_env(args.env),
-            )
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except TimeoutError:
-                await kill_async_subprocess(proc)
-                raise ToolError(
-                    f"Command timed out after {timeout:g}s: {args.command!r}"
-                )
-
-            stdout = _decode_limited(stdout_bytes, max_bytes)
-            stderr = _decode_limited(stderr_bytes, max_bytes)
-            yield completed_shell_result(
-                command=args.command,
-                shell=shell,
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=proc.returncode or 0,
-            )
-        except (ToolError, asyncio.CancelledError):
-            raise
-        except (ManagedShellError, ManagedShellBackendError) as exc:
-            raise ToolError(str(exc)) from exc
-        except Exception as exc:
-            raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
-        finally:
-            if proc is not None:
-                await kill_async_subprocess(proc)
-
-    def _resolve_timeout(self, requested: float | None) -> float:
-        timeout = self.config.default_timeout if requested is None else requested
-        return min(timeout, self.config.max_timeout_seconds)
 
 
 class ExperimentalWindowsShell(
@@ -977,18 +1051,12 @@ class ExperimentalWindowsShell(
         return "powershell"
 
     @classmethod
-    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
-        return _windows_managed_shell_enabled(config)
+    def _get_tool_config_class(cls) -> type[WindowsShellToolConfig]:
+        return WindowsShellToolConfig
 
     @classmethod
-    def format_call_display(cls, args: ExperimentalBashArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(
-            summary=f"powershell: {args.command}",
-            verb="Running",
-            message=args.command,
-            settled_verb="Ran",
-            settled_message=args.command,
-        )
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return _windows_managed_shell_enabled(config)
 
     def resolve_permission(
         self, args: ExperimentalBashArgs
@@ -1005,7 +1073,6 @@ class WindowsShellOutput(BashOutput):
     shell_rollout: ClassVar[str | None] = "managed"
     shell_family: ClassVar[str] = "powershell"
     session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
-    session_label: ClassVar[str] = "powershell"
 
     @classmethod
     def get_name(cls) -> str:
@@ -1021,7 +1088,6 @@ class WindowsShellStdin(BashStdin):
     shell_rollout: ClassVar[str | None] = "managed"
     shell_family: ClassVar[str] = "powershell"
     session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
-    session_label: ClassVar[str] = "powershell"
 
     @classmethod
     def get_name(cls) -> str:
@@ -1031,14 +1097,6 @@ class WindowsShellStdin(BashStdin):
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _windows_managed_shell_enabled(config)
 
-    def _build_payload(self, args: BashStdinArgs) -> bytes:
-        if args.text is None:
-            return super()._build_payload(args)
-        translated_args = args.model_copy(
-            update={"text": args.text.replace("\r\n", "\n").replace("\n", "\r")}
-        )
-        return super()._build_payload(translated_args)
-
 
 class WindowsShellSessions(BashSessions):
     description: ClassVar[str] = (
@@ -1047,7 +1105,6 @@ class WindowsShellSessions(BashSessions):
     shell_rollout: ClassVar[str | None] = "managed"
     shell_family: ClassVar[str] = "powershell"
     session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
-    session_label: ClassVar[str] = "powershell"
 
     @classmethod
     def get_name(cls) -> str:
@@ -1063,7 +1120,6 @@ class WindowsShellLogFile(BashLogFile):
     shell_rollout: ClassVar[str | None] = "managed"
     shell_family: ClassVar[str] = "powershell"
     session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
-    session_label: ClassVar[str] = "powershell"
 
     @classmethod
     def get_name(cls) -> str:
@@ -1072,9 +1128,3 @@ class WindowsShellLogFile(BashLogFile):
     @classmethod
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _windows_managed_shell_enabled(config)
-
-
-def _decode_limited(raw: bytes | None, max_bytes: int) -> str:
-    if not raw:
-        return ""
-    return decode_console_safe(raw[:max_bytes])

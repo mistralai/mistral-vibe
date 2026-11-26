@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import httpx
+import httpx2
 import pytest
 
 from vibe.utils.http import (
@@ -73,7 +73,7 @@ async def test_vibe_async_http_client_keeps_explicit_transport(
     monkeypatch.setattr(
         "vibe.utils.http.getproxies", lambda: {"http": "proxy.local:8080", "no": "*"}
     )
-    transport = httpx.MockTransport(lambda request: httpx.Response(200))
+    transport = httpx2.MockTransport(lambda request: httpx2.Response(200))
 
     client = VibeAsyncHTTPClient(transport=transport)
     try:
@@ -192,4 +192,4 @@ def test_normalize_proxy_url(value: str | None, expected: str | None) -> None:
 def test_should_bypass_proxy_documents_supported_no_proxy_rules(
     url: str, rules: tuple[str, ...], expected: bool
 ) -> None:
-    assert _should_bypass_proxy(httpx.URL(url), rules) is expected
+    assert _should_bypass_proxy(httpx2.URL(url), rules) is expected

@@ -240,7 +240,7 @@ class TestLogReaderPagination:
 
 class TestLogReaderWatcher:
     @pytest.fixture
-    def log_reader(self, tmp_path: Path) -> Generator[LogReader, None, None]:
+    def log_reader(self, tmp_path: Path) -> Generator[LogReader]:
         log_file = tmp_path / "test.log"
         log_file.write_text("")
         reader = LogReader(log_file=log_file)

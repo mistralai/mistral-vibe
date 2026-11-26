@@ -8,7 +8,7 @@ from typing import Any, Protocol
 import tomli_w
 
 from vibe.observability.logging import logger
-from vibe.utils.paths import get_vibe_home
+from vibe.utils.vibe_home import get_vibe_home
 
 __all__ = ["CacheStore", "FileSystemCacheStore", "InMemoryCacheStore"]
 

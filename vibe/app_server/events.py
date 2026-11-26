@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from itertools import compress, count
+from operator import is_not
 
 from vibe.app_server._model import validate_wire
 from vibe.app_server._patch import apply_json_patch, make_json_patch
 from vibe.app_server.models import (
     JsonPatchOperation,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
     PublicQueuedTurn,
@@ -20,11 +23,15 @@ from vibe.app_server.models import (
     validate_history_entry,
 )
 from vibe.app_server.protocol import (
+    ArtifactCreatedParams,
+    ArtifactUpdatedParams,
+    ChildSessionUpdatedParams,
     ConnectorAuthRequiredParams,
     HistoryEntryAddedParams,
     HistoryEntryUpdatedParams,
     MCPAuthRequiredParams,
     Notification,
+    PublicSessionArtifact,
     ServerErrorParams,
     ServerWarningParams,
     SessionCompactedParams,
@@ -94,6 +101,11 @@ class StatsUpdated:
 
 
 @dataclass(frozen=True, slots=True)
+class ChildSessionUpdated:
+    child_session: PublicChildSession
+
+
+@dataclass(frozen=True, slots=True)
 class CallbackRequested:
     callback: PublicCallbackEntry
 
@@ -125,6 +137,20 @@ class ConnectorAuthorizationRequiredEvent:
     action: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactCreated:
+    """A session artifact (PR/MR) was detected and recorded."""
+
+    artifact: PublicSessionArtifact
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactUpdated:
+    """A session artifact changed (Phase 3+: markViewed, provider sync)."""
+
+    artifact: PublicSessionArtifact
+
+
 type AppServerEvent = (
     HistoryEntryAdded
     | HistoryEntryUpdated
@@ -136,15 +162,20 @@ type AppServerEvent = (
     | TurnCompleted
     | TurnQueueUpdated
     | StatsUpdated
+    | ChildSessionUpdated
     | CallbackRequested
     | TurnRetrying
     | ServerWarning
     | ServerError
     | MCPAuthorizationRequiredEvent
     | ConnectorAuthorizationRequiredEvent
+    | ArtifactCreated
+    | ArtifactUpdated
 )
 
 _STREAMING_TEXT_PATHS = {"/content/0/text", "/text", "/state/outputText"}
+# Session keys clients follow as a whole list: a change travels as one `replace`.
+SESSION_WHOLE_KEYS = ("loops",)
 # Keep retired IDs for as long as the server keeps retired enqueue retries.
 _RETIRED_QUEUE_ITEM_HISTORY_SIZE = 256
 
@@ -182,6 +213,19 @@ def _merge_snapshot_suffix[ItemT](
     return [*previous[:overlap_start], *current], overlap_start > 0
 
 
+def unchanged_prefix(before: Sequence[object], after: Sequence[object]) -> int:
+    """How many leading items of ``after`` are the very objects ``before`` has there.
+
+    An update keeps each entry it did not change as the same object, so a step
+    that saw ``before`` can skip that prefix of ``after``. The comparison runs
+    in C and never calls ``__eq__``: on a long Session, an update then costs
+    what it changed, not the length of the history.
+    """
+    return next(
+        compress(count(), map(is_not, before, after)), min(len(before), len(after))
+    )
+
+
 def reconcile_snapshot(
     previous: PublicSessionState, current: PublicSessionState
 ) -> list[AppServerEvent]:
@@ -194,17 +238,22 @@ def reconcile_snapshot(
                 patch=make_json_patch(
                     previous.session.model_dump(mode="json", by_alias=True),
                     current.session.model_dump(mode="json", by_alias=True),
+                    whole_keys=SESSION_WHOLE_KEYS,
                 ),
             )
         )
 
-    previous_entries = {entry.id: entry for entry in previous.history or []}
-    for entry in current.history or []:
+    previous_history = previous.history or []
+    current_history = current.history or []
+    # The shared prefix holds the same objects in both states: nothing changed.
+    start = unchanged_prefix(previous_history, current_history)
+    previous_entries = {entry.id: entry for entry in previous_history[start:]}
+    for entry in current_history[start:]:
         prior = previous_entries.get(entry.id)
         if prior is None:
             events.append(HistoryEntryAdded(entry))
             continue
-        if prior == entry:
+        if prior is entry or prior == entry:
             continue
         events.append(
             HistoryEntryUpdated(
@@ -229,6 +278,12 @@ def reconcile_snapshot(
             events.append(TurnCompleted(current_turn))
     if previous.turn_queue != current.turn_queue:
         events.append(TurnQueueUpdated(current.turn_queue))
+    previous_children = {child.id: child for child in previous.child_sessions}
+    events.extend(
+        ChildSessionUpdated(child)
+        for child in current.child_sessions
+        if previous_children.get(child.id) != child
+    )
     return events
 
 
@@ -239,10 +294,13 @@ type _KnownEventParams = (
     | SessionCompactedParams
     | SessionContextClearedParams
     | SessionUpdatedParams
+    | ChildSessionUpdatedParams
     | StatsUpdatedParams
     | TurnCompletedParams
     | TurnQueueUpdatedParams
     | TurnStartedParams
+    | ArtifactCreatedParams
+    | ArtifactUpdatedParams
 )
 
 
@@ -266,23 +324,24 @@ def parse_server_event(
 ):
     match notification.method:
         case "warning":
-            return ServerWarning(
+            event = ServerWarning(
                 validate_wire(ServerWarningParams, notification.params)
             )
         case "error":
-            return ServerError(validate_wire(ServerErrorParams, notification.params))
+            event = ServerError(validate_wire(ServerErrorParams, notification.params))
         case "turn/retrying":
-            return TurnRetrying(validate_wire(TurnRetryingParams, notification.params))
+            event = TurnRetrying(validate_wire(TurnRetryingParams, notification.params))
         case "mcp_catalog/authRequired":
-            return MCPAuthorizationRequiredEvent(
+            event = MCPAuthorizationRequiredEvent(
                 validate_wire(MCPAuthRequiredParams, notification.params)
             )
         case "connector_catalog/authRequired":
-            return ConnectorAuthorizationRequiredEvent(
+            event = ConnectorAuthorizationRequiredEvent(
                 validate_wire(ConnectorAuthRequiredParams, notification.params)
             )
         case _:
-            return None
+            event = None
+    return event
 
 
 class ClientProjection:
@@ -380,6 +439,10 @@ class ClientProjection:
                 f"Turn belongs to session {turn.session_id!r}, "
                 f"expected {self.state.session.id!r}"
             )
+        # The turn/start response can land after notifications already moved
+        # this turn on (e.g. to interrupted); never roll it back to its start.
+        if any(existing.id == turn.id for existing in self.state.turns or []):
+            return
         self._replace_turn(turn)
 
     def consume(self, notification: Notification) -> AppServerEvent | None:
@@ -424,6 +487,15 @@ class ClientProjection:
             case StatsUpdatedParams():
                 self.state.session.token_usage = params.stats.token_usage
                 event = StatsUpdated(params)
+            case ChildSessionUpdatedParams():
+                self._replace_child_session(params.child_session)
+                event = ChildSessionUpdated(params.child_session)
+            case ArtifactCreatedParams():
+                # Artifacts live outside the projected session state; the
+                # notification is forwarded as-is.
+                event = ArtifactCreated(params.artifact)
+            case ArtifactUpdatedParams():
+                event = ArtifactUpdated(params.artifact)
             case SessionCompactedParams() | SessionContextClearedParams():
                 raise AssertionError("Session handoffs are reduced before events")
         return event
@@ -582,6 +654,14 @@ class ClientProjection:
         self._remember_removed_queue_items(self.state.turn_queue, queue)
         self.state.turn_queue = queue
 
+    def _replace_child_session(self, child_session: PublicChildSession) -> None:
+        for index, existing in enumerate(self.state.child_sessions):
+            if existing.id == child_session.id:
+                self.state.child_sessions[index] = child_session
+                return
+        self.state.child_sessions.append(child_session)
+        self.state.child_sessions.sort(key=lambda child: (child.created_at, child.id))
+
     def _remember_removed_queue_items(
         self, previous: PublicTurnQueue, current: PublicTurnQueue
     ) -> None:
@@ -632,6 +712,12 @@ def _parse_event_params(notification: Notification) -> _KnownEventParams:
             params = validate_wire(TurnQueueUpdatedParams, notification.params)
         case "session/statsUpdated":
             params = validate_wire(StatsUpdatedParams, notification.params)
+        case "session/childSessionUpdated":
+            params = validate_wire(ChildSessionUpdatedParams, notification.params)
+        case "artifacts/created":
+            params = validate_wire(ArtifactCreatedParams, notification.params)
+        case "artifacts/updated":
+            params = validate_wire(ArtifactUpdatedParams, notification.params)
         case _:
             raise UnknownNotificationError(
                 f"Unknown app-server notification: {notification.method}"

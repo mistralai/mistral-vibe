@@ -1,68 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 import hashlib
-import json
-from pathlib import Path
-from typing import Literal, Protocol, TypedDict
+from typing import Literal, NamedTuple
 
-from pydantic import JsonValue
-
-from vibe.app_server._session_model import active_model_is_pinned
-from vibe.app_server._shell import restored_shell_effect_state, shell_effect_detail
-from vibe.app_server._tool_projection import (
-    project_effect_detail,
-    project_effect_output_value,
-)
-from vibe.app_server._utils import now_ms
-from vibe.app_server._worktree_effects import WorktreeEffect
+from vibe.app_server._skill_toggles import SkillToggles
 from vibe.app_server.config import (
     AudioProviderView,
     ConfigView,
     ModelConfigView,
+    ModelRequirementView,
+    ModelSource,
     SpeechConfigView,
     TranscribeModelConfigView,
     TranscriptionConfigView,
     TTSModelConfigView,
 )
 from vibe.app_server.models import (
-    AgentStatsSnapshot,
     AgentSummary,
-    CancelledEffectState,
-    CompletedEffectState,
-    ConfigIssue,
-    ConnectorCounts,
-    ContentBlock,
+    ApprovalPolicySummary,
     DebugLogEntry,
     DebugLogPage,
-    EffectCallDisplay,
-    EffectResultDisplay,
-    EffectState,
-    FailedEffectState,
-    GenericEffectDetail,
-    ImageAttachment,
-    ImageContentBlock,
-    MCPSourceKind,
-    MCPSourceStatus,
-    MCPSourceSummary,
-    MCPState,
-    MCPToolSummary,
-    PublicCheckpointEntry,
-    PublicEffectEntry,
-    PublicEntryGenerationStatus,
-    PublicError,
-    PublicHistoryEntry,
-    PublicMessageEntry,
-    PublicReasoningEntry,
-    ResourceContentBlock,
-    SessionLogSummary,
     SkillSummary,
-    SubagentEffectDetail,
-    TextContentBlock,
-    ToolSummary,
 )
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.agents import AgentProfile, BuiltinAgentName
+from vibe.config_values import ThinkingLevel
+from vibe.core.agents import AgentManager, AgentProfile
 from vibe.core.config import (
     ModelConfig,
     TranscribeClient,
@@ -73,30 +35,49 @@ from vibe.core.config import (
     TTSProviderConfig,
     VibeConfigSchema,
 )
+from vibe.core.config._self_hosted import crash_reports_allowed
+from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
+from vibe.core.config.layers.default import DefaultConfigLayer
+from vibe.core.config.layers.environment import EnvironmentLayer
+from vibe.core.config.layers.model_catalog import ModelCatalogLayer
+from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.layers.project import ProjectConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
-from vibe.core.skills.models import SkillInfo, SkillSource
-from vibe.core.tools.connectors.connector_registry import ConnectorAuthAction
-from vibe.core.tools.connectors.counts import compute_connector_counts
-from vibe.core.tools.remote import AuthStatus, MCPTool
-from vibe.core.types import (
-    ImageAttachment as CoreImageAttachment,
-    LLMMessage,
-    Role,
-    SessionMetadata,
-    WorktreeContext,
+from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillScope, SkillSource
+
+
+class Selection(NamedTuple):
+    active: AgentSummary
+    agents: list[AgentSummary]
+    active_approval_policy: ApprovalPolicySummary
+    approval_policies: list[ApprovalPolicySummary]
+
+
+class _RouteFacts(NamedTuple):
+    compaction_threshold: int | None
+    thinking: ThinkingLevel
+    thinking_levels: list[ThinkingLevel]
+    threshold_warning: str | None = None
+
+
+# Model picker display priority, each layer with the group it lists models
+# under: org-curated sources first, the user's own last. Display only -- which
+# layer's values win is the merge's call.
+_MODEL_SOURCES: tuple[tuple[str, ModelSource], ...] = (
+    (AdminConfigLayer.NAME, "admin"),
+    (ModelCatalogLayer.NAME, "catalog"),
+    (ProjectConfigLayer.NAME, "project"),
+    (AgentProfileLayer.NAME, "project"),
+    (EnvironmentLayer.NAME, "project"),
+    (OverridesLayer.NAME, "project"),
+    (UserConfigLayer.NAME, "local"),
+    # Stands in for the user file when an embedding host supplies the config.
+    (SuppliedUserConfigLayer.NAME, "local"),
+    (DefaultConfigLayer.NAME, "local"),
 )
-from vibe.core.utils import CANCELLATION_TAG, TOOL_ERROR_TAG, TaggedText
-from vibe.user_content import UserResource
-from vibe.utils.mcp import format_tool_display_description
-from vibe.utils.tool_presentation import ToolCallPresentation
-
-
-def project_config(agent_loop: AgentLoop) -> ConfigView:
-    return project_config_view(
-        agent_loop.config,
-        active_model_pinned=active_model_is_pinned(agent_loop.config_orchestrator),
-        awaiting_experiment_model=agent_loop.awaiting_experiment_model,
-    )
 
 
 def project_config_view(
@@ -104,35 +85,77 @@ def project_config_view(
     *,
     active_model_pinned: bool = False,
     awaiting_experiment_model: bool = False,
+    # Whether the caller's backend can show a blind model a description in
+    # place of the pixels. Only the Unified one can, so the legacy projection
+    # keeps reporting the active model's own vision.
+    image_fallback: bool = False,
 ) -> ConfigView:
     transcribe_model = config.get_active_transcribe_model()
     tts_model = config.get_active_tts_model()
+    active_model = config.get_active_model()
+    # Only a describer makes the promise good: without one a blind model gets
+    # ``[Image]`` in place of the pixels, so the send is refused instead.
+    describable = image_fallback and config.get_vision_fallback_model() is not None
+    sources = _model_sources(config)
+    available = config.available_models()
+    # Grouped by source; a model no known layer defines keeps its place, last.
+    models = [available[alias] for alias in sources if alias in available]
+    models += [model for alias, model in available.items() if alias not in sources]
+    active_facts = _route_facts(config, active_model)
     return ConfigView(
-        active_model=_project_model_config(config.get_active_model()),
+        active_model=_project_model_config(
+            active_model,
+            image_fallback=image_fallback,
+            source=sources.get(active_model.alias),
+            route_facts=active_facts,
+        ),
         active_model_pinned=active_model_pinned,
+        images_supported=active_model.supports_images or describable,
         awaiting_experiment_model=awaiting_experiment_model,
         # The configured default, never the active model: clients render it as
         # the "Default (currently X)" hint, which must stay stable while a pin
         # is in effect.
         default_model_alias=config.resolve_default_model_alias(),
+        default_agent=config.default_agent,
+        default_approval_policy=config.default_approval_policy,
         theme=config.theme,
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
-        show_greeting=config.show_greeting,
+        disable_selection_animation=config.disable_selection_animation,
+        cursor_blink=config.cursor_blink,
+        vim_keybindings=config.vim_keybindings,
+        show_dangerous_directory_warning=config.show_dangerous_directory_warning,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
+        enable_mouse_capture=config.enable_mouse_capture,
+        enable_sticky_prompt=config.enable_sticky_prompt,
+        collapse_turn_details=config.collapse_turn_details,
+        enable_file_autocomplete=config.enable_file_autocomplete,
         file_watcher_for_autocomplete=config.file_watcher_for_autocomplete,
         ask_confirmation_on_exit=config.ask_confirmation_on_exit,
         voice_mode_enabled=config.voice_mode_enabled,
         narrator_enabled=config.narrator_enabled,
         show_thinking_nodes=config.show_thinking_nodes,
+        show_subagent_status_list=config.show_subagent_status_list,
         worktree_limit=config.worktree_limit,
+        auto_worktree=config.auto_worktree,
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
+        enable_system_trust_store=config.enable_system_trust_store,
         experimental_enable_tab_status=config.experimental_enable_tab_status,
-        vibe_code_enabled=config.vibe_code_enabled,
+        crash_reports_enabled=crash_reports_allowed(config),
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
+        enable_pr_monitoring=config.enable_pr_monitoring,
+        experimental_enable_storage_usage=config.experimental_enable_storage_usage,
         models=[
-            _project_model_config(model) for model in config.available_models().values()
+            _project_model_config(
+                model,
+                image_fallback=image_fallback,
+                source=sources.get(model.alias),
+                route_facts=active_facts
+                if model == active_model
+                else _route_facts(config, model),
+            )
+            for model in models
         ],
         transcribe_models=[model.alias for model in config.transcribe_models],
         tts_models=[model.alias for model in config.tts_models],
@@ -148,12 +171,11 @@ def project_config_view(
                 config.get_tts_provider_for_model(tts_model)
             ),
         ),
-        validation_warnings=list(config.validation_warnings),
+        validation_warnings=[
+            *config.validation_warnings,
+            *filter(None, [active_facts.threshold_warning]),
+        ],
     )
-
-
-def project_workdir(agent_loop: AgentLoop) -> str:
-    return agent_loop.config.displayed_workdir or str(agent_loop.cwd)
 
 
 def _project_audio_client(client: TranscribeClient | TTSClient) -> Literal["mistral"]:
@@ -163,13 +185,87 @@ def _project_audio_client(client: TranscribeClient | TTSClient) -> Literal["mist
     raise ValueError(f"Unsupported audio client: {client}")
 
 
-def _project_model_config(model: ModelConfig) -> ModelConfigView:
+def _model_sources(config: VibeConfigSchema) -> dict[str, ModelSource]:
+    """Each model alias's group, from the highest-priority layer defining it.
+
+    The keys come in picker order: walking the layers by priority, an alias
+    first appears under its highest defining layer, in that layer's own order
+    (the catalog's order for the catalog group). A layer that only adjusts a
+    model, such as a thinking level a pick writes for the session, defines
+    nothing and never moves it.
+    """
+    defined = config.defined_entries_by_layer("models")
+    sources: dict[str, ModelSource] = {}
+    for layer, source in _MODEL_SOURCES:
+        for alias in defined.get(layer, ()):
+            sources.setdefault(alias, source)
+    return sources
+
+
+def offered_levels(config: VibeConfigSchema, model: ModelConfig) -> list[ThinkingLevel]:
+    return _route_facts(config, model).thinking_levels
+
+
+def _route_facts(config: VibeConfigSchema, model: ModelConfig) -> _RouteFacts:
+    """Where ``model`` compacts, unset thresholds included, the thinking level
+    it runs, the levels a picker offers, and the warning when its threshold
+    was fitted into its window.
+
+    Clients show context usage against the threshold, so an unset one reports
+    the model's default rather than nothing. The level shown is the one the
+    session runs, always among the offered ones. A model whose settings no
+    profile can hold reports its configured values: opening a session with it
+    says why.
+    """
+    from vibe.app_server._completion_facts import (
+        ModelFactsError,
+        compile_agent_route_facts,
+    )
+
+    try:
+        facts = compile_agent_route_facts(config.get_provider_for_model(model), model)
+    except (ModelFactsError, ValueError):
+        levels = list(model.thinking_levels)
+        if model.thinking not in levels:
+            levels.append(model.thinking)
+        return _RouteFacts(model.auto_compact_threshold, model.thinking, levels)
+    return _RouteFacts(
+        facts.compaction_threshold,
+        facts.thinking,
+        list(facts.thinking_levels),
+        facts.threshold_warning,
+    )
+
+
+def _project_model_config(
+    model: ModelConfig,
+    *,
+    image_fallback: bool,
+    source: ModelSource | None,
+    route_facts: _RouteFacts,
+) -> ModelConfigView:
+    compaction_threshold, thinking, thinking_levels, _ = route_facts
+    image_delivery: Literal["native", "resource_link"] | None = None
+    if model.supports_images:
+        image_delivery = "native"
+    elif image_fallback:
+        image_delivery = "resource_link"
     return ModelConfigView(
         name=model.name,
         alias=model.alias,
-        thinking=model.thinking,
-        supports_images=model.supports_images,
+        thinking=thinking,
+        supports_images=model.supports_images is True,
         display_name=model.display_name or model.alias,
+        max_context_length=model.max_context_length,
+        auto_compact_threshold=compaction_threshold,
+        image_delivery=image_delivery,
+        thinking_levels=thinking_levels,
+        source=source,
+        requires=(
+            None
+            if model.requires is None
+            else ModelRequirementView(kind=model.requires.kind)
+        ),
     )
 
 
@@ -209,273 +305,138 @@ def _project_tts_provider(provider: TTSProviderConfig) -> AudioProviderView:
     )
 
 
-def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
-    stats = agent_loop.stats
-    return AgentStatsSnapshot(
-        steps=stats.steps,
-        session_prompt_tokens=stats.session_prompt_tokens,
-        session_completion_tokens=stats.session_completion_tokens,
-        session_cached_tokens=stats.session_cached_tokens,
-        input_price_per_million=stats.input_price_per_million,
-        output_price_per_million=stats.output_price_per_million,
-        cached_input_price_per_million=stats.cached_input_price_per_million,
-        tool_calls_agreed=stats.tool_calls_agreed,
-        tool_calls_rejected=stats.tool_calls_rejected,
-        tool_calls_failed=stats.tool_calls_failed,
-        tool_calls_succeeded=stats.tool_calls_succeeded,
-        context_tokens=stats.context_tokens,
-        last_turn_prompt_tokens=stats.last_turn_prompt_tokens,
-        last_turn_completion_tokens=stats.last_turn_completion_tokens,
-        last_turn_cached_tokens=stats.last_turn_cached_tokens,
-        last_turn_duration=stats.last_turn_duration,
-        tokens_per_second=stats.tokens_per_second,
-    )
+def project_selection(agents: AgentManager) -> Selection:
+    """The session's agent and policy with the ones it may switch to.
 
-
-def project_agent_summaries(
-    active: AgentProfile, available: Iterable[AgentProfile]
-) -> tuple[AgentSummary, list[AgentSummary]]:
-    return _project_agent(active), [_project_agent(profile) for profile in available]
-
-
-# Modes hidden from the Unified Harness mode picker/cycle. They stay selectable
-# (resume, pinned running mode, explicit ``--agent``/switch); only the list the
-# client offers is trimmed.
-_UNIFIED_HIDDEN_PICKER_AGENTS: frozenset[str] = frozenset({BuiltinAgentName.PLAN})
-
-
-def project_unified_agent_summaries(
-    active: AgentProfile, available: Iterable[AgentProfile]
-) -> tuple[AgentSummary, list[AgentSummary]]:
-    """Project agents for a Unified Harness client, hiding plan mode from the picker.
-
-    The active profile is always projected, so a session already running a hidden
-    mode still reports it; only the selectable list drops the hidden modes.
+    Subagents stay listed: clients tell them apart by ``agent_type``.
     """
-    visible = [
-        profile
-        for profile in available
-        if profile.name not in _UNIFIED_HIDDEN_PICKER_AGENTS
-    ]
-    return project_agent_summaries(active, visible)
-
-
-def project_agents(agent_loop: AgentLoop) -> tuple[AgentSummary, list[AgentSummary]]:
-    return project_agent_summaries(
-        agent_loop.agent_profile, agent_loop.agent_manager.available_agents.values()
+    return Selection(
+        active=project_agent_summary(agents.active_agent),
+        agents=[
+            project_agent_summary(profile)
+            for profile in agents.available_agents.values()
+        ],
+        active_approval_policy=project_policy_summary(agents.active_policy),
+        approval_policies=[
+            project_policy_summary(agents.available_policies[name])
+            for name in agents.get_policy_order()
+        ],
     )
 
 
 def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
+    return [_skill_summary(skill) for skill in skills]
+
+
+def _skill_summary(
+    skill: SkillInfo, *, enabled: bool = True, locked: bool = False, active: bool = True
+) -> SkillSummary:
+    return SkillSummary.model_validate({
+        "name": skill.name,
+        "description": skill.description,
+        "prompt": skill.prompt,
+        "user_invocable": skill.user_invocable,
+        "source": skill.source.value,
+        "scope": skill.scope.value,
+        "registry": skill.registry.model_dump() if skill.registry else None,
+        "enabled": enabled,
+        "locked": locked,
+        "active": active,
+    })
+
+
+def writable_disabled_skills(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> Sequence[str] | None:
+    """The writable layer's own ``disabled_skills``, or None when unavailable."""
+    return writable_list_field(orchestrator, "disabled_skills")
+
+
+def writable_list_field(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], field: str
+) -> Sequence[str] | None:
+    """The writable layer's own value of a concat-merged list, or None when unavailable.
+
+    Such a list's effective value is every layer at once, while a toggle can
+    only add to or remove from the writable one. Reads the cached layer rather
+    than loading, to stay usable from sync projection.
+    """
+    try:
+        layer = orchestrator.get_layer(orchestrator.writable_layer_name)
+    except KeyError:
+        return None
+    data = layer.cached_data
+    if data is None:
+        return None
+    names = getattr(data, field, None)
+    return list(names) if names else []
+
+
+def project_installed_skill_summaries(
+    skills: Iterable[InstalledSkill],
+    config: VibeConfigSchema,
+    user_disabled: Sequence[str] | None = None,
+) -> list[SkillSummary]:
+    """Browser rows for *skills*, marked against the config's skill filters.
+
+    ``enabled`` is whether the agent loads the skill. ``locked`` is whether the
+    browser can change that, and the two are independent: a skill can be
+    enabled and locked, or disabled and locked.
+
+    ``user_disabled`` is the writable layer's own ``disabled_skills``.
+    ``disabled_skills`` concatenates across layers, so a name a project or admin
+    layer disabled cannot be re-enabled by rewriting the writable one; without
+    it a row offers a toggle that silently does nothing. Omitting the argument
+    assumes a single layer.
+
+    Plugin skills are locked: they come from an installed plugin and are managed
+    through ``/plugins``, not by this config. So is a skill picked for the session:
+    a toggle would disable its name for every later session.
+
+    ``active`` is whether the agent resolves the skill's name to it. A pin that
+    another skill of the same name shadows is still listed, so it can be managed.
+    """
+    disabled = config.disabled_skills
+    toggles = SkillToggles(
+        allowed=config.enabled_skills,
+        disabled=disabled,
+        own=list(disabled if user_disabled is None else user_disabled),
+    )
+
+    def _enabled(info: SkillInfo) -> bool:
+        return info.source is SkillSource.PLUGIN or toggles.enabled(info.name)
+
+    def _locked(info: SkillInfo) -> bool:
+        return (
+            info.source is SkillSource.PLUGIN
+            or info.scope is SkillScope.SESSION
+            or toggles.locked(info.name)
+        )
+
     return [
-        SkillSummary.model_validate({
-            "name": skill.name,
-            "description": skill.description,
-            "prompt": skill.prompt,
-            "user_invocable": skill.user_invocable,
-            "source": skill.source.value,
-            "scope": skill.scope.value,
-            "registry": skill.registry.model_dump() if skill.registry else None,
-        })
+        _skill_summary(
+            skill.info,
+            enabled=_enabled(skill.info),
+            locked=_locked(skill.info),
+            active=skill.active,
+        ).model_copy(update=_file_of(skill.info))
         for skill in skills
     ]
 
 
-def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
-    return project_skill_summaries(agent_loop.skill_manager.available_skills.values())
-
-
-def project_installed_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
-    """Registry pins (one per name+scope) plus local skills, for the browser.
-
-    Unlike ``project_skills`` (de-duped, project-wins) this keeps a global and a
-    project pin of the same skill as separate rows so the browser can manage each.
+def _file_of(skill: SkillInfo) -> dict[str, object]:
+    """A local skill's file as its root lists it, so a delete names the link of a
+    linked folder, never the folder it points at.
     """
-    mgr = agent_loop.skill_manager
-    local = [
-        info
-        for info in mgr.available_skills.values()
-        if info.source is SkillSource.LOCAL
-    ]
-    return project_skill_summaries([*mgr.registry_pins(), *local])
-
-
-def project_tools(agent_loop: AgentLoop) -> list[ToolSummary]:
-    custom_tool_names = agent_loop.tool_manager.custom_tool_names
-    return [
-        ToolSummary(name=name, is_custom=name in custom_tool_names)
-        for name in agent_loop.tool_manager.available_tools
-    ]
-
-
-def project_connectors(agent_loop: AgentLoop) -> ConnectorCounts:
-    connected, total = compute_connector_counts(
-        agent_loop.config, agent_loop.connector_registry
-    )
-    return ConnectorCounts(connected=connected, total=total)
-
-
-def project_mcp(
-    agent_loop: AgentLoop, *, discovery_errors: Mapping[str, str] | None = None
-) -> MCPState:
-    tools = _project_mcp_tools(agent_loop)
-    discovery_errors_set = set(discovery_errors) if discovery_errors else set()
-    connector_registry = agent_loop.connector_registry
-    connector_error = (
-        connector_registry.bootstrap_error() if connector_registry is not None else None
-    )
-    return MCPState(
-        sources=[
-            *_project_mcp_servers(agent_loop, tools, discovery_errors_set),
-            *_project_mcp_connectors(agent_loop, tools),
-        ],
-        discovery_errors=dict(discovery_errors or {}),
-        connector_error=connector_error,
-    )
-
-
-def _project_mcp_tools(
-    agent_loop: AgentLoop,
-) -> dict[tuple[MCPSourceKind, str], list[MCPToolSummary]]:
-    tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]] = {}
-    available = agent_loop.tool_manager.available_tools
-    for tool_name, tool_class in agent_loop.tool_manager.registered_tools.items():
-        if not issubclass(tool_class, MCPTool):
-            continue
-        source_name = tool_class.get_server_name()
-        if source_name is None:
-            continue
-        kind = (
-            MCPSourceKind.CONNECTOR
-            if tool_class.is_connector()
-            else MCPSourceKind.SERVER
-        )
-        tools.setdefault((kind, source_name), []).append(
-            MCPToolSummary(
-                name=tool_class.get_remote_name(),
-                description=format_tool_display_description(
-                    tool_class.description, source_name=source_name
-                ),
-                enabled=tool_name in available,
-            )
-        )
-    return tools
-
-
-def _project_mcp_servers(
-    agent_loop: AgentLoop,
-    tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]],
-    discovery_errors: set[str],
-) -> list[MCPSourceSummary]:
-    registry = agent_loop.mcp_registry
-    server_statuses = registry.status() if registry is not None else {}
-    sources: list[MCPSourceSummary] = []
-    for server in agent_loop.config.mcp_servers:
-        if server.disabled:
-            status = MCPSourceStatus.DISABLED
-        elif server.name in discovery_errors:
-            status = MCPSourceStatus.UNAVAILABLE
-        else:
-            match server_statuses.get(server.name):
-                case AuthStatus.NEEDS_AUTH:
-                    status = MCPSourceStatus.NEEDS_AUTH
-                case AuthStatus.OK:
-                    status = MCPSourceStatus.CONNECTED
-                case _:
-                    status = MCPSourceStatus.ENABLED
-        sources.append(
-            MCPSourceSummary(
-                name=server.name,
-                kind=MCPSourceKind.SERVER,
-                transport=server.transport,
-                status=status,
-                tools=sorted(
-                    tools.get((MCPSourceKind.SERVER, server.name), []),
-                    key=lambda tool: tool.name,
-                ),
-            )
-        )
-    return sources
-
-
-def _project_mcp_connectors(
-    agent_loop: AgentLoop, tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]]
-) -> list[MCPSourceSummary]:
-    connector_registry = agent_loop.connector_registry
-    connector_configs = {
-        connector.name: connector for connector in agent_loop.config.connectors
-    }
-    connector_names = set(connector_configs)
-    if connector_registry is not None:
-        connector_names.update(connector_registry.get_connector_names())
-    sources: list[MCPSourceSummary] = []
-    for name in sorted(connector_names):
-        config = connector_configs.get(name)
-        disabled = config is None or config.disabled
-        if disabled:
-            status = MCPSourceStatus.DISABLED
-        elif connector_registry is None:
-            status = MCPSourceStatus.UNAVAILABLE
-        elif connector_registry.is_connected(name):
-            status = MCPSourceStatus.CONNECTED
-        else:
-            match connector_registry.get_auth_action(name):
-                case ConnectorAuthAction.OAUTH:
-                    status = MCPSourceStatus.NEEDS_AUTH
-                case ConnectorAuthAction.CREDENTIALS_SETUP:
-                    status = MCPSourceStatus.NEEDS_SETUP
-                case _:
-                    status = MCPSourceStatus.UNAVAILABLE
-        error = (
-            connector_registry.connector_error_for(name)
-            if connector_registry is not None
-            else None
-        )
-        source_tools = {
-            tool.name: tool for tool in tools.get((MCPSourceKind.CONNECTOR, name), [])
+    entry = skill.entry_path
+    if entry is not None:
+        folder = entry.parent
+        return {
+            "path": str(entry),
+            "linked": folder.is_symlink() or folder.is_junction(),
         }
-        if connector_registry is not None:
-            for descriptor in connector_registry.get_catalog_tools(name):
-                source_tools.setdefault(
-                    descriptor.name,
-                    MCPToolSummary(
-                        name=descriptor.name,
-                        description=descriptor.description or "",
-                        enabled=False,
-                    ),
-                )
-        sources.append(
-            MCPSourceSummary(
-                name=name,
-                kind=MCPSourceKind.CONNECTOR,
-                transport="connector",
-                status=status,
-                tools=sorted(source_tools.values(), key=lambda tool: tool.name),
-                error=error,
-            )
-        )
-    return sources
-
-
-def project_session_log(agent_loop: AgentLoop) -> SessionLogSummary:
-    session_logger = agent_loop.session_logger
-    session_dir = session_logger.session_dir if session_logger.persisted else None
-    return SessionLogSummary(
-        enabled=session_logger.enabled,
-        session_id=session_logger.session_id,
-        persisted=session_logger.persisted,
-        path=str(session_dir) if session_dir is not None else None,
-        title=session_logger.title,
-        needs_initial_auto_title=session_logger.needs_initial_auto_title(),
-    )
-
-
-def project_diagnostics(agent_loop: AgentLoop) -> tuple[list[ConfigIssue], int]:
-    issues = [
-        *(_project_issue(issue) for issue in agent_loop.hook_config_issues),
-        *(_project_issue(issue) for issue in agent_loop.skill_manager.config_issues),
-    ]
-    return issues, agent_loop.hooks_count
+    path = skill.skill_path
+    return {"path": None if path is None else str(path), "linked": False}
 
 
 def project_debug_logs(logs: PaginatedLogs) -> DebugLogPage:
@@ -499,419 +460,19 @@ def project_debug_logs(logs: PaginatedLogs) -> DebugLogPage:
     )
 
 
-def project_history(agent_loop: AgentLoop) -> list[PublicHistoryEntry]:
-    return project_message_history(
-        agent_loop.session_id,
-        agent_loop.messages,
-        agent_loop.session_logger.session_metadata,
-    )
-
-
-def project_message_content(
-    text: str | None,
-    images: Sequence[CoreImageAttachment] | None,
-    resources: Sequence[UserResource] | None = None,
-) -> list[ContentBlock]:
-    content: list[ContentBlock] = []
-    if text:
-        content.append(TextContentBlock(text=text))
-    content.extend(
-        ImageContentBlock(
-            attachment=ImageAttachment.model_validate(image.model_dump(mode="json"))
-        )
-        for image in images or []
-    )
-    content.extend(
-        ResourceContentBlock(resource=resource) for resource in resources or []
-    )
-    return content
-
-
-def project_message_history(
-    session_id: str, messages: Sequence[LLMMessage], metadata: SessionMetadata | None
-) -> list[PublicHistoryEntry]:
-    timestamp = now_ms()
-    entries: list[PublicHistoryEntry] = []
-    effect_indices: dict[str, int] = {}
-    child_sessions = (
-        {link.tool_call_id: link.session_id for link in metadata.child_sessions}
-        if metadata is not None
-        else {}
-    )
-    # First: the worktree is created before the session has a single message.
-    if metadata is not None and metadata.created_worktree is not None:
-        entries.append(_history_worktree(session_id, metadata.created_worktree))
-    for index, message in enumerate(messages):
-        _project_stored_message(
-            session_id,
-            message,
-            index,
-            timestamp + index,
-            entries,
-            effect_indices,
-            child_sessions,
-        )
-    return entries
-
-
-def _project_stored_message(
-    session_id: str,
-    message: LLMMessage,
-    index: int,
-    created_at: int,
-    entries: list[PublicHistoryEntry],
-    effect_indices: dict[str, int],
-    child_sessions: dict[str, str],
-) -> None:
-    if message.role is Role.system:
-        return
-    if message.context_boundary == "compaction":
-        _append_compaction_history(session_id, message, index, created_at, entries)
-        return
-    if message.injected:
-        _append_injected_history(session_id, message, entries)
-        return
-    match message.role:
-        case Role.user:
-            entries.append(
-                _history_user_message(session_id, message, index, created_at)
-            )
-        case Role.assistant:
-            _append_assistant_history(
-                session_id,
-                message,
-                index,
-                created_at,
-                entries,
-                effect_indices,
-                child_sessions,
-            )
-        case Role.tool:
-            _apply_tool_history(
-                session_id,
-                message,
-                index,
-                created_at,
-                entries,
-                effect_indices,
-                child_sessions,
-            )
-
-
-def _history_worktree(session_id: str, worktree: WorktreeContext) -> PublicEffectEntry:
-    restored = WorktreeEffect.restored(worktree)
-    return PublicEffectEntry(
-        **_history_fields(session_id, worktree.entry_id, worktree.created_at),
-        title="worktree",
-        detail=restored.detail,
-        state=restored.state,
-    )
-
-
-def _append_injected_history(
-    session_id: str, message: LLMMessage, entries: list[PublicHistoryEntry]
-) -> None:
-    shell = message.manual_shell
-    if shell is None:
-        return
-    entries.append(
-        PublicEffectEntry(
-            **_history_fields(session_id, shell.operation_id, shell.created_at),
-            title="shell",
-            detail=shell_effect_detail(shell.command),
-            state=restored_shell_effect_state(shell),
-        )
-    )
-
-
-def _append_compaction_history(
-    session_id: str,
-    message: LLMMessage,
-    index: int,
-    created_at: int,
-    entries: list[PublicHistoryEntry],
-) -> None:
-    message_id = message.message_id or f"history:{index}:compaction"
-    entries.append(
-        PublicCheckpointEntry(
-            **_history_fields(
-                session_id, f"checkpoint:compaction:{message_id}", created_at
-            ),
-            kind="compaction",
-            message="Context compacted",
-            details={},
-        )
-    )
-
-
-def _history_user_message(
-    session_id: str, message: LLMMessage, index: int, created_at: int
-) -> PublicMessageEntry:
-    return PublicMessageEntry(
-        **_history_fields(session_id, history_message_id(message, index), created_at),
-        role="user",
-        content=project_message_content(
-            message.input_text if message.input_text is not None else message.content,
-            message.images,
-            message.resources,
-        ),
-        source="harness",
-        user_display_content=message.user_display_content,
-    )
-
-
-def _append_assistant_history(
-    session_id: str,
-    message: LLMMessage,
-    index: int,
-    created_at: int,
-    entries: list[PublicHistoryEntry],
-    effect_indices: dict[str, int],
-    child_sessions: dict[str, str],
-) -> None:
-    if message.reasoning_content:
-        entries.append(
-            PublicReasoningEntry(
-                **_history_fields(
-                    session_id,
-                    message.reasoning_message_id or f"history:{index}:reasoning",
-                    created_at,
-                ),
-                text=message.reasoning_content,
-            )
-        )
-    if message.content:
-        entries.append(
-            PublicMessageEntry(
-                **_history_fields(
-                    session_id,
-                    message.message_id or f"history:{index}:assistant",
-                    created_at,
-                ),
-                role="assistant",
-                content=[TextContentBlock(text=message.content)],
-                source="harness",
-            )
-        )
-    for tool_call in message.tool_calls or []:
-        tool_call_id = tool_call.id or f"history:{index}:effect"
-        effect_indices[tool_call_id] = len(entries)
-        entries.append(
-            _history_effect(
-                session_id,
-                tool_call_id,
-                tool_call.function.name or "unknown",
-                tool_call.function.arguments,
-                created_at,
-                presentation=tool_call.presentation,
-                child_session_id=child_sessions.get(tool_call_id),
-            )
-        )
-
-
-def _apply_tool_history(
-    session_id: str,
-    message: LLMMessage,
-    index: int,
-    created_at: int,
-    entries: list[PublicHistoryEntry],
-    effect_indices: dict[str, int],
-    child_sessions: dict[str, str],
-) -> None:
-    tool_call_id = message.tool_call_id or ""
-    effect_index = effect_indices.get(tool_call_id)
-    if effect_index is None:
-        entries.append(
-            _history_effect(
-                session_id,
-                tool_call_id or f"history:{index}:effect",
-                message.name or "tool",
-                None,
-                created_at,
-                result_message=message,
-                child_session_id=child_sessions.get(tool_call_id),
-            )
-        )
-        return
-    effect = entries[effect_index]
-    if not isinstance(effect, PublicEffectEntry):
-        return
-    entries[effect_index] = effect.model_copy(
-        update={"state": _persisted_effect_state(effect, message)}
-    )
-
-
-def history_message_id(message: LLMMessage, index: int) -> str:
-    return message.message_id or f"history:{index}:{message.role.value}"
-
-
-def history_user_message_index(agent_loop: AgentLoop, entry_id: str) -> int | None:
-    for index, message in enumerate(agent_loop.messages):
-        if message.role is not Role.user or message.injected:
-            continue
-        if history_message_id(message, index) == entry_id:
-            return index
-    return None
-
-
-class _ConfigIssue(Protocol):
-    file: Path
-    message: str
-
-
-def _project_agent(profile: AgentProfile) -> AgentSummary:
+def project_agent_summary(profile: AgentProfile) -> AgentSummary:
     return AgentSummary(
         name=profile.name,
         display_name=profile.display_name,
         description=profile.description,
-        safety=profile.safety,
         agent_type=profile.agent_type,
     )
 
 
-def _project_issue(issue: _ConfigIssue) -> ConfigIssue:
-    return ConfigIssue(file=str(issue.file), message=issue.message)
-
-
-class _HistoryFields(TypedDict):
-    id: str
-    session_id: str
-    turn_id: str | None
-    created_at: int
-    updated_at: int
-    generation_status: PublicEntryGenerationStatus
-    related_entry_id: str | None
-
-
-def _history_fields(session_id: str, entry_id: str, created_at: int) -> _HistoryFields:
-    return {
-        "id": entry_id,
-        "session_id": session_id,
-        "turn_id": None,
-        "created_at": created_at,
-        "updated_at": created_at,
-        "generation_status": PublicEntryGenerationStatus.COMPLETED,
-        "related_entry_id": None,
-    }
-
-
-def _history_effect(
-    session_id: str,
-    entry_id: str,
-    tool_name: str,
-    raw_arguments: str | None,
-    created_at: int,
-    *,
-    result_message: LLMMessage | None = None,
-    presentation: ToolCallPresentation | None = None,
-    child_session_id: str | None = None,
-) -> PublicEffectEntry:
-    arguments = _parse_arguments(raw_arguments)
-    if presentation is not None:
-        detail = project_effect_detail(tool_name, arguments, presentation)
-    else:
-        summary = _generic_call_summary(tool_name, arguments)
-        display = EffectCallDisplay(
-            summary=summary,
-            verb="Running",
-            message=summary,
-            settled_verb="Ran",
-            settled_message=summary,
-            status_text=f"Running {tool_name}",
-        )
-        detail = GenericEffectDetail(
-            tool_name=tool_name, input=arguments, display=display
-        )
-    if isinstance(detail, SubagentEffectDetail):
-        detail = detail.model_copy(update={"child_session_id": child_session_id})
-    entry = PublicEffectEntry(
-        **_history_fields(session_id, entry_id, created_at),
-        title=tool_name,
-        detail=detail,
-        state=CompletedEffectState(
-            output=None,
-            output_text="",
-            display=EffectResultDisplay(success=True, message=f"{tool_name} completed"),
-        ),
+def project_policy_summary(profile: AgentProfile) -> ApprovalPolicySummary:
+    return ApprovalPolicySummary(
+        name=profile.name,
+        display_name=profile.display_name,
+        description=profile.description,
+        safety=profile.safety,
     )
-    return entry.model_copy(
-        update={"state": _persisted_effect_state(entry, result_message)}
-    )
-
-
-def _persisted_effect_state(
-    effect: PublicEffectEntry, message: LLMMessage | None
-) -> EffectState:
-    if message is None:
-        reason = "Tool did not complete before the session ended"
-        return CancelledEffectState(
-            reason=reason,
-            output_text="",
-            display=EffectResultDisplay(success=False, message=reason),
-        )
-    text = TaggedText.from_string(message.content or "")
-    display_message = text.message or f"{effect.detail.tool_name} completed"
-    if text.tag == CANCELLATION_TAG:
-        return CancelledEffectState(
-            reason=display_message,
-            output_text=text.message,
-            display=EffectResultDisplay(success=False, message=display_message),
-        )
-    if text.tag == TOOL_ERROR_TAG:
-        return FailedEffectState(
-            error=PublicError(message=display_message),
-            output_text=text.message,
-            display=EffectResultDisplay(success=False, message=display_message),
-        )
-    persisted = message.tool_result
-    if persisted is not None:
-        presentation = persisted.presentation
-        display = (
-            presentation.display
-            if presentation is not None
-            else EffectResultDisplay(success=True, message=display_message)
-        )
-        duration_ms = (persisted.duration or 0.0) * 1000
-        if persisted.cancelled:
-            return CancelledEffectState(
-                reason=display.message,
-                output_text=text.message,
-                duration_ms=duration_ms,
-                display=display,
-            )
-        kind = presentation.kind if presentation is not None else effect.detail.kind
-        output = (
-            presentation.projected_output
-            if presentation is not None and presentation.projected_output is not None
-            else persisted.output
-        )
-        return CompletedEffectState(
-            output=project_effect_output_value(kind, output),
-            output_text=text.message,
-            duration_ms=duration_ms,
-            display=display,
-        )
-    return CompletedEffectState(
-        output=None,
-        output_text=text.message,
-        display=EffectResultDisplay(success=True, message=display_message),
-    )
-
-
-def _parse_arguments(value: str | None) -> JsonValue:
-    if value is None:
-        return None
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return value
-    return parsed
-
-
-def _generic_call_summary(tool_name: str, arguments: JsonValue) -> str:
-    if not isinstance(arguments, dict):
-        return tool_name
-    rendered = ", ".join(
-        f"{key}={value!r}" for key, value in list(arguments.items())[:3]
-    )
-    return f"{tool_name}({rendered})"

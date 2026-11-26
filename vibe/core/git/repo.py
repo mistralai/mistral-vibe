@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
+import os
 from pathlib import Path
+import re
 import subprocess
 from typing import TYPE_CHECKING, Self
 
@@ -10,7 +14,7 @@ from typing import TYPE_CHECKING, Self
 # missing, so it is only imported at runtime by _git_python(). app-server must
 # boot on machines without git; only the git operations themselves may need it.
 if TYPE_CHECKING:
-    from git import InvalidGitRepositoryError, Repo
+    from git import Git, InvalidGitRepositoryError, Repo
     from git.exc import GitCommandError, NoSuchPathError
 
 from vibe.core.git.errors import (
@@ -18,7 +22,13 @@ from vibe.core.git.errors import (
     GitRepositoryNotFoundError,
     GitUnavailableError,
 )
+from vibe.core.git.fetch import UnsafeGitFetchError, fetch_remote
 from vibe.core.git.remote import GitHubRemoteInfo, find_github_remote, find_remote_url
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
+from vibe.utils.platform import (
+    configure_git_python_executable,
+    git_python_import_environment,
+)
 
 _GIT_USAGE_ERROR_STATUS = 129
 _DEFAULT_REMOTE = "origin"
@@ -30,6 +40,40 @@ _FETCH_TIMEOUT_SECONDS = 10
 # notices. Failing is the right answer for a refresh the caller treats as
 # optional.
 _NON_INTERACTIVE_GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+# A repository's own hooks run on more than checkout: `git fetch` can end
+# with `gc --auto` (pre-auto-gc), and every ref update runs
+# reference-transaction, so worktree add, fetch, and branch deletion in the
+# pre-trust worktree flow would each execute a hook the repository shipped.
+# -c on the command line takes precedence over the repository's config, so
+# the repository being operated on cannot override this. The value is an
+# absolute path that does not exist rather than an empty one, because git
+# resolves a relative core.hooksPath against the directory the hooks would
+# run in -- which is the untrusted worktree itself. On Windows a
+# leading-slash path resolves against the current drive's root; planting a
+# hook there takes the local write access this guard is not meant to stop.
+# Every guarded call site pairs this with core.fsmonitor=, so both keys a
+# repository can use to make git run a command are neutralized.
+_NO_HOOKS_CONFIG = "core.hooksPath=/nonexistent-vibe-disabled-git-hooks"
+# Filter drivers are the third, for a repository the user has not trusted:
+# `.gitattributes` in the checkout selects a driver by name, and checkout,
+# status and add run that driver's smudge, clean or process command. Only
+# drivers the repository's own config defines are switched off; one the user
+# configured themselves, such as Git LFS's, still runs. A trusted repository
+# keeps its own drivers (git-crypt, an LFS --local install, nbstripout).
+# `git config --get-regexp` exits 1 when nothing matches.
+_FILTER_COMMAND_KEYS = ("smudge", "clean", "process")
+_GIT_CONFIG_NO_MATCH_STATUS = 1
+# Git writes a checkout's files one at a time by default, which dominates
+# `worktree add` on a large repository: for ~70k files it measured 12-19s
+# sequential against 6-10s parallel on a macOS laptop. Half the cores plus one
+# leaves room for the rest of the machine; the curve is flat past that point.
+# Only applied when the user has not chosen a worker count, since a -c override
+# would otherwise replace their setting.
+_CHECKOUT_WORKERS = (os.cpu_count() or 1) // 2 + 1
+# Git prints this on stderr for every percent a checkout advances, once asked
+# with --progress; it stays silent on a pipe otherwise. Matched in the C locale,
+# which the checkout is run under.
+_CHECKOUT_PROGRESS = re.compile(rb"Updating files:\s+\d+% \((\d+)/(\d+)\)")
 # Ordered by how likely each is to be the trunk of a repository that never set
 # origin/HEAD.
 CONVENTIONAL_BASE_BRANCHES = ("main", "master", "develop")
@@ -64,11 +108,31 @@ class _GitPython:
     no_such_path_error: type[NoSuchPathError]
 
 
+def _require_git_executable(cwd: Path | None = None) -> None:
+    if configure_git_python_executable(cwd=cwd) is None:
+        raise GitUnavailableError(
+            "Git operations require a trusted Git executable. Install Git or set "
+            "GIT_PYTHON_GIT_EXECUTABLE to an absolute path."
+        )
+
+
 def _git_python() -> _GitPython:
+    executable = configure_git_python_executable()
+    if executable is None:
+        raise GitUnavailableError(
+            "Git operations require a trusted Git executable. Install Git or set "
+            "GIT_PYTHON_GIT_EXECUTABLE to an absolute path."
+        )
     try:
-        from git import InvalidGitRepositoryError, Repo
-        from git.exc import GitCommandError, NoSuchPathError
+        with git_python_import_environment(executable):
+            from git import Git, InvalidGitRepositoryError, Repo, refresh
+            from git.exc import GitCommandError, GitCommandNotFound, NoSuchPathError
     except ImportError as e:
+        raise GitUnavailableError("Git operations require git to be installed.") from e
+    try:
+        if Git.GIT_PYTHON_GIT_EXECUTABLE != executable:
+            refresh(executable)
+    except (GitCommandNotFound, PermissionError) as e:
         raise GitUnavailableError("Git operations require git to be installed.") from e
     return _GitPython(
         repo=Repo,
@@ -84,17 +148,244 @@ class RepoPaths:
     repo_root: Path
 
 
-class GitRepo:
-    """The one place GitPython is called and its failures become GitError."""
+def sanitized_git(
+    repo: Repo,
+    *extra_config: str,
+    cwd: Path | None = None,
+    trust_store: TrustedFoldersManager | None = None,
+    trust_root: Path | None = None,
+) -> Git:
+    """A repository's git with the config keys that name commands
+    overridden, for one command.
 
-    def __init__(self, repo: Repo) -> None:
+    `core.fsmonitor` names a command git runs on index refresh, and
+    `core.hooksPath` names the directory its hooks come from; neither
+    may execute for a repository the user has not trusted yet. Nor may
+    a filter driver the repository defines for itself, which checkout,
+    status and add would run on its files.
+    GitPython applies the -c overrides to the next command on the
+    shared handle and then resets them, so a handle stored for reuse
+    would run every command after the first unsanitized. Call this
+    per command.
+
+    `cwd` runs the command in another checkout of the repository, such
+    as a linked worktree, through git's own -C.
+    """
+    config = [
+        "core.fsmonitor=",
+        _NO_HOOKS_CONFIG,
+        *(
+            ()
+            if repository_is_trusted(repo, trust_store, trust_root=trust_root)
+            else _repository_filter_overrides(repo, cwd=cwd)
+        ),
+        *extra_config,
+    ]
+    if cwd is None:
+        return repo.git(c=config)
+    return repo.git(c=config, C=str(cwd))
+
+
+def repository_is_trusted(
+    repo: Repo,
+    trust_store: TrustedFoldersManager | None = None,
+    *,
+    trust_root: Path | None = None,
+) -> bool:
+    """Whether the user trusts the folder holding this repository's checkout."""
+    root = repo.working_tree_dir
+    folder = Path(root) if root is not None else Path(str(repo.git_dir)).parent
+    return (trust_store or trusted_folders_manager).is_trusted(
+        folder if trust_root is None else trust_root
+    ) is True
+
+
+def untrusted_status_options(
+    repo: Repo,
+    trust_store: TrustedFoldersManager | None = None,
+    *,
+    trust_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Status options that keep git out of an untrusted repository's submodules.
+
+    A submodule's own config defines filter drivers that the overrides
+    above never see, and status runs them in each submodule it recurses into.
+    """
+    return (
+        ()
+        if repository_is_trusted(repo, trust_store, trust_root=trust_root)
+        else ("--ignore-submodules=all",)
+    )
+
+
+def has_indexed_submodules(repo: Repo, *, base_commit: str | None = None) -> bool:
+    """Detect current or removed gitlinks without opening submodules.
+
+    Snapshots seed their index from HEAD, so a staged removal must still keep
+    the submodule's unsaved contents. ls-files also needs the fsmonitor guard.
+    """
+    index = repo.git(c=["core.fsmonitor=", _NO_HOOKS_CONFIG]).ls_files("--stage", "-z")
+    return any(entry.startswith("160000 ") for entry in index.split("\0")) or any(
+        entry.startswith("160000 ")
+        for ref in dict.fromkeys(("HEAD", base_commit))
+        if ref is not None
+        for entry in repo.git.ls_tree("-r", "-z", ref).split("\0")
+    )
+
+
+def _repository_filter_overrides(repo: Repo, *, cwd: Path | None = None) -> list[str]:
+    """-c values that switch off every filter driver the repository defines.
+
+    Inspect effective configuration in the command's checkout: includeIf can
+    depend on its branch/gitdir, or on remote URLs from other config scopes.
+    Local LFS extensions and transfer settings can turn even a global driver
+    (possibly under another name or behind a wrapper) into repository-controlled
+    execution. In that case, disable all effective drivers and preserve bytes.
+    Older Git without --show-scope uses the same conservative fallback.
+    """
+
+    def listing(*options: str) -> str:
+        try:
+            command = repo.git if cwd is None else repo.git(C=str(cwd))
+            return command.config(
+                *options,
+                "--includes",
+                "--null",
+                "--get-regexp",
+                r"^(filter\.|lfs\.(extension\.|customtransfer\.|standalonetransferagent$))",
+            )
+        except _git_python().git_command_error as e:
+            if e.status == _GIT_CONFIG_NO_MATCH_STATUS:
+                return ""
+            raise
+
+    try:
+        records = listing("--show-scope").split("\0")
+    except _git_python().git_command_error as e:
+        if e.status != _GIT_USAGE_ERROR_STATUS:
+            raise GitError(
+                f"Failed to read the repository's filter drivers: {e}"
+            ) from e
+        try:
+            keys = [record.partition("\n")[0] for record in listing().split("\0")]
+        except _git_python().git_command_error as fallback_error:
+            raise GitError(
+                f"Failed to read the repository's filter drivers: {fallback_error}"
+            ) from fallback_error
+        repository_keys = keys
+    else:
+        # --null emits scope NUL key LF value NUL, including embedded newlines
+        # in values. Only Git parses config and evaluates conditional includes.
+        if records[-1] != "" or len(records) % 2 != 1:
+            raise GitError("Malformed scoped Git filter configuration")
+        scoped_keys = [
+            (records[i], records[i + 1].partition("\n")[0])
+            for i in range(0, len(records) - 1, 2)
+        ]
+        if any(
+            scope not in {"system", "global", "local", "worktree", "command"} or not key
+            for scope, key in scoped_keys
+        ):
+            raise GitError("Malformed scoped Git filter configuration")
+        keys = [key for _, key in scoped_keys]
+        repository_keys = [
+            key for scope, key in scoped_keys if scope in {"local", "worktree"}
+        ]
+    unsafe_lfs = any(key.startswith("lfs.") for key in repository_keys)
+    drivers = {
+        key.removeprefix("filter.").rpartition(".")[0]
+        for key in (keys if unsafe_lfs else repository_keys)
+        if key.startswith("filter.")
+    }
+    overrides: list[str] = []
+    for driver in sorted(drivers):
+        # -c splits at the first "=", so such a name cannot be overridden.
+        if "=" in driver:
+            raise GitError(f"Unsupported Git filter driver name {driver!r}")
+        overrides.extend(f"filter.{driver}.{key}=" for key in _FILTER_COMMAND_KEYS)
+        overrides.append(f"filter.{driver}.required=false")
+    return overrides
+
+
+class GitRepo:  # noqa: PLR0904 - every git operation goes through here
+    """The one place GitPython is called and its failures become GitError.
+
+    HEAD and refs are read with git commands, not GitPython's ref objects:
+    those read .git/HEAD and the loose ref files, and a reftable repository
+    keeps only the placeholder "ref: refs/heads/.invalid" there.
+    """
+
+    def __init__(
+        self,
+        repo: Repo,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+        trust_root: Path | None = None,
+    ) -> None:
         self._repo = repo
+        self.trust_store = trust_store
+        self._source_trust_root = trust_root
+
+    @property
+    def _trust_root(self) -> Path:
+        return self._source_trust_root or self.paths.repo_root
+
+    def run(
+        self,
+        subcommand: str,
+        *args: str,
+        cwd: Path | None = None,
+        missing_ok: bool = False,
+    ) -> str | None:
+        """Run one git command, guarded as `sanitized_git` says, in `cwd` if given.
+
+        Never prompts: a partial clone can fetch missing objects during a
+        checkout, and these commands may run with nobody to answer. An
+        untrusted repository keeps LFS pointers, as `_check_out` does.
+
+        `missing_ok` answers None for exit status 1, which `git config --get`
+        uses for a key that is not set.
+        """
+        command = getattr(self._sanitized_git(cwd=cwd), subcommand.replace("-", "_"))
+        env = (
+            _NON_INTERACTIVE_GIT_ENV
+            if repository_is_trusted(
+                self._repo, self.trust_store, trust_root=self._trust_root
+            )
+            else {**_NON_INTERACTIVE_GIT_ENV, "GIT_LFS_SKIP_SMUDGE": "1"}
+        )
+        try:
+            return command(*args, env=env)
+        except self._gitpy.git_command_error as e:
+            if missing_ok and e.status == _GIT_CONFIG_NO_MATCH_STATUS:
+                return None
+            raise GitError(f"git {subcommand} failed: {e}") from e
+
+    def _sanitized_git(self, *extra_config: str, cwd: Path | None = None) -> Git:
+        return sanitized_git(
+            self._repo,
+            *extra_config,
+            cwd=cwd,
+            trust_store=self.trust_store,
+            trust_root=self._trust_root,
+        )
 
     @classmethod
-    def open(cls, base: Path) -> Self:
+    def open(
+        cls,
+        base: Path,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+        trust_root: Path | None = None,
+    ) -> Self:
+        _require_git_executable(base)
         git = _git_python()
         try:
-            return cls(git.repo(base, search_parent_directories=True))
+            return cls(
+                git.repo(base, search_parent_directories=True),
+                trust_store=trust_store,
+                trust_root=trust_root,
+            )
         except (git.invalid_git_repository_error, git.no_such_path_error) as e:
             raise GitRepositoryNotFoundError(
                 "Path is not inside a git repository."
@@ -104,16 +395,13 @@ class GitRepo:
     # repository it is linked to, so the commit read is that worktree's HEAD.
     @classmethod
     def head_commit_at(cls, target: Path) -> str:
+        _require_git_executable(target)
         git = _git_python()
         try:
-            return cls(git.repo(target)).head_commit()
-        except (
-            git.invalid_git_repository_error,
-            git.no_such_path_error,
-            git.git_command_error,
-            ValueError,
-        ) as e:
+            repo = git.repo(target)
+        except (git.invalid_git_repository_error, git.no_such_path_error) as e:
             raise GitError(f"Failed to inspect HEAD for {target.name!r}: {e}") from e
+        return cls(repo).head_commit()
 
     @cached_property
     def _gitpy(self) -> _GitPython:
@@ -162,13 +450,33 @@ class GitRepo:
             repo_url=find_remote_url(self._repo),
         )
 
+    def has_uncommitted_changes(self) -> bool:
+        """Whether tracked or untracked work exists outside the current HEAD."""
+        options = untrusted_status_options(
+            self._repo, self.trust_store, trust_root=self._trust_root
+        )
+        status = self._sanitized_git().status(
+            "--porcelain", "--untracked-files=all", *options
+        )
+        return bool(status.strip()) or bool(
+            options and has_indexed_submodules(self._repo)
+        )
+
     def github_remote(self) -> GitHubRemoteInfo | None:
         """The first GitHub remote, when this checkout has one."""
         return find_github_remote(self._repo)
 
     def has_commits(self) -> bool:
-        """Whether HEAD resolves to a commit."""
-        return self._repo.head.is_valid()
+        # Refs only: peeling HEAD to its commit opens the packs, which takes
+        # seconds in a partial clone with thousands of them.
+        try:
+            self._repo.git.rev_parse("--quiet", "--verify", "HEAD")
+        except self._gitpy.git_command_error as e:
+            # An unborn HEAD names no commit; other failures are git's own.
+            if e.status == 1:
+                return False
+            raise GitError(f"Failed to read the HEAD commit: {e}") from e
+        return True
 
     def branch_changes(self) -> BranchChanges | None:
         """Committed lines added and removed on this branch, against its base.
@@ -232,10 +540,13 @@ class GitRepo:
 
     def branch(self) -> str | None:
         try:
-            return self._repo.active_branch.name
-        except TypeError:
+            ref = self._repo.git.symbolic_ref("--quiet", "HEAD")
+        except self._gitpy.git_command_error as e:
             # Detached HEAD is checked out at a commit and has no branch name.
-            return None
+            if e.status == 1:
+                return None
+            raise GitError(f"Failed to read the current branch: {e}") from e
+        return ref.removeprefix("refs/heads/")
 
     def base_branch(self) -> str | None:
         """Best-effort guess at the branch this work will merge back into.
@@ -291,7 +602,10 @@ class GitRepo:
         return True
 
     def head_commit(self) -> str:
-        return self._repo.head.commit.hexsha
+        try:
+            return self._repo.git.rev_parse("--verify", "HEAD^{commit}")
+        except self._gitpy.git_command_error as e:
+            raise GitError(f"Failed to read the HEAD commit: {e}") from e
 
     # Derived on first use, not in __init__: reading the repository layout can
     # fail on a linked worktree with a separate git directory, and a caller that
@@ -353,7 +667,7 @@ class GitRepo:
     # what words.
     def delete_branch(self, branch: str, *, force: bool = False) -> None:
         try:
-            self._repo.git.branch("-D" if force else "-d", branch)
+            self._sanitized_git().branch("-D" if force else "-d", branch)
         except self._gitpy.git_command_error as e:
             raise GitError(str(e)) from e
 
@@ -370,13 +684,23 @@ class GitRepo:
         prefix = "refs/remotes/"
         return ref[len(prefix) :] if ref.startswith(prefix) else None
 
+    def remote_branch_ref(
+        self, branch: str, remote: str = _DEFAULT_REMOTE
+    ) -> str | None:
+        """``<remote>/<branch>``, fetched fresh when the remote answers.
+
+        A failed fetch falls back to the tip last fetched, as the default
+        branch does, so a branch the clone already knew is still continued.
+        None when the clone has no such ref: the branch is a new one.
+        """
+        with suppress(GitError):
+            self.fetch_branch(remote, branch)
+        ref = f"{remote}/{branch}"
+        return ref if self._has_ref(f"refs/remotes/{ref}") else None
+
     def fetch_branch(self, remote: str, branch: str) -> None:
-        # A source-only refspec looks like it would only write FETCH_HEAD, but
-        # git also updates the remote-tracking ref whenever the configured
-        # remote.<name>.fetch covers it, which is how callers see the new tip
-        # under refs/remotes. An explicit destination would force the update
-        # past a deliberately narrow refspec, so leave the configured one to
-        # decide.
+        # Use an explicit destination refspec so callers see the fetched tip
+        # without trusting the repository's remote.<name>.fetch configuration.
         #
         # The wait is bounded here rather than with GitPython's
         # kill_after_timeout, which raises on Windows before it runs git at
@@ -384,14 +708,15 @@ class GitRepo:
         # communicate() drains the pipes, so a fetch with a lot of progress
         # output cannot fill stderr and block on a full buffer.
         try:
-            process = self._repo.git.fetch(
+            process = fetch_remote(
+                self._repo,
                 remote,
-                branch,
+                (f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}",),
+                allow_file=True,
                 as_process=True,
                 universal_newlines=True,
-                env=_NON_INTERACTIVE_GIT_ENV,
             )
-        except self._gitpy.git_command_error as e:
+        except (self._gitpy.git_command_error, UnsafeGitFetchError) as e:
             raise GitError(f"Failed to fetch {remote}/{branch}: {e}") from e
 
         proc = process.proc
@@ -408,30 +733,111 @@ class GitRepo:
                 f"Failed to fetch {remote}/{branch}: {(stderr or '').strip()}"
             )
 
-    def add_worktree(
+    def add_worktree[T](
         self,
         target: Path,
         branch: str,
         *,
         branch_created: bool,
         start_point: str | None = None,
-    ) -> None:
+        on_checkout_progress: Callable[[int, int], None] | None = None,
+        populate: Callable[[Path], T] | None = None,
+    ) -> T | None:
+        """Create the worktree, then check its files out.
+
+        Two commands rather than one, because `worktree add` runs its checkout
+        in a child whose progress git only prints to a terminal. Checking out
+        separately with --progress reports it on a pipe too, as
+        `on_checkout_progress(completed_files, total_files)`, called on this
+        thread. It costs nothing measurable over the single command.
+
+        `populate` runs between the two, on the registered but empty worktree,
+        and its result is returned. Files it puts there that already match the
+        index it leaves are not written again by the checkout.
+        """
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
+            git = self._sanitized_git()
             if branch_created:
-                create = ["add", "-b", branch, str(target)]
+                # --no-track: tracking a remote start point writes the shared
+                # .git/config, and git fails rather than waits on its lock, so
+                # two sessions creating worktrees at once would fail one.
+                create = [
+                    "add",
+                    "--no-checkout",
+                    "--no-track",
+                    "-b",
+                    branch,
+                    str(target),
+                ]
                 # Omitted rather than defaulted, because git's own default is
                 # the invoking checkout's HEAD and that is the right answer for
                 # a repository with no remote to start from.
                 if start_point is not None:
                     create.append(start_point)
-                self._repo.git.worktree(*create)
+                git.worktree(*create)
             else:
-                self._repo.git.worktree("add", str(target), branch)
+                git.worktree("add", "--no-checkout", str(target), branch)
         except self._gitpy.git_command_error as e:
             raise GitError(
                 f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
             ) from e
+        try:
+            populated = None if populate is None else populate(target)
+            self._check_out(target, on_checkout_progress)
+        except Exception as e:
+            # The worktree is registered by now, and git only cleans up after a
+            # failed `worktree add`, not after a failed checkout into one.
+            with suppress(GitError):
+                self.remove_worktree(target)
+            if not isinstance(e, GitError):
+                raise
+            raise GitError(
+                f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
+            ) from e
+        return populated
+
+    def _check_out(
+        self, target: Path, on_progress: Callable[[int, int], None] | None
+    ) -> None:
+        git = self._sanitized_git(*self._checkout_config(), cwd=target)
+        # Git LFS reads the repository's own config while it smudges (custom
+        # transfers, extensions), so an untrusted checkout keeps the pointers.
+        lfs = (
+            {}
+            if repository_is_trusted(
+                self._repo, self.trust_store, trust_root=self._trust_root
+            )
+            else {"GIT_LFS_SKIP_SMUDGE": "1"}
+        )
+        # Held for the whole read: GitPython kills the process and closes its
+        # pipes once this wrapper is garbage collected.
+        process = git.checkout(
+            "--progress",
+            "--force",
+            "--no-recurse-submodules",
+            as_process=True,
+            with_stdout=False,
+            env=lfs,
+        )
+        proc = process.proc
+        errors: list[bytes] = []
+        pending = b""
+        while chunk := proc.stderr.read1(4096):
+            *lines, pending = re.split(rb"[\r\n]", pending + chunk)
+            for line in lines:
+                if match := _CHECKOUT_PROGRESS.search(line):
+                    if on_progress is not None:
+                        on_progress(int(match[1]), int(match[2]))
+                elif line.strip():
+                    errors.append(line)
+        if proc.wait() != 0:
+            raise GitError(b"\n".join([*errors, pending]).decode(errors="replace"))
+
+    def _checkout_config(self) -> tuple[str, ...]:
+        if self._repo.config_reader().has_option("checkout", "workers"):
+            return ()
+        return (f"checkout.workers={_CHECKOUT_WORKERS}",)
 
     # Carries git's error text and nothing else: this is a cleanup primitive,
     # and only the caller knows whether the failure is worth reporting and in

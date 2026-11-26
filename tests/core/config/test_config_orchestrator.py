@@ -10,6 +10,7 @@ from typing import Annotated, Any
 from pydantic import Field, ValidationError
 import pytest
 
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import (
     ConfigLayer,
@@ -37,6 +38,7 @@ from vibe.core.config.schema import (
     ConfigSchema,
     WithConcatMerge,
     WithReplaceMerge,
+    WithUnionMerge,
 )
 from vibe.core.config.types import (
     ConcurrencyConflictError,
@@ -108,6 +110,18 @@ class ApplyErrorLayer(FakeLayer):
 
     async def apply(self, *args: Any, **kwargs: Any) -> None:
         raise self._error
+
+
+class ConflictOnceLayer(RawWritableLayer):
+    def __init__(self, *, name: str, data: dict[str, Any]) -> None:
+        super().__init__(name=name, data=data)
+        self.conflicts = 1
+
+    async def apply(self, *args: Any, **kwargs: Any) -> None:
+        if self.conflicts:
+            self.conflicts -= 1
+            raise ConcurrencyConflictError(expected_fp="before", actual_fp="after")
+        await super().apply(*args, **kwargs)
 
 
 class ParallelSaveBarrier:
@@ -294,9 +308,8 @@ async def test_apply_patch_rejects_invalid_schema_result_before_routing() -> Non
             reason="test invalid patch",
         )
 
-    assert exc_info.value.args == (
-        "Config patch failed preflight validation against the merged config; fix the patch payload and retry",
-    )
+    # The schema's issue, so the caller can say what to change.
+    assert exc_info.value.args == ("value: Input should be a valid string",)
     assert isinstance(exc_info.value.__cause__, ValidationError)
 
 
@@ -502,8 +515,8 @@ async def test_mutate_field_serializes_read_modify_write_with_preflight() -> Non
     assert not second_entered.is_set()
 
     release_first.set()
-    assert await first == []
-    assert await second == []
+    assert (await first).failures == []
+    assert (await second).failures == []
     assert layer._data == {"values": ["first", "second"]}
     assert orch.config.values == ["first", "second"]
 
@@ -730,6 +743,65 @@ async def test_apply_patch_returns_layer_apply_error_in_failures(
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_retries_when_ops_name_the_default_layer_both_ways() -> None:
+    layer = ConflictOnceLayer(name="user", data={"first": "one", "second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(path="/first", value="updated-one"),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="user"
+            ),
+        ],
+        reason="test update",
+    )
+
+    assert result == []
+    assert layer._data == {"first": "updated-one", "second": "updated-two"}
+
+
+class CountingApplyLayer(RawWritableLayer):
+    def __init__(self, *, name: str, data: dict[str, Any]) -> None:
+        super().__init__(name=name, data=data)
+        self.applies = 0
+
+    async def apply(self, *args: Any, **kwargs: Any) -> None:
+        self.applies += 1
+        await super().apply(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_across_layers_retries_only_the_conflicting_layer() -> None:
+    conflicting = ConflictOnceLayer(name="user", data={"first": "one"})
+    other = CountingApplyLayer(name="session", data={"second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema,
+        layers=[conflicting, other],
+        default_layer_resolver=lambda: conflicting,
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(
+                path="/first", value="updated-one", target_layer_name="user"
+            ),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="session"
+            ),
+        ],
+        reason="test update",
+    )
+
+    assert result == []
+    assert conflicting._data == {"first": "updated-one"}
+    assert other._data == {"second": "updated-two"}
+    assert other.applies == 1
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_returns_unloaded_layer_error_in_failures() -> None:
     loaded_layer = FakeLayer(name="loaded", data={"value": "hello"})
     target_layer = FakeLayer(name="target", data={"value": "hello"})
@@ -835,6 +907,33 @@ deprecated_setting = true
 
 
 @pytest.mark.asyncio
+async def test_set_field_returns_a_nameless_entry_written_meanwhile_as_failure(
+    tmp_working_directory: Path,
+) -> None:
+    class EntriesSchema(ConfigSchema):
+        value: Annotated[str, WithReplaceMerge()] = "default"
+        entries: Annotated[list[dict[str, Any]], WithUnionMerge(merge_key="name")] = (
+            Field(default_factory=list)
+        )
+
+    toml_path = tmp_working_directory / "config.toml"
+    toml_path.write_text('value = "old"\n', encoding="utf-8")
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=EntriesSchema,
+        layers=[FakeLayer(name="default", data={"entries": []}), user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+    toml_path.write_text('value = "old"\n[[entries]]\n', encoding="utf-8")
+
+    failures = await orch.set_field("/value", "new")
+
+    failure = assert_single_failure(failures, InvalidConfigError)
+    assert "has no 'name'" in str(failure)
+    assert orch.config.value == "old"
+
+
+@pytest.mark.asyncio
 async def test_persisted_active_model_reads_the_pinned_value(
     tmp_working_directory: Path,
 ) -> None:
@@ -923,7 +1022,7 @@ async def test_apply_patch_end_to_end_falls_back_to_user_layer_when_no_target_is
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
-    toml_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    toml_path.write_text('default_agent = "ask"\n', encoding="utf-8")
     monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
 
     user_layer = UserConfigLayer(path=toml_path)
@@ -957,7 +1056,7 @@ async def test_apply_patch_end_to_end_respects_explicit_target_layer(
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
-    toml_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    toml_path.write_text('default_agent = "ask"\n', encoding="utf-8")
     monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
 
     user_layer = UserConfigLayer(path=toml_path)
@@ -1041,7 +1140,7 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
     workspace.mkdir()
     project_config_path = workspace / ".vibe" / "config.toml"
     project_config_path.parent.mkdir(parents=True, exist_ok=True)
-    project_config_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    project_config_path.write_text('default_agent = "ask"\n', encoding="utf-8")
 
     user_config_path = tmp_working_directory / "user.toml"
     user_config_path.write_text('default_agent = "accept-edits"\n', encoding="utf-8")
@@ -1068,7 +1167,7 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
 
     assert project_layer.is_file_discovered is True
     assert orch.config.active_model == "env-model"
-    assert orch.config.default_agent == "plan"
+    assert orch.config.default_agent == "ask"
     assert orch.config.enabled_tools == ["read"]
 
     result = await orch.apply_patch(
@@ -1135,3 +1234,82 @@ async def test_orchestrator_deepcopies_and_stays_functional() -> None:
 
     assert forked.config.value == "forked"
     assert orch.config.value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_reload_layer_reports_a_schema_break_as_a_config_error() -> None:
+    """*Prepare*: A loaded config; one layer then breaks the schema.
+    *Do*: Re-read that layer alone.
+    *Assert*: The readable config error, as ``reload`` raises, and the
+    previous snapshot is kept.
+    """
+    from vibe.core.config.builder import InvalidConfigError
+
+    # Prepare
+    layer = FakeLayer(name="admin", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": 42}
+
+    # Do / Assert
+    with pytest.raises(InvalidConfigError):
+        await orch.reload_layer("admin")
+
+    assert orch.config.value == "original"
+
+
+class _ReadInThreadLayer(FakeLayer):
+    """Reads its store off the loop, as the TOML layers do."""
+
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        return await asyncio.to_thread(
+            lambda: LayerConfigSnapshot(data=dict(self._data), fingerprint="fp")
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_during_a_reload_waits_its_turn_on_the_loop() -> None:
+    # A reload holds the build across an await off the loop. A rebuild from
+    # the loop (an agent switch) waits for it there; a synchronous rebuild
+    # would block the loop the reload needs to finish, and hang the process.
+    layer = _ReadInThreadLayer(name="file", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": "reloaded"}
+    reload = asyncio.create_task(orch.reload())
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(orch.arebuild(), timeout=5)
+    await reload
+
+    assert orch.config.value == "reloaded"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_is_not_undone_by_a_reload_that_built_before_it() -> None:
+    # A reload builds, then awaits its preflight before installing. A rebuild
+    # that lands meanwhile (an agent switch) must not be replaced by the
+    # reload's candidate, built from the layers before the switch.
+    layer = _ReadInThreadLayer(name="file", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    preflight_started = asyncio.Event()
+    release_preflight = asyncio.Event()
+
+    async def slow_preflight(_candidate: SimpleSchema) -> None:
+        preflight_started.set()
+        await release_preflight.wait()
+
+    reload = asyncio.create_task(orch.reload(preflight=slow_preflight))
+    await preflight_started.wait()
+    switched = FakeLayer(name="agent-profile", data={"value": "switched"})
+    orch.insert_layer(switched, len(orch.layers))
+    rebuild = asyncio.create_task(orch.arebuild())
+    await asyncio.sleep(0.05)
+    release_preflight.set()
+    await asyncio.gather(reload, rebuild)
+
+    assert orch.config.value == "switched"

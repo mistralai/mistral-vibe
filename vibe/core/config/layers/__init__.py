@@ -5,9 +5,10 @@ from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
-from vibe.core.config.layers.user import UserConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 
 __all__ = [
     "AgentProfileLayer",
@@ -15,7 +16,9 @@ __all__ = [
     "DiscoveredConfigLayer",
     "EnvironmentLayer",
     "GrowthbookLayer",
+    "ModelCatalogLayer",
     "OverridesLayer",
     "ProjectConfigLayer",
+    "SuppliedUserConfigLayer",
     "UserConfigLayer",
 ]

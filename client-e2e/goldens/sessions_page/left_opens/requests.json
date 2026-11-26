@@ -1,0 +1,24 @@
+[
+ {
+  "method": "session/list",
+  "params": {
+   "includeArchived": true,
+   "limit": 500
+  }
+ },
+ {
+  "method": "projects/list",
+  "params": {}
+ },
+ {
+  "method": "session/list",
+  "params": {
+   "includeArchived": true,
+   "limit": 500
+  }
+ },
+ {
+  "method": "projects/list",
+  "params": {}
+ }
+]

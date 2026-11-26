@@ -70,7 +70,9 @@ Rules:
 - `$schema` must be exactly
   `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`. Any other
   schema URL produces a fatal `plugin.schema.version_unsupported` error.
-- All fields other than those listed above are rejected (`extra="forbid"`).
+- Agent Plugins 1.0 defines no other top-level fields. Vibe ignores one with a
+  `plugin.manifest.unknown_field` warning and loads the rest; put Vibe settings
+  in the `ai.mistral.vibe` extension instead.
 
 ## Step 2 — Vibe extension (optional)
 
@@ -82,6 +84,7 @@ connectors), add an `ai.mistral.vibe` extension to `plugin.json`:
   "extensions": {
     "ai.mistral.vibe": {
       "schemaVersion": 1,
+      "displayName": "My Plugin",
       "toolNamespace": "myPlugin",
       "toolOverrides": {
         "lookup": {
@@ -97,14 +100,22 @@ connectors), add an `ai.mistral.vibe` extension to `plugin.json`:
 Without this extension, Vibe only loads `plugin.json`, `skills/`, and
 `mcp.json`. The `toolNamespace` defaults to a TypeScript identifier derived
 from the plugin name. It must not be one of the reserved namespaces:
-`file_system`, `self`, `process`, `agent`, `vibe`.
+`file_system`, `self`, `process`, `skill`, `subagent`, `vibe`.
 
 `vibe` is reserved for built-in plugins shipped with the CLI; user plugins
 must choose a different namespace.
 
+`displayName` is an optional title of 1 to 100 characters; the plugin `name`
+stays its identity.
+
 `toolOverrides` rename or restrict tool exposure. Each key matches a discovered
 tool name from MCP servers or connectors. `exposure` is one of
 `programmatic`, `direct`, or `direct_and_programmatic`.
+
+Vibe ignores a key the extension's schema does not define, with a
+`plugin.extension.unknown_field` warning, and keeps the rest of the extension.
+An invalid value for a defined key drops the whole extension, and with it the
+plugin's hooks, knowledge, agents, libraries, and connectors.
 
 ## Step 3 — Skills (optional)
 
@@ -119,8 +130,9 @@ skills/
 ```
 
 Skills follow the standard SKILL.md format with YAML frontmatter (`name`,
-`description`, `user-invocable`, `allowed-tools`). Plugin skills are namespaced
-as `<namespace>:<skill-name>` at runtime.
+`description`, `user-invocable`, `allowed-tools`). Plugin skills are named
+`<plugin-name>:<skill-name>` at runtime, with the plugin's name as written (for
+example `my-plugin:review`). Only tools use the `toolNamespace`.
 
 ## Step 4 — MCP servers (optional)
 
@@ -167,7 +179,14 @@ Rules:
 
 Place hooks in `ai.mistral.vibe/hooks.toml`. Format is identical to the Vibe
 hooks.toml format, but hooks run in the plugin root directory with
-`PLUGIN_ROOT` and `PLUGIN_DATA` in the environment.
+`PLUGIN_ROOT` and `PLUGIN_DATA` in the environment. The session folder is the
+`cwd` field of the JSON the hook reads on stdin: read it to act on the user's
+project.
+
+As for MCP servers, the plugin root is the session's read-only copy of the
+plugin, so editing the installed plugin does not change a running session, and
+`PLUGIN_DATA` is the session's data directory, shared with the plugin's MCP
+servers. Write state to `PLUGIN_DATA`, never next to the hook script.
 
 ```toml
 [[hooks]]
@@ -180,8 +199,11 @@ strict = true
 [[hooks]]
 name = "post-agent-lint"
 type = "post_agent"
-command = "eslint --quiet ."
+command = "python lint_session.py"   # reads `cwd` from stdin, then lints it
 ```
+
+Plugin hooks run after the project's own `hooks.toml` and before the user's
+`~/.vibe/hooks.toml` (project plugins), or after it (user plugins).
 
 Limits:
 - Maximum 128 hooks per plugin.
@@ -219,7 +241,7 @@ Rules:
 - Maximum 100 knowledge folders per plugin.
 - `KNOWLEDGE.md` entrypoint limit: 256 KB.
 - No symbolic links inside knowledge directories.
-- Knowledge is namespaced as `<namespace>:<name>`.
+- Knowledge is named `<plugin-name>:<name>`.
 
 ## Step 7 — Agents (optional, Vibe extension only)
 
@@ -259,7 +281,7 @@ Rules:
 - `safety` is one of `"safe"`, `"neutral"`, `"destructive"`, `"yolo"`.
 - Maximum 128 agents per plugin, 64 KB per file.
 - Tool lists cannot contain duplicates or empty names.
-- Agent names are namespaced as `<namespace>:<filename-stem>`.
+- Agent names are `<plugin-name>:<filename-stem>`.
 
 ## Step 8 — Libraries (optional, Vibe extension only)
 
@@ -332,6 +354,8 @@ most common ones:
 | `plugin.namespace.collision` | yes | two plugins claim one namespace |
 | `plugin.name.collision` | yes | two plugins share a name at the same scope |
 | `plugin.path.outside_root` | yes | a declared path escapes the plugin root |
+| `plugin.manifest.unknown_field` | no | `plugin.json` has a field Agent Plugins 1.0 does not define; it is ignored |
+| `plugin.extension.unknown_field` | no | the `ai.mistral.vibe` extension has a key its schema does not define; it is ignored |
 | `plugin.skill.invalid` | no | one `SKILL.md` failed to parse |
 | `plugin.hooks.invalid` | no | one hook entry failed validation |
 | `plugin.knowledge.invalid` | no | one knowledge folder failed validation |
@@ -358,9 +382,10 @@ Vibe also detects and adapts plugins authored for other agents:
 | Kimi Code | `kimi.plugin.json` or `.kimi-plugin/plugin.json` | skills, MCP servers, hooks |
 | OpenCode | `.opencode/` directory | skills only (executable modules unsupported) |
 
-If markers for more than one format are present, the plugin is rejected as
-ambiguous. Native Agent Plugins 1.0 (a valid `plugin.json` with the correct
-`$schema`) always takes precedence.
+Native Agent Plugins 1.0 (a valid `plugin.json` with the correct `$schema`)
+always takes precedence. A folder with markers for several foreign formats
+loads as the first one in the table order above (Claude Code, Codex, Kimi Code,
+OpenCode); `/plugins` shows the format used in the plugin's detail.
 
 When creating a new plugin, always use the native Agent Plugins 1.0 format.
 

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import gc
 import time
 from unittest.mock import AsyncMock, patch
 
-from mcp.shared.auth import OAuthToken
+import httpx
+import keyring
+from keyring.backend import KeyringBackend
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from pydantic import AnyUrl
 import pytest
+import respx
 
 from vibe.app_server import _mcp_auth
 from vibe.app_server._mcp_auth import MCPAuthenticationService
@@ -15,6 +21,7 @@ from vibe.app_server._session_backend_port import (
 )
 from vibe.core.auth.mcp_oauth import (
     Fingerprint,
+    KeyringTokenStorage,
     MCPOAuthCredentialRestoreFailed,
     MCPOAuthHeadlessError,
     MCPOAuthInvalidGrant,
@@ -798,3 +805,154 @@ async def test_a_shared_name_is_not_resolved_by_deleting_the_other_credential(
     assert isinstance(result, MCPAuthorizationRequired)
     assert result.reason == "invalid"
     cleanup.assert_not_awaited()
+
+
+class _MemoryKeyring(KeyringBackend):
+    priority = 100  # type: ignore[assignment]
+
+    def __init__(self) -> None:
+        self.store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.store.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.store[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.store.pop((service, username), None)
+
+
+_OFF_HOST_TOKEN_URL = "https://auth.example.test/oauth/token"
+
+
+@pytest.fixture
+def off_host_oauth() -> Iterator[respx.MockRouter]:
+    # The MCP server advertises an authorization server on another host, the way
+    # Consensus, Keycloak and Cloudflare Access deployments do.
+    original = keyring.get_keyring()
+    keyring.set_keyring(_MemoryKeyring())
+    with respx.mock(assert_all_called=False) as router:
+        router.get(
+            "https://mcp.example.test/.well-known/oauth-protected-resource/mcp"
+        ).respond(404)
+        router.get(
+            "https://mcp.example.test/.well-known/oauth-protected-resource"
+        ).respond(
+            200,
+            json={
+                "resource": "https://mcp.example.test/mcp",
+                "authorization_servers": ["https://auth.example.test"],
+            },
+        )
+        router.get(
+            "https://auth.example.test/.well-known/oauth-authorization-server",
+            name="authorization_server",
+        ).respond(
+            200,
+            json={
+                "issuer": "https://auth.example.test",
+                "authorization_endpoint": "https://auth.example.test/oauth/authorize",
+                "token_endpoint": _OFF_HOST_TOKEN_URL,
+                "response_types_supported": ["code"],
+            },
+        )
+        router.post("https://mcp.example.test/token").respond(
+            404, json={"error": "not found"}
+        )
+        router.get("https://mcp.example.test/mcp").respond(200)
+        try:
+            yield router
+        finally:
+            keyring.set_keyring(original)
+
+
+def _off_host_server() -> MCPHttp:
+    return MCPHttp(
+        name="consensus",
+        transport="http",
+        url="https://mcp.example.test/mcp",
+        auth=MCPOAuth(type="oauth", scopes=[]),
+    )
+
+
+async def _store_expired_login(server: MCPHttp) -> None:
+    storage = KeyringTokenStorage(alias=server.name)
+    await storage.set_client_info(
+        OAuthClientInformationFull(
+            client_id="cid", redirect_uris=[AnyUrl("http://127.0.0.1:8765/callback")]
+        )
+    )
+    with patch("vibe.core.auth.mcp_oauth.time.time", return_value=1000):
+        await storage.set_tokens(
+            OAuthToken(access_token="old", expires_in=60, refresh_token="refresh")
+        )
+    await Fingerprint.compute(server).save(server.name)
+
+
+def _token_response(access_token: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": f"{access_token}-refresh",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_expired_token_refreshes_at_the_advertised_off_host_endpoint(
+    off_host_oauth: respx.MockRouter,
+) -> None:
+    # Prepare
+    service = MCPAuthenticationService()
+    server = _off_host_server()
+    await service.bind_catalog([server])
+    await _store_expired_login(server)
+    token = off_host_oauth.post(_OFF_HOST_TOKEN_URL).mock(
+        return_value=_token_response("fresh")
+    )
+
+    # Do
+    result = await service.resolve(service.reference_for(server))
+
+    # Assert
+    assert isinstance(result, MCPAuthorizationSnapshot)
+    assert result.headers["Authorization"] == "Bearer fresh"
+    assert token.call_count == 1
+    stored = await KeyringTokenStorage(alias=server.name).get_tokens()
+    assert stored is not None
+    assert stored.refresh_token == "fresh-refresh"
+
+
+@pytest.mark.asyncio
+async def test_metadata_naming_another_issuer_never_receives_the_refresh_token(
+    off_host_oauth: respx.MockRouter,
+) -> None:
+    # Prepare
+    service = MCPAuthenticationService()
+    server = _off_host_server()
+    await service.bind_catalog([server])
+    await _store_expired_login(server)
+    off_host_oauth["authorization_server"].respond(
+        200,
+        json={
+            "issuer": "https://elsewhere.example.test",
+            "authorization_endpoint": "https://elsewhere.example.test/authorize",
+            "token_endpoint": "https://elsewhere.example.test/token",
+            "response_types_supported": ["code"],
+        },
+    )
+    forged = off_host_oauth.post("https://elsewhere.example.test/token").mock(
+        return_value=_token_response("stolen")
+    )
+
+    # Do
+    result = await service.resolve(service.reference_for(server))
+
+    # Assert
+    assert isinstance(result, MCPAuthorizationRequired)
+    assert result.reason == "expired"
+    assert not forged.called

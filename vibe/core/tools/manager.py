@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
-import hashlib
-import importlib.util
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+import importlib
 import inspect
 from pathlib import Path
-import re
-import sys
 import threading
 from typing import TYPE_CHECKING, Any, TypeGuard
 
@@ -15,14 +13,12 @@ from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
 )
-from vibe.core.paths import DEFAULT_TOOL_DIR
+from vibe.core.git.worktree import access_roots_at
+from vibe.core.paths import DEFAULT_TOOL_DIR, dedup_paths
 from vibe.core.tools.base import BaseTool, BaseToolConfig, ToolPermission
 from vibe.core.tools.remote import MCPTool
-from vibe.core.tools.terminal_runtime import TerminalRuntime
-from vibe.core.types import AvailableFunction
 from vibe.core.utils import is_windows, name_matches, run_sync
 from vibe.observability.logging import logger
-from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -30,47 +26,63 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp.registry import MCPRegistry
 
 
-def _try_canonical_module_name(path: Path) -> str | None:
-    """Extract canonical module name for vibe package files.
+_BUILTIN_PACKAGE = "vibe.core.tools.builtins"
 
-    Prevents Pydantic class identity mismatches when the same module
-    is imported via dynamic discovery and regular imports.
-    """
-    try:
-        parts = path.resolve().parts
-    except (OSError, ValueError):
-        return None
+# Every derivation of every session in the process lists the builtin tools
+# again, and the builtin files never change while Vibe runs.
+_builtin_tools: tuple[type[BaseTool], ...] | None = None
+_builtin_tools_lock = threading.Lock()
 
-    package_indices = [
-        idx
-        for idx, part in enumerate(parts)
-        if part == "vibe"
-        and idx + 1 < len(parts)
-        and (
-            parts[idx + 1] in {"acp", "cli", "core", "setup"}
-            or parts[idx + 1].endswith(".py")
-        )
+
+def _discover_builtin_tools() -> tuple[type[BaseTool], ...]:
+    global _builtin_tools
+    with _builtin_tools_lock:
+        if _builtin_tools is not None:
+            return _builtin_tools
+        tools: list[type[BaseTool]] = []
+        for path in sorted(DEFAULT_TOOL_DIR.path.glob("*.py")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                tools.extend(_tool_classes_of(f"{_BUILTIN_PACKAGE}.{path.stem}"))
+            except Exception as exc:
+                logger.warning("Failed to load tools from %s: %s", path, exc)
+        _builtin_tools = tuple(tools)
+        return _builtin_tools
+
+
+def builtin_tool_classes() -> tuple[type[BaseTool], ...]:
+    """Every builtin tool class, including each variant of a name."""
+    return _discover_builtin_tools()
+
+
+def discover_tool_defaults() -> dict[str, dict[str, Any]]:
+    defaults: dict[str, dict[str, Any]] = {}
+    for cls in _discover_builtin_tools():
+        try:
+            tool_name = cls.get_name()
+            config_class = cls._get_tool_config_class()
+            defaults[tool_name] = config_class().model_dump(exclude_none=True)
+        except Exception as e:
+            logger.warning("Failed to get defaults for tool %s: %s", cls.__name__, e)
+            continue
+    return defaults
+
+
+def _tool_classes_of(module_name: str) -> list[type[BaseTool]]:
+    module = importlib.import_module(module_name)
+    # Builtin tool modules import shared base classes (e.g. BashOutput) from
+    # sibling files; drop those re-exports so they are not registered twice
+    # under the importing module.
+    return [
+        tool_obj
+        for tool_obj in vars(module).values()
+        if inspect.isclass(tool_obj)
+        and tool_obj.__module__ == module.__name__
+        and issubclass(tool_obj, BaseTool)
+        and tool_obj is not BaseTool
+        and not inspect.isabstract(tool_obj)
     ]
-    if not package_indices:
-        return None
-
-    vibe_idx = package_indices[-1]
-    if vibe_idx + 1 >= len(parts):
-        return None
-
-    module_parts = [p.removesuffix(".py") for p in parts[vibe_idx:]]
-    return ".".join(module_parts)
-
-
-def _compute_module_name(path: Path) -> str:
-    """Return canonical module name for vibe files, hash-based synthetic name otherwise."""
-    if canonical := _try_canonical_module_name(path):
-        return canonical
-
-    resolved = path.resolve()
-    path_hash = hashlib.md5(str(resolved).encode()).hexdigest()[:8]
-    stem = re.sub(r"[^0-9A-Za-z_]", "_", path.stem) or "mod"
-    return f"vibe_tools_discovered_{stem}_{path_hash}"
 
 
 class NoSuchToolError(Exception):
@@ -80,8 +92,8 @@ class NoSuchToolError(Exception):
 class ToolManager:
     """Manages tool discovery and instantiation for an Agent.
 
-    Discovers available tools from the provided search paths. Each Agent
-    should have its own ToolManager instance.
+    Lists the builtin tools, then MCP and connector tools. Each Agent should
+    have its own ToolManager instance.
     """
 
     def __init__(
@@ -96,44 +108,27 @@ class ToolManager:
         cwd: Path | None = None,
         harness_files: HarnessFilesManager | None = None,
         scratchpad_dir: Path | None = None,
-        terminal_runtime: TerminalRuntime | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._cwd = (cwd or Path.cwd()).resolve()
         self._harness_files = harness_files or get_harness_files_manager()
         self._scratchpad_dir = scratchpad_dir
-        self.terminal_runtime = terminal_runtime or TerminalRuntime()
         self._permission_getter = permission_getter
         self._local_managed_shell_runtime_enabled = local_managed_shell_runtime_enabled
         self._mcp_registry = mcp_registry
         self._connector_registry = connector_registry
         self._instances: dict[str, BaseTool] = {}
-        self._search_paths: list[Path] = self._compute_search_paths(self._config)
         self._lock = threading.Lock()
         self._mcp_integrated = False
 
         self._tool_variants_by_name: dict[str, list[type[BaseTool]]] = {}
-        self._custom_tool_variants_by_name: dict[str, list[bool]] = {}
         # Historical one-class-per-name registry. When multiple classes publish the
         # same name, this is the fallback used if no variant is active.
         self._all_tools: dict[str, type[BaseTool]] = {}
-        for tool_class, is_custom in self._iter_tool_classes_with_origin(
-            self._search_paths
-        ):
-            self._register_discovered_tool_variant(tool_class, is_custom=is_custom)
-        self._tool_descriptions: dict[str, str] = dict(
-            self._iter_tool_descriptions(self._search_paths)
-        )
+        for tool_class in _discover_builtin_tools():
+            self._register_discovered_tool_variant(tool_class)
         if not defer_mcp:
             self.integrate_all()
-
-    def set_mcp_registry(self, mcp_registry: MCPRegistry | None) -> None:
-        self._mcp_registry = mcp_registry
-
-    def set_connector_registry(
-        self, connector_registry: ConnectorRegistry | None
-    ) -> None:
-        self._connector_registry = connector_registry
 
     def _get_mcp_registry(self) -> MCPRegistry:
         if self._mcp_registry is None:
@@ -146,154 +141,9 @@ class ToolManager:
     def _config(self) -> VibeConfigSchema:
         return self._config_getter()
 
-    def _compute_search_paths(self, config: VibeConfigSchema) -> list[Path]:
-        paths: list[Path] = [DEFAULT_TOOL_DIR.path]
-
-        paths.extend(config.tool_paths)
-
-        mgr = self._harness_files
-        paths.extend(mgr.project_tools_dirs)
-        paths.extend(mgr.user_tools_dirs)
-
-        unique: list[Path] = []
-        seen: set[Path] = set()
-        for p in paths:
-            rp = p.resolve()
-            if rp not in seen:
-                seen.add(rp)
-                unique.append(rp)
-        return unique
-
-    @staticmethod
-    def _iter_tool_classes(search_paths: list[Path]) -> Iterator[type[BaseTool]]:
-        """Iterate over all search_paths to find tool classes.
-
-        A search path is either a directory of tool files (``<dir>/*.py``, e.g.
-        ``.vibe/tools/``) or a single ``.py`` file. Tool files sit directly in
-        the directory — the same flat layout as the builtins and as the sibling
-        ``prompts/*.md`` descriptions (see ``_iter_tool_descriptions``).
-        """
-        for tool_class, _ in ToolManager._iter_tool_classes_with_origin(search_paths):
-            yield tool_class
-
-    @staticmethod
-    def _iter_tool_classes_with_origin(
-        search_paths: list[Path],
-    ) -> Iterator[tuple[type[BaseTool], bool]]:
-        builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
-        for base in search_paths:
-            if not base.is_dir() and base.name.endswith(".py"):
-                if tools := ToolManager._load_tools_from_file(base):
-                    for tool in tools:
-                        yield tool, not base.resolve().is_relative_to(builtin_dir)
-
-            for path in base.glob("*.py"):
-                if tools := ToolManager._load_tools_from_file(path):
-                    for tool in tools:
-                        yield tool, not path.resolve().is_relative_to(builtin_dir)
-
-    @staticmethod
-    def _load_tools_from_file(file_path: Path) -> list[type[BaseTool]] | None:
-        if not file_path.is_file():
-            return
-        name = file_path.name
-        if name.startswith("_"):
-            return
-
-        module_name = _compute_module_name(file_path)
-
-        if module_name in sys.modules:
-            module = sys.modules[module_name]
-        else:
-            spec = importlib.util.spec_from_file_location(module_name, file_path)
-            if spec is None or spec.loader is None:
-                return
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            try:
-                spec.loader.exec_module(module)
-            except Exception:
-                return
-
-        # Builtin tool modules import shared base classes (e.g. BashOutput) from
-        # sibling files; drop those re-exports so they are not registered twice
-        # under the importing module. Custom tool files may legitimately re-export
-        # tool classes, so the filter is scoped to the builtin directory only.
-        is_builtin = file_path.resolve().is_relative_to(DEFAULT_TOOL_DIR.path.resolve())
-
-        tools = []
-        for tool_obj in vars(module).values():
-            if not inspect.isclass(tool_obj):
-                continue
-            if is_builtin and tool_obj.__module__ != module.__name__:
-                continue
-            if not issubclass(tool_obj, BaseTool) or tool_obj is BaseTool:
-                continue
-            if inspect.isabstract(tool_obj):
-                continue
-            tools.append(tool_obj)
-        return tools
-
-    @staticmethod
-    def _iter_tool_descriptions(search_paths: list[Path]) -> Iterator[tuple[str, str]]:
-        """Yield ``(tool_name, description)`` from ``prompts/<name>.md`` files in
-        the tool search paths.
-
-        Every tool directory pairs implementations with their descriptions the
-        same way the builtins do — ``<tools-dir>/*.py`` alongside
-        ``<tools-dir>/prompts/*.md`` (the very layout ``get_tool_prompt`` reads).
-        So ``.vibe/tools/prompts/weather.md`` describes a custom ``weather`` tool
-        and ``.vibe/tools/prompts/bash.md`` re-describes the builtin ``bash``.
-
-        Keyed by file stem (the tool name); later search paths win, matching
-        ``.py`` override precedence. A ``.py`` search-path entry is matched
-        against the ``prompts/`` dir beside it.
-        """
-        for base in search_paths:
-            if base.is_dir():
-                prompts_dir = base / "prompts"
-            elif base.name.endswith(".py"):
-                prompts_dir = base.parent / "prompts"
-            else:
-                continue
-            if not prompts_dir.is_dir():
-                continue
-            for md_path in sorted(prompts_dir.glob("*.md")):
-                try:
-                    text = read_safe(md_path).text
-                except OSError:
-                    continue
-                # Yield the raw text (matching get_full_description), but skip
-                # blank files so they fall back instead of blanking a tool.
-                if text.strip():
-                    yield md_path.stem, text
-
-    @staticmethod
-    def discover_tool_defaults(
-        search_paths: list[Path] | None = None,
-    ) -> dict[str, dict[str, Any]]:
-        if search_paths is None:
-            search_paths = [DEFAULT_TOOL_DIR.path]
-
-        defaults: dict[str, dict[str, Any]] = {}
-        for cls in ToolManager._iter_tool_classes(search_paths):
-            try:
-                tool_name = cls.get_name()
-                config_class = cls._get_tool_config_class()
-                defaults[tool_name] = config_class().model_dump(exclude_none=True)
-            except Exception as e:
-                logger.warning(
-                    "Failed to get defaults for tool %s: %s", cls.__name__, e
-                )
-                continue
-        return defaults
-
-    def _register_discovered_tool_variant(
-        self, tool_class: type[BaseTool], *, is_custom: bool
-    ) -> None:
+    def _register_discovered_tool_variant(self, tool_class: type[BaseTool]) -> None:
         name = tool_class.get_name()
         self._tool_variants_by_name.setdefault(name, []).append(tool_class)
-        self._custom_tool_variants_by_name.setdefault(name, []).append(is_custom)
         self._all_tools[name] = tool_class
 
     @property
@@ -336,29 +186,6 @@ class ToolManager:
             }
         return result
 
-    @property
-    def custom_tool_names(self) -> set[str]:
-        available_names = set(self.available_tools)
-        custom_names: set[str] = set()
-        with self._lock:
-            for name in available_names:
-                fallback_tool_class = self._all_tools.get(name)
-                if fallback_tool_class is None:
-                    continue
-                selected = self._select_available_variant_with_index(
-                    name, fallback_tool_class
-                )
-                if selected is None:
-                    continue
-                _, discovery_index = selected
-                custom_variants = self._custom_tool_variants_by_name.get(name, [])
-                if (
-                    discovery_index < len(custom_variants)
-                    and custom_variants[discovery_index]
-                ):
-                    custom_names.add(name)
-        return custom_names
-
     def _is_tool_available(self, cls: type[BaseTool]) -> bool:
         if (
             cls.local_managed_shell_only
@@ -370,11 +197,7 @@ class ToolManager:
         return self._is_tool_runtime_available(cls)
 
     def _is_tool_runtime_available(self, cls: type[BaseTool]) -> bool:
-        # Backwards-compatibility check to avoid breaking
-        # existing custom tools that call is_available without parameters
-        if inspect.signature(cls.is_available).parameters:
-            return cls.is_available(self._config)
-        return cls.is_available()
+        return cls.is_available(self._config)
 
     def _is_enabled_for_shell_rollout(self, cls: type[BaseTool]) -> bool:
         match cls.shell_rollout:
@@ -399,16 +222,7 @@ class ToolManager:
     def _select_available_variant(
         self, name: str, fallback: type[BaseTool]
     ) -> type[BaseTool] | None:
-        selected = self._select_available_variant_with_index(name, fallback)
-        if selected is None:
-            return None
-        return selected[0]
-
-    def _select_available_variant_with_index(
-        self, name: str, fallback: type[BaseTool]
-    ) -> tuple[type[BaseTool], int] | None:
         selected_tool_class: type[BaseTool] | None = None
-        selected_discovery_index = 0
         selected_rank: tuple[int, int] | None = None
 
         for discovery_index, tool_class in enumerate(
@@ -422,12 +236,9 @@ class ToolManager:
                 continue
 
             selected_tool_class = tool_class
-            selected_discovery_index = discovery_index
             selected_rank = rank
 
-        if selected_tool_class is None:
-            return None
-        return selected_tool_class, selected_discovery_index
+        return selected_tool_class
 
     @staticmethod
     def _tool_selection_priority(tool_class: type[BaseTool]) -> int:
@@ -436,10 +247,8 @@ class ToolManager:
     def _select_registered_variant(
         self, name: str, fallback: type[BaseTool]
     ) -> type[BaseTool]:
-        selected_tool_class = self._select_available_variant(name, fallback)
-        if selected_tool_class is not None:
-            return selected_tool_class
-        return fallback
+        # The fallback is the variant registered last.
+        return self._select_available_variant(name, fallback) or fallback
 
     def _tool_class_for_config(self, tool_name: str) -> type[BaseTool] | None:
         fallback_tool_class = self._all_tools.get(tool_name)
@@ -508,19 +317,11 @@ class ToolManager:
     def _is_remote_tool_class(tool_cls: type[BaseTool]) -> TypeGuard[type[MCPTool]]:
         return issubclass(tool_cls, MCPTool)
 
-    def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
-        """Discover and register MCP tools (sync wrapper).
-
-        Idempotent: subsequent calls after a successful integration are
-        no-ops to avoid redundant MCP discovery.
-        """
-        run_sync(self._integrate_mcp_async(raise_on_failure=raise_on_failure))
-
     async def _integrate_mcp_async(self, *, raise_on_failure: bool = False) -> None:
         """Async MCP discovery — canonical implementation."""
         if self._mcp_integrated:
             return
-        if not self._config.mcp_servers:
+        if not self._config.enable_mcp or not self._config.mcp_servers:
             if self._mcp_registry is not None:
                 self._mcp_registry.sync_active_servers([])
             return
@@ -553,21 +354,6 @@ class ToolManager:
             self._all_tools.pop(key, None)
             self._instances.pop(key, None)
 
-    def _purge_mcp_state(self) -> None:
-        """Remove stale MCP tool classes and cached instances."""
-        stale_keys = [
-            name
-            for name, cls in self._all_tools.items()
-            if self._is_remote_tool_class(cls) and not cls.is_connector()
-        ]
-        for key in stale_keys:
-            self._all_tools.pop(key, None)
-            self._instances.pop(key, None)
-
-    def integrate_connectors(self, *, force_refresh: bool = False) -> None:
-        """Discover and register connector tools (sync wrapper)."""
-        run_sync(self.integrate_connectors_async(force_refresh=force_refresh))
-
     async def integrate_connectors_async(self, *, force_refresh: bool = False) -> None:
         """Discover and register connector tools — canonical implementation.
 
@@ -591,28 +377,6 @@ class ToolManager:
             self._all_tools.update(connector_tools)
         logger.info(f"Connector integration registered {len(connector_tools)} tools")
 
-    async def refresh_remote_tools_async(self) -> None:
-        """Force MCP and connector re-discovery for the current config."""
-        with self._lock:
-            if self._mcp_registry is not None:
-                self._mcp_registry.clear()
-            self._purge_mcp_state()
-            self._mcp_integrated = False
-            self._purge_connector_state()
-            if self._connector_registry is not None:
-                self._connector_registry.clear()
-
-        await self._integrate_all_async(force_refresh=True)
-
-    async def reconfigure_mcp_async(self) -> None:
-        """Rebuild MCP tool visibility while retaining valid registry descriptors."""
-        with self._lock:
-            self._purge_mcp_state()
-            self._mcp_integrated = False
-            if self._mcp_registry is not None:
-                self._mcp_registry.sync_active_servers(self._config.mcp_servers)
-        await self._integrate_mcp_async()
-
     def suspend_mcp(self, name: str, tool_name: str | None = None) -> None:
         """Withdraw one source or remote tool before reducing its authority."""
         with self._lock:
@@ -627,25 +391,6 @@ class ToolManager:
             for key in stale_keys:
                 self._all_tools.pop(key, None)
                 self._instances.pop(key, None)
-
-    def suspend_connector(self, name: str, tool_name: str | None = None) -> None:
-        """Withdraw one connector source or tool before reducing its authority."""
-        with self._lock:
-            stale_keys = [
-                key
-                for key, tool_class in self._all_tools.items()
-                if self._is_remote_tool_class(tool_class)
-                and tool_class.is_connector()
-                and tool_class.get_server_name() == name
-                and (tool_name is None or tool_class.get_remote_name() == tool_name)
-            ]
-            for key in stale_keys:
-                self._all_tools.pop(key, None)
-                self._instances.pop(key, None)
-
-    def refresh_remote_tools(self) -> None:
-        """Sync wrapper for :meth:`refresh_remote_tools_async`."""
-        run_sync(self.refresh_remote_tools_async())
 
     def integrate_all(
         self, *, raise_on_mcp_failure: bool = False, force_refresh: bool = False
@@ -684,28 +429,9 @@ class ToolManager:
         if isinstance(connector_result, BaseException):
             logger.warning(f"Connector integration failed: {connector_result}")
 
-    def available_tool_specs(self) -> list[AvailableFunction]:
-        """Model-facing definitions for every available tool: name, resolved
-        description, and parameters.
-
-        The description comes from a ``<tools-dir>/prompts/<name>.md`` file when
-        present (builtin defaults, custom-tool descriptions, and user/project
-        overrides all live there), falling back to the tool's own description
-        (e.g. MCP/connector tools set it inline). Both the LLM tool formatter and
-        the session logger consume this so a tool always looks the same to the
-        model and in the logs.
-        """
-        return [
-            AvailableFunction(
-                name=name,
-                description=self._tool_descriptions.get(name)
-                or cls.get_full_description(),
-                parameters=cls.get_parameters(),
-            )
-            for name, cls in self.available_tools.items()
-        ]
-
-    def get_tool_config(self, tool_name: str) -> BaseToolConfig:
+    def get_tool_config(
+        self, tool_name: str, *, default_permission: ToolPermission = ToolPermission.ASK
+    ) -> BaseToolConfig:
         with self._lock:
             tool_class = self._tool_class_for_config(tool_name)
 
@@ -714,19 +440,39 @@ class ToolManager:
             default_config = config_class()
         else:
             config_class = BaseToolConfig
-            default_config = BaseToolConfig()
+            default_config = BaseToolConfig(permission=default_permission)
 
         user_overrides = self._config.tools.get(tool_name)
         permission_override = (
             self._permission_getter(tool_name) if self._permission_getter else None
         )
         if user_overrides is None and permission_override is None:
-            return config_class()
+            return default_config
 
         merged_dict = {**default_config.model_dump(), **(user_overrides or {})}
         if permission_override is not None:
             merged_dict["permission"] = permission_override.value
         return config_class.model_validate(merged_dict)
+
+    def move_to(self, cwd: Path, workspace_roots: Sequence[Path]) -> None:
+        """Rebuild tools for a session that moved to ``cwd``.
+
+        Each tool resolves paths and the outside-workdir boundary from the
+        directory it was built in, so cached instances are dropped.
+        ``workspace_roots`` become writable but are not opened as projects: a
+        worktree on someone else's branch must not run its hooks or skills.
+        """
+        here = cwd.resolve()
+        with self._lock:
+            self._cwd = here
+            self._harness_files = replace(
+                self._harness_files.for_session(here),
+                writable_roots=tuple(
+                    dedup_paths(r.resolve() for r in workspace_roots if r != here)
+                ),
+                access_roots=access_roots_at(here, self._harness_files.access_roots),
+            )
+            self._instances.clear()
 
     def get(self, tool_name: str) -> BaseTool:
         """Get a tool instance, creating it lazily on first call.
@@ -749,16 +495,6 @@ class ToolManager:
             cwd=self._cwd,
             harness_files=self._harness_files,
             scratchpad_dir=self._scratchpad_dir,
-            terminal_runtime=self.terminal_runtime,
         )
         self._instances[tool_name] = instance
         return instance
-
-    def pop_mcp_errors(self) -> dict[str, str]:
-        """Return and clear pending MCP discovery errors (server name -> message)."""
-        if self._mcp_registry is None:
-            return {}
-        return self._mcp_registry.pop_failed()
-
-    def reset_all(self) -> None:
-        self._instances.clear()

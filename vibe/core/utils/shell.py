@@ -6,6 +6,9 @@ from pathlib import Path
 
 from vibe.utils.platform import WindowsShellKind, is_windows, resolve_windows_shell
 
+# Lets a command or script tell it was started by Vibe.
+VIBE_SESSION_ENV = {"VIBE_SESSION": "1"}
+
 
 def uses_posix_shell() -> bool:
     if not is_windows():
@@ -43,20 +46,33 @@ async def spawn_shell_command(
             cwd=cwd,
         )
 
-    return await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-        env=env,
-        cwd=cwd,
-        executable=os.environ.get("SHELL"),
-        start_new_session=True,
-    )
+    # Empty input from a pipe whose write end is closed, not /dev/null, which a
+    # command may have deleted.
+    stdin, writer = os.pipe()
+    os.close(writer)
+    try:
+        return await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=stdin,
+            env=env,
+            cwd=cwd,
+            executable=os.environ.get("SHELL"),
+            start_new_session=True,
+        )
+    finally:
+        os.close(stdin)
 
 
 def _shell_environment() -> dict[str, str]:
-    env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
+    env = {
+        **os.environ,
+        "CI": "true",
+        "NONINTERACTIVE": "1",
+        "NO_TTY": "1",
+        **VIBE_SESSION_ENV,
+    }
     if is_windows():
         return {**env, "GIT_PAGER": "more", "PAGER": "more"}
     # LC_ALL overrides every LC_* category, so a user-set LC_ALL=C (common in
@@ -73,4 +89,4 @@ def _shell_environment() -> dict[str, str]:
     }
 
 
-__all__ = ["spawn_shell_command", "uses_posix_shell"]
+__all__ = ["VIBE_SESSION_ENV", "spawn_shell_command", "uses_posix_shell"]

@@ -320,13 +320,46 @@ async def test_apply_persists_to_discovered_file(tmp_working_directory: Path) ->
     await layer.apply(
         ConfigPatch(
             ReplaceOperationPatch(path="/active_model", value="new"),
-            AddOperationPatch(path="/default_agent", value="plan"),
+            AddOperationPatch(path="/default_agent", value="ask"),
             fingerprint=fingerprint,
         )
     )
 
     with config_path.open("rb") as file:
-        assert tomllib.load(file) == {"active_model": "new", "default_agent": "plan"}
+        assert tomllib.load(file) == {"active_model": "new", "default_agent": "ask"}
+        assert layer.fingerprint == create_file_fingerprint(file)
+
+
+@pytest.mark.asyncio
+async def test_apply_writes_through_symlinked_config(
+    tmp_working_directory: Path,
+) -> None:
+    trusted_folders_manager.add_trusted(tmp_working_directory)
+    target = tmp_working_directory / "dotfiles" / "config.toml"
+    target.parent.mkdir()
+    target.write_text('active_model = "old"\n')
+    link = tmp_working_directory / ".vibe" / "config.toml"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    layer = ProjectConfigLayer(path=tmp_working_directory)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/active_model", value="new"),
+            fingerprint=fingerprint,
+        )
+    )
+
+    assert link.is_symlink()
+    assert layer.config_file_path == link
+    with target.open("rb") as file:
+        assert tomllib.load(file) == {"active_model": "new"}
         assert layer.fingerprint == create_file_fingerprint(file)
 
 

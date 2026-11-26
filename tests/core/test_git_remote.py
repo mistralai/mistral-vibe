@@ -144,8 +144,8 @@ def test_parses_nothing_out_of_a_url_that_is_not_one() -> None:
     assert parse_github_url("not-a-valid-url") is None
 
 
-# Where the repository is hosted is not this module's business. Only teleport
-# narrows to GitHub, because only teleport has to clone it from the other side.
+# Where the repository is hosted is not this module's business. Only Vibe Code
+# narrows to GitHub, because only Vibe Code has to clone it from the other side.
 def test_normalises_a_remote_on_any_host() -> None:
     assert normalise_remote_url("git@gitlab.com:owner/repo.git") == (
         "https://gitlab.com/owner/repo.git"

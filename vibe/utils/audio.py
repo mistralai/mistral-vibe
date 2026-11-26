@@ -2,20 +2,18 @@ from __future__ import annotations
 
 from enum import StrEnum, auto
 
-from vibe.utils.platform import get_platform_id
-
 
 class RecordingMode(StrEnum):
     BUFFER = auto()
     STREAM = auto()
 
 
-def portaudio_install_hint() -> str:
-    """Platform-specific hint to install the PortAudio system library, or empty."""
-    match get_platform_id():
-        case "darwin":
-            return " Install it with `brew install portaudio`, then restart vibe."
-        case "linux":
-            return " Install it with your package manager (e.g. `apt install libportaudio2`), then restart vibe."
-        case _:
-            return ""
+def miniaudio_unavailable_message(base: str, import_error: BaseException | None) -> str:
+    """`base` with the reason miniaudio failed to import, when there is one.
+
+    miniaudio is a default dependency, so an import failure is a driver or
+    broken-install problem, not something an install hint would fix.
+    """
+    if import_error is None:
+        return base
+    return f"{base}: {import_error}"

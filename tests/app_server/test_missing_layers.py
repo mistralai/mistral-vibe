@@ -1,0 +1,919 @@
+"""Reads outside a session fetch the remote config they find no cache for.
+
+The new-session picker reads models through ``config/read`` and modes through
+``agents/list``, both without a session. With nothing cached for the API key
+(first launch, a key change, an expired entry), the read fetches the org
+config, the GrowthBook eval and the model catalog, waits for them within each
+fetch's limit, and answers with what they returned.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from pathlib import Path
+import time
+import tomllib
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
+
+from pydantic import SecretStr
+import pytest
+import pytest_asyncio
+import tomli_w
+
+from tests.stubs.process_services import (
+    FakeModelCatalogServer,
+    FakeOrgConfigServer,
+    fake_process_services,
+)
+from vibe.app_server._admin_config import OrgConfigSource
+from vibe.app_server._connection_protocol import ClientInfo
+from vibe.app_server._dispatch import DispatchResult, RequestFailure
+from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._org_config_service import ORG_CONFIG_POLICY
+from vibe.app_server._process_services import ProcessServices
+import vibe.app_server._runtime as runtime_module
+from vibe.app_server._session_backend_port import SessionBackendHost
+from vibe.app_server.protocol import (
+    AgentsListParams,
+    AgentsListResponse,
+    ConfigReadParams,
+    ConfigReadResponse,
+    EmptyResponse,
+    SessionHistoryListParams,
+    SessionOptions,
+)
+from vibe.app_server.server import AppServer
+from vibe.app_server.transport import memory_transport_pair
+from vibe.core.config import VibeConfigSchema
+from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
+from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.experiments.active import ExperimentName
+from vibe.core.experiments.cache import clear_cached_eval_responses
+from vibe.core.experiments.manager import ExperimentManager
+from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.identity import IdentityResult
+from vibe.core.identity_cache import IdentityCache
+from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
+from vibe.core.platform_auth import PlatformCredentialProvider
+from vibe.core.trusted_folders import TrustedFoldersManager
+from vibe.setup.auth import _oidc_runtime
+from vibe.setup.auth._oidc_config import OidcConfig
+from vibe.setup.auth._oidc_credentials import (
+    OidcCredentialStore,
+    OidcTenant,
+    OidcTokens,
+)
+from vibe.setup.auth.whoami import WhoAmICache
+
+
+@pytest.fixture
+def oidc_credentials(monkeypatch):
+    monkeypatch.setenv("VIBE_CLI_OIDC_ENABLED", "true")
+    monkeypatch.delenv("VIBE_CLI_OIDC_ORGANIZATION_ID", raising=False)
+    monkeypatch.delenv("VIBE_CLI_OIDC_WORKSPACE_ID", raising=False)
+    config = OidcConfig.from_env()
+    current = [
+        OidcTokens(
+            issuer=config.issuer,
+            client_id=config.client_id,
+            audience=config.audience,
+            subject="user-a",
+            access_token=SecretStr("access-a"),
+            refresh_token=SecretStr("refresh-a"),
+            id_token=SecretStr("id-a"),
+            expires_at=time.time() + 3600,
+            id_token_expires_at=time.time() + 3600,
+        )
+    ]
+    monkeypatch.setattr(OidcCredentialStore, "_load", lambda self: current[0])
+
+    async def headers(url):
+        tokens = current[0]
+        assert tokens is not None
+        tenant = OidcTenant(
+            selection="",
+            organization_id="org-" + tokens.subject,
+            workspace_id="workspace-" + tokens.subject,
+        )
+        # What discovery does: the tenant is stored with the session.
+        current[0] = tokens.model_copy(update={"tenant": tenant})
+        return {
+            "Authorization": "Bearer " + tokens.id_token.get_secret_value(),
+            "x-external-organization-id": tenant.organization_id,
+            "x-external-workspace-id": tenant.workspace_id,
+        }
+
+    resolve = AsyncMock(side_effect=headers)
+    monkeypatch.setattr(_oidc_runtime, "oidc_headers", resolve)
+    return current, resolve
+
+
+_CLIENT = ClientInfo(name="vibe-desktop", version="9.9.9")
+_ORG_TOML = 'default_approval_policy = "ask"\n'
+_LIMIT = 0.2
+# Long enough that the fake org server always answers within it on a loaded
+# worker; only tests of a hanging org config wait for it.
+_ORG_LIMIT = 5.0
+
+
+def _catalog() -> ModelCatalogResponse:
+    parsed = parse_model_catalog_response({
+        "models": [
+            {
+                "id": "catalog-model",
+                "label": "Catalog model",
+                "capabilities": {"function_calling": True},
+            }
+        ]
+    })
+    assert parsed is not None
+    return parsed
+
+
+def _smart_approve_eval() -> EvalResponse:
+    return EvalResponse.model_validate({
+        "features": {
+            ExperimentName.SMART_APPROVE.value: {"defaultValue": True, "rules": []}
+        }
+    })
+
+
+class _Remote:
+    """The three endpoints: answering at once or after a delay, or hanging
+    until released.
+    """
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        org_server: FakeOrgConfigServer,
+        *,
+        hang: bool = False,
+        delays: dict[str, float] | None = None,
+        org_toml: str = _ORG_TOML,
+        eval_response: EvalResponse | None = None,
+    ):
+        self.hang = hang
+        self.eval_response = eval_response or _smart_approve_eval()
+        self.delays = delays or {}
+        self.org_toml = org_toml
+        # Fails each org config fetch at once, when set.
+        self.org_error: str | None = None
+        self.release = asyncio.Event()
+        self.calls = {"org": 0, "eval": 0, "catalog": 0}
+        self.client_names: list[str | None] = []
+        org_server.respond = self._org
+        remote = self
+
+        async def initialize(
+            manager: ExperimentManager, attributes: ExperimentAttributes
+        ) -> None:
+            await remote._initialize(manager, attributes)
+
+        monkeypatch.setattr(ExperimentManager, "initialize", initialize)
+        monkeypatch.setattr(
+            IdentityCache,
+            "resolve",
+            AsyncMock(
+                return_value=IdentityResult(
+                    id="user-1", organization=None, workspace=None
+                )
+            ),
+        )
+        monkeypatch.setattr(WhoAmICache, "resolve", AsyncMock(return_value=None))
+        # Every model catalog server of the test answers here.
+        monkeypatch.setattr(
+            FakeModelCatalogServer,
+            "fetch",
+            lambda _server, api_base, credentials: remote._catalog(
+                api_base, credentials
+            ),
+        )
+
+    async def _block(self, source: str) -> bool:
+        self.calls[source] += 1
+        if self.hang:
+            await self.release.wait()
+        await asyncio.sleep(self.delays.get(source, 0))
+        return not self.hang
+
+    async def _org(self) -> ManagedConfigResult:
+        await self._block("org")
+        if self.org_error is not None:
+            return ManagedConfigResult(error=self.org_error)
+        return ManagedConfigResult(
+            config=ManagedConfig(state="enabled", toml=self.org_toml)
+        )
+
+    async def _initialize(
+        self, manager: ExperimentManager, attributes: ExperimentAttributes
+    ) -> None:
+        # The eval request itself; identity and /whoami answer from the stubs.
+        self.client_names.append(attributes.client_name)
+        if await self._block("eval"):
+            manager.hydrate(self.eval_response, attributes=attributes)
+
+    async def _catalog(
+        self, _api_base: str, _credentials: PlatformCredentialProvider
+    ) -> ModelCatalogResponse | None:
+        if not await self._block("catalog"):
+            return None
+        return _catalog()
+
+
+def _set_local_config(config_dir: Path, **values: object) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config.update(values)
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+def _unset_local_config(config_dir: Path, key: str) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config.pop(key, None)
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+@pytest.fixture
+def remote_config_enabled(config_dir: Path) -> None:
+    _set_local_config(config_dir, enable_telemetry=True, enable_model_catalog=True)
+
+
+def _set_limits(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    monkeypatch.setattr("vibe.core.experiments.wait.EVAL_WAIT_CAP_SECONDS", seconds)
+    monkeypatch.setattr(
+        "vibe.core.model_catalog.wait.MODEL_CATALOG_WAIT_CAP_SECONDS", seconds
+    )
+
+
+@pytest.fixture
+def short_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_limits(monkeypatch, _LIMIT)
+
+
+@pytest.fixture
+def org_limit() -> float:
+    """How long the org config's first fetch is waited for, and may run."""
+    return _ORG_LIMIT
+
+
+@pytest_asyncio.fixture
+async def process_services(
+    org_server: FakeOrgConfigServer,
+    org_limit: float,
+    model_catalog_server: FakeModelCatalogServer,
+) -> AsyncIterator[ProcessServices]:
+    services = fake_process_services(
+        org_server,
+        policy=replace(ORG_CONFIG_POLICY, fetch_timeout_s=org_limit),
+        first_wait_s=org_limit,
+        model_catalog_server=model_catalog_server,
+    )
+    yield services
+    await services.close()
+
+
+def _handler(*, process_services: ProcessServices) -> HostRequestHandler:
+    return HostRequestHandler(
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
+    )
+
+
+async def _read_config(handler: HostRequestHandler) -> ConfigReadResponse:
+    result = await handler.dispatch(
+        "config/read",
+        ConfigReadParams().model_dump(mode="json", by_alias=True),
+        client_info=_CLIENT,
+    )
+    return cast(ConfigReadResponse, result.response)
+
+
+async def _list_agents(handler: HostRequestHandler) -> AgentsListResponse:
+    result = await handler.dispatch(
+        "agents/list",
+        AgentsListParams().model_dump(mode="json", by_alias=True),
+        client_info=_CLIENT,
+    )
+    return cast(AgentsListResponse, result.response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_stored_oidc_without_tenant_resolves_then_fetches_picker_layers(
+    monkeypatch, oidc_credentials, process_services, org_server
+):
+    _, resolve = oidc_credentials
+    remote = _Remote(monkeypatch, org_server)
+    handler = _handler(process_services=process_services)
+    view = (await _read_config(handler)).config
+    assert view.default_approval_policy == "ask"
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+    resolve.assert_awaited_once()
+    await _read_config(handler)
+    resolve.assert_awaited_once()
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_shared_cache_application_resolves_session_tenant(
+    monkeypatch, oidc_credentials
+):
+    from vibe.app_server._cached_layers import apply_cached_layers
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.telemetry.send import mistral_credential_cache_key
+
+    _, resolve = oidc_credentials
+    orchestrator = await build_default_orchestrator(
+        harness_files=HarnessFilesManager(sources=("user",))
+    )
+    assert mistral_credential_cache_key(orchestrator.config) is None
+    key, _, _ = await apply_cached_layers(orchestrator, None, model_catalog=None)
+    assert key is not None
+    assert key.cache_key == mistral_credential_cache_key(orchestrator.config)
+    resolve.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_oidc_tenant_resolution_timeout_keeps_local_defaults(
+    monkeypatch, oidc_credentials, process_services, org_server
+):
+    _, resolve = oidc_credentials
+
+    async def blocked(url):
+        await asyncio.Event().wait()
+
+    resolve.side_effect = blocked
+    monkeypatch.setattr(
+        "vibe.core.platform_auth._mistral._PRINCIPAL_TIMEOUT_SECONDS", 0.01
+    )
+    remote = _Remote(monkeypatch, org_server)
+    view = (await _read_config(_handler(process_services=process_services))).config
+    assert view.default_approval_policy != "ask"
+    assert remote.calls == {"org": 0, "eval": 0, "catalog": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_tenant_timeout_does_not_wait_for_discovery_worker(
+    monkeypatch, oidc_credentials
+):
+    from threading import Event
+
+    from vibe.app_server._cached_layers import apply_cached_layers
+    from vibe.core.config import build_default_orchestrator
+
+    _, resolve = oidc_credentials
+    started = asyncio.Event()
+    release = Event()
+    loop = asyncio.get_running_loop()
+
+    def discover():
+        with _oidc_runtime._tenant_lock:
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(2)
+
+    async def blocked(url):
+        await asyncio.to_thread(discover)
+
+    resolve.side_effect = blocked
+    monkeypatch.setattr(
+        "vibe.core.platform_auth._mistral._PRINCIPAL_TIMEOUT_SECONDS", 0.01
+    )
+    orchestrator = await build_default_orchestrator(
+        harness_files=HarnessFilesManager(sources=("user",))
+    )
+    pending = asyncio.create_task(
+        apply_cached_layers(orchestrator, None, model_catalog=None)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert await asyncio.wait_for(pending, 0.2) == (None, None, None)
+        # A repeated cache lookup must not stall the app-server loop either.
+        assert _oidc_runtime.stored_oidc_cache_key() is None
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["org"])
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_account_switch_during_picker_fetch_never_caches_previous_response(
+    monkeypatch, oidc_credentials, source, process_services, org_server
+):
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
+    from vibe.core.config.managed_config_cache import load_cached_managed_config
+    from vibe.core.experiments.cache import load_cached_eval_response
+    from vibe.core.telemetry.send import mistral_credential_cache_key
+
+    current, resolve = oidc_credentials
+    remote = _Remote(monkeypatch, org_server)
+    started, release = asyncio.Event(), asyncio.Event()
+    original = remote._block
+
+    async def blocked(name):
+        if name == source:
+            started.set()
+            await release.wait()
+        return await original(name)
+
+    monkeypatch.setattr(remote, "_block", blocked)
+    pending = asyncio.create_task(
+        _read_config(_handler(process_services=process_services))
+    )
+    await asyncio.wait_for(started.wait(), 2)
+    tokens = current[0]
+    assert tokens is not None
+    current[0] = tokens.model_copy(
+        update={"subject": "user-b", "id_token": SecretStr("id-b")}
+    )
+    await resolve("https://api.mistral.ai/v1")
+    release.set()
+    await pending
+    config = VibeConfigSchema()
+    assert load_cached_managed_config(mistral_credential_cache_key(config)) is None
+    assert load_cached_eval_response(config) is None
+    catalog_key = ModelCatalogKey.current(
+        VibeConfigSchema(enable_model_catalog=True), None
+    )
+    assert await process_services.model_catalog.load(catalog_key) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_a_read_with_nothing_cached_answers_with_the_fetched_config(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server)
+    handler = _handler(process_services=process_services)
+
+    view = (await _read_config(handler)).config
+    agents = await _list_agents(handler)
+
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert view.default_approval_policy == "ask"
+    assert agents.active_approval_policy.name == "ask"
+    assert "smart-approve" in {policy.name for policy in agents.approval_policies}
+    # The eval is evaluated for the client that asked, as a session's is.
+    assert remote.client_names == ["vibe-desktop"]
+    # The second read found the caches the first one wrote.
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_read_without_growthbook_lists_the_catalog_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # No catalog setting anywhere, telemetry and experiments off: no eval is
+    # sent, and the catalog is fetched all the same.
+    _set_local_config(config_dir, enable_telemetry=False, experiments={"enable": False})
+    _unset_local_config(config_dir, "enable_model_catalog")
+    remote = _Remote(monkeypatch, org_server)
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 0, "catalog": 1}
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_turned_off_by_the_environment_is_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    monkeypatch.setenv("VIBE_ENABLE_MODEL_CATALOG", "false")
+    remote = _Remote(monkeypatch, org_server)
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" not in {model.alias for model in view.models}
+    assert remote.calls["catalog"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled", "short_limits")
+@pytest.mark.parametrize("org_limit", [_LIMIT])
+async def test_hanging_endpoints_answer_local_defaults_within_each_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server, hang=True)
+    handler = _handler(process_services=process_services)
+
+    started = time.monotonic()
+    first = (await _read_config(handler)).config
+    first_duration = time.monotonic() - started
+    # A later read joins the fetches still running, within its own limits,
+    # and asks nothing again.
+    started = time.monotonic()
+    second = (await _read_config(handler)).config
+    second_duration = time.monotonic() - started
+    remote.release.set()
+
+    assert first_duration < 1.5
+    assert first.default_approval_policy != "ask"
+    assert "catalog-model" not in {model.alias for model in first.models}
+    assert second_duration < 1.5
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+    assert second.default_approval_policy == first.default_approval_policy
+
+
+@pytest.mark.asyncio
+async def test_a_self_hosted_read_never_asks_growthbook(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+    config_dir: Path,
+) -> None:
+    _set_local_config(
+        config_dir,
+        enable_telemetry=True,
+        enable_model_catalog=True,
+        providers=[
+            {
+                "name": "mistral",
+                "api_base": "https://api.asml.example/v1",
+                "api_key_env_var": "MISTRAL_API_KEY",
+                "backend": "mistral",
+            }
+        ],
+    )
+    remote = _Remote(monkeypatch, org_server)
+
+    await _read_config(_handler(process_services=process_services))
+
+    assert remote.calls["eval"] == 0
+    assert remote.calls["org"] == 1
+    assert remote.calls["catalog"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_a_read_with_everything_cached_fetches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server)
+    await _read_config(_handler(process_services=process_services))
+    remote.calls = {"org": 0, "eval": 0, "catalog": 0}
+
+    await _read_config(_handler(process_services=process_services))
+
+    assert remote.calls == {"org": 0, "eval": 0, "catalog": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_another_api_key_fetches_for_itself(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server)
+    handler = _handler(process_services=process_services)
+    await _read_config(handler)
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "another-key")
+    await _read_config(handler)
+
+    assert remote.calls == {"org": 2, "eval": 2, "catalog": 2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_concurrent_reads_share_one_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server)
+    handler = _handler(process_services=process_services)
+
+    views = await asyncio.gather(_read_config(handler), _read_config(handler))
+
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+    assert [view.config.default_approval_policy for view in views] == ["ask", "ask"]
+
+
+@pytest.mark.asyncio
+async def test_a_session_start_after_a_failed_org_config_read_waits_for_the_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, org_server: FakeOrgConfigServer
+) -> None:
+    # A failed fetch is not retried before its delay: a session opened
+    # meanwhile neither waits nor fetches, and the next one after it does.
+    clock = [1_000_000.0]
+    services = fake_process_services(org_server, clock=lambda: clock[0])
+    remote = _Remote(monkeypatch, org_server)
+    remote.org_error = "offline"
+    try:
+        await _read_config(_handler(process_services=services))
+        process = runtime_module.HarnessProcess(services=services)
+
+        # Joins the read's fetch if it is still failing, or finds it failed.
+        during = await process._build_session_config(
+            SessionOptions(cwd=str(tmp_path)), org_config=OrgConfigSource.ENSURED
+        )
+        assert remote.calls["org"] == 1
+        remote.org_error = None
+        clock[0] += ORG_CONFIG_POLICY.retry_after_s
+        after = await process._build_session_config(
+            SessionOptions(cwd=str(tmp_path)), org_config=OrgConfigSource.ENSURED
+        )
+
+        assert during.config_orchestrator.config.default_approval_policy != "ask"
+        assert remote.calls["org"] == 2
+        assert after.config_orchestrator.config.default_approval_policy == "ask"
+    finally:
+        await services.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_reads_the_picker_does_not_make_fetch_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server)
+
+    # The session list builds config too, before finding no such session.
+    with pytest.raises(RequestFailure):
+        await _handler(process_services=process_services).dispatch(
+            "session/history/list",
+            SessionHistoryListParams(session_id="missing").model_dump(
+                mode="json", by_alias=True
+            ),
+            client_info=_CLIENT,
+        )
+
+    assert remote.calls == {"org": 0, "eval": 0, "catalog": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+@pytest.mark.parametrize("org_limit", [2.0])
+async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # The org config takes most of the read's limit, so the read answers
+    # before GrowthBook and the catalog land. Each lands within its own limit,
+    # so the next read finds them.
+    # Read limit 2 s; GrowthBook and the catalog land at 2.6 s, 0.8 s before
+    # their own limits, which start once the org config is in at 1.4 s. Each
+    # step keeps 0.6 s of slack for a loaded worker.
+    _set_limits(monkeypatch, 2.0)
+    remote = _Remote(
+        monkeypatch, org_server, delays={"org": 1.4, "eval": 1.2, "catalog": 1.2}
+    )
+    handler = _handler(process_services=process_services)
+
+    first = (await _read_config(handler)).config
+    await asyncio.sleep(1.2)
+    second = (await _read_config(handler)).config
+
+    assert "catalog-model" not in {model.alias for model in first.models}
+    assert "catalog-model" in {model.alias for model in second.models}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_a_config_read_next_to_an_attached_session_fetches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # The terminal UI reads its config on the connection its session is
+    # attached to; that session is already fetching the same config.
+    remote = _Remote(monkeypatch, org_server)
+
+    await _handler(process_services=process_services).dispatch(
+        "config/read",
+        ConfigReadParams().model_dump(mode="json", by_alias=True),
+        session_id="attached-session",
+        client_info=_CLIENT,
+    )
+
+    assert remote.calls == {"org": 0, "eval": 0, "catalog": 0}
+
+
+@pytest.mark.asyncio
+async def test_the_fetches_follow_the_org_config(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # Local config has the catalog off and telemetry on; the org config turns
+    # the catalog on and telemetry off, so no eval is sent.
+    _set_local_config(config_dir, enable_telemetry=True, enable_model_catalog=False)
+    remote = _Remote(
+        monkeypatch,
+        org_server,
+        org_toml="enable_model_catalog = true\nenable_telemetry = false\n",
+    )
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 0, "catalog": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_only_the_source_without_a_cache_is_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    remote = _Remote(monkeypatch, org_server)
+    handler = _handler(process_services=process_services)
+    await _read_config(handler)
+    clear_cached_eval_responses()
+
+    agents = await _list_agents(handler)
+
+    # The eval the process holds answers again, unfetched.
+    assert "smart-approve" in {policy.name for policy in agents.approval_policies}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_the_picker_fetches_the_catalog_through_the_process_service(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # The catalog the picker fetched is the one every session is served: a
+    # session opened next asks nothing.
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
+
+    remote = _Remote(monkeypatch, org_server)
+    config = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in config.models}
+    key = await ModelCatalogKey.of(VibeConfigSchema(enable_model_catalog=True), None)
+    assert key is not None
+    assert await process_services.model_catalog.ensure(key) == _catalog()
+    assert remote.calls["catalog"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_a_failed_source_is_fetched_again_once_its_retry_delay_passed(
+    monkeypatch: pytest.MonkeyPatch, org_server: FakeOrgConfigServer
+) -> None:
+    # Like the org config: a failed GrowthBook eval or catalog is not asked
+    # again within its retry delay, and a read after it waits for the retry.
+    clock = [1_000_000.0]
+    services = fake_process_services(org_server, clock=lambda: clock[0])
+    remote = _Remote(monkeypatch, org_server)
+    offline = [True]
+    initialize = ExperimentManager.initialize
+    catalog = remote._catalog
+
+    async def eval_or_fail(
+        manager: ExperimentManager, attributes: ExperimentAttributes
+    ) -> None:
+        if offline[0]:
+            remote.calls["eval"] += 1
+            return
+        await initialize(manager, attributes)
+
+    async def catalog_or_fail(*args: Any) -> ModelCatalogResponse | None:
+        if offline[0]:
+            remote.calls["catalog"] += 1
+            return None
+        return await catalog(*args)
+
+    monkeypatch.setattr(ExperimentManager, "initialize", eval_or_fail)
+    remote._catalog = catalog_or_fail  # type: ignore[method-assign]
+    handler = _handler(process_services=services)
+    try:
+        await _read_config(handler)
+        await _read_config(handler)
+        assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+        offline[0] = False
+        clock[0] += ORG_CONFIG_POLICY.retry_after_s
+        view = (await _read_config(handler)).config
+
+        assert remote.calls == {"org": 1, "eval": 2, "catalog": 2}
+        assert view.default_approval_policy == "ask"
+        assert "catalog-model" in {model.alias for model in view.models}
+    finally:
+        await services.close()
+
+
+class _RecordingHost(HostRequestHandler):
+    def __init__(self, process_services: ProcessServices) -> None:
+        super().__init__(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        )
+        self.dispatched: list[tuple[str, str | None, ClientInfo | None]] = []
+
+    async def dispatch(
+        self,
+        method: str,
+        raw_params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        worktree_trust_store: TrustedFoldersManager | None = None,
+        client_info: ClientInfo | None = None,
+    ) -> DispatchResult:
+        self.dispatched.append((method, session_id, client_info))
+        return DispatchResult(EmptyResponse())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["config/read", "agents/list"])
+@pytest.mark.parametrize("attached", [None, "attached-session"])
+async def test_the_server_tells_picker_reads_whether_a_session_is_attached(
+    method: str, attached: str | None, process_services: ProcessServices
+) -> None:
+    host = _RecordingHost(process_services)
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=host,
+    )
+    server._client_info = _CLIENT
+    if attached is not None:
+        server._root = cast(Any, MagicMock(session_id=attached))
+
+    await server._dispatch_request(method, {})
+
+    assert host.dispatched == [(method, attached, _CLIENT)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_an_org_config_the_folder_rejects_is_cached_and_rejected_per_read(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # The org toml parses but this folder's merged config rejects it (the
+    # string where a bool is expected). It is cached anyway: another folder
+    # may accept it, and every folder re-validates the cached copy at apply
+    # time, as a session does.
+    remote = _Remote(
+        monkeypatch,
+        org_server,
+        org_toml='default_approval_policy = "ask"\nenable_telemetry = "maybe"\n',
+    )
+    handler = _handler(process_services=process_services)
+
+    first = (await _read_config(handler)).config
+    second = (await _read_config(handler)).config
+
+    assert remote.calls["org"] == 1
+    assert first.default_approval_policy != "ask"
+    assert second.default_approval_policy != "ask"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_an_unparseable_org_config_stops_later_reads_fetching(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # A malformed payload is the remote's, not the folder's: it will not
+    # improve within the process, so later reads stop fetching it.
+    remote = _Remote(monkeypatch, org_server, org_toml="default_agent =\n")
+    handler = _handler(process_services=process_services)
+
+    await _read_config(handler)
+    await _read_config(handler)
+
+    assert remote.calls["org"] == 1

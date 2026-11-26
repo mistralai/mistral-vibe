@@ -201,6 +201,7 @@ class ClaudePluginAdapter:
             if (
                 skill := adapt_skill_file(
                     path=path,
+                    root=root,
                     source_format="claude_code",
                     diagnostics=diagnostics,
                     normalize_vendor_fields=False,

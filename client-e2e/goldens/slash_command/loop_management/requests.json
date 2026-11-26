@@ -1,0 +1,190 @@
+[
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "/loop 90s check build status",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "loop",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "/loop 90s check build status",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "/loop list",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "loop",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "/loop list",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "/loop cancel Build-Watch",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "loop",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "/loop cancel Build-Watch",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "/loop cancel all",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "loop",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "/loop cancel all",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

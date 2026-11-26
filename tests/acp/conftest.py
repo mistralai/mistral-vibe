@@ -3,120 +3,46 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
-from typing import Any
 
+import httpx2
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.stubs.app_server import start_test_app_server
-from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import SessionStarter, VibeAcpAgent
-from vibe.app_server.local import LocalHarnessOptions, ResumeSessionIntent
-from vibe.app_server.session import AppServerSession
-from vibe.core.config import ModelConfig, SessionLoggingConfig
-from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role, StopInfo
+from vibe.app_server import connector_catalog
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
-@pytest.fixture(params=[False, True], ids=["legacy", "unified"])
-def experimental_harness(request: Any) -> bool:
-    """Override the root conftest fixture to parametrize every ACP test: run
-    once with the legacy harness and once with the Unified Harness flag, so
-    both code paths stay green.
+def _create_acp_agent(session_starter: SessionStarter | None = None) -> VibeAcpAgent:
+    agent = (
+        VibeAcpAgent(session_starter=session_starter)
+        if session_starter
+        else VibeAcpAgent()
+    )
+    client = FakeClient()
+    agent.on_connect(client)
+    client.on_connect(agent)
+    return agent
+
+
+@pytest.fixture(autouse=True)
+def _no_connector_bootstrap_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every session start resolves the connector catalog, and each test's
+    fresh VIBE_HOME has no cached copy: with the mock key that would be a real
+    request to api.mistral.ai, with a 30 s timeout, and its DNS lookup, which
+    cancellation cannot stop, holds the closing test loop until it returns.
+    Fail it at once, as offline.
     """
-    return request.param
 
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connector bootstrap is not mocked", request=request)
 
-@pytest.fixture
-def backend() -> FakeBackend:
-    backend = FakeBackend(
-        LLMChunk(
-            message=LLMMessage(role=Role.assistant, content="Hi"),
-            usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
-            stop=StopInfo(reason="stop"),
-        )
+    def offline_client() -> VibeAsyncHTTPClient:
+        return VibeAsyncHTTPClient(transport=httpx2.MockTransport(refuse))
+
+    monkeypatch.setattr(
+        connector_catalog, "_build_bootstrap_http_client", offline_client
     )
-    return backend
-
-
-def _create_acp_agent(
-    session_starter: SessionStarter | None = None, *, experimental_harness: bool = False
-) -> VibeAcpAgent:
-    vibe_acp_agent = (
-        VibeAcpAgent(
-            session_starter=session_starter, experimental_harness=experimental_harness
-        )
-        if session_starter is not None
-        else VibeAcpAgent(experimental_harness=experimental_harness)
-    )
-    client = FakeClient()
-
-    vibe_acp_agent.on_connect(client)
-    client.on_connect(vibe_acp_agent)
-
-    return vibe_acp_agent  # pyright: ignore[reportReturnType]
-
-
-@pytest.fixture
-def acp_agent_loop(backend: FakeBackend, experimental_harness: bool) -> VibeAcpAgent:
-    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
-        assert options.experimental_harness is experimental_harness
-        loop = build_test_agent_loop(backend=backend, enable_streaming=True)
-        return await AppServerSession.start(
-            start_test_app_server(loop),
-            client_info=options.client.info,
-            capabilities=options.client.capabilities,
-            session_options=options.session_options,
-        )
-
-    return _create_acp_agent(start_session, experimental_harness=experimental_harness)
-
-
-@pytest.fixture
-def acp_agent_with_session_config(
-    backend: FakeBackend,
-    temp_session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    experimental_harness: bool,
-) -> tuple[VibeAcpAgent, FakeClient]:
-    session_config = SessionLoggingConfig(
-        save_dir=str(temp_session_dir), session_prefix="session", enabled=True
-    )
-    config = build_test_vibe_config(
-        active_model="devstral-latest",
-        models=[
-            ModelConfig(
-                name="devstral-latest", provider="mistral", alias="devstral-latest"
-            )
-        ],
-        session_logging=session_config,
-    )
-
-    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
-        assert options.experimental_harness is experimental_harness
-        loop = build_test_agent_loop(
-            config=config, backend=backend, enable_streaming=True
-        )
-        return await AppServerSession.start(
-            start_test_app_server(loop),
-            client_info=options.client.info,
-            capabilities=options.client.capabilities,
-            session_options=options.session_options,
-            resume_session_id=(
-                options.session.session_id
-                if isinstance(options.session, ResumeSessionIntent)
-                else None
-            ),
-        )
-
-    vibe_acp_agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
-    )
-    client = FakeClient()
-    vibe_acp_agent.on_connect(client)
-    client.on_connect(vibe_acp_agent)
-
-    return vibe_acp_agent, client
 
 
 @pytest.fixture

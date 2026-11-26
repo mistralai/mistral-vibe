@@ -50,9 +50,6 @@ tar_gz_bundle() {
   (cd "$bundle_dir" && tar -czf "$output_path" .)
 }
 
-rm -rf "$release_dir"
-mkdir -p "$release_dir"
-
 if [ "$os" = "windows" ]; then
   if ! command -v 7z >/dev/null 2>&1; then
     echo "7z is required to package PyInstaller artifacts on $os" >&2
@@ -69,6 +66,14 @@ else
     exit 1
   fi
 fi
+
+# All specs have finished; their library staging copies are no longer needed.
+# Keep the cached workpaths and Cargo outputs, and leave dist intact for smoke tests.
+rm -rf .native-build/pyinstaller-config
+uv cache prune --ci
+
+rm -rf "$release_dir"
+mkdir -p "$release_dir"
 
 for binary_base in "$@"; do
   zip_bundle "$binary_base"

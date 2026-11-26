@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from mistralai_vibe_local_harness.vibe.completion_profile import WireFormat
 from tests.conftest import build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeBackend
-from vibe.core.config import ModelConfig, ProviderConfig
-from vibe.core.llm import utility_completion
+from tests.stubs.fake_sign_in import (
+    SIGNED_IN_HEADERS,
+    FakeSignIn,
+    signed_in_credentials,
+)
+from tests.stubs.fake_utility_completion import FakeUtilityCompletion
+from vibe.core.config import ModelConfig, ProviderConfig, UtilityFeature
+from vibe.core.llm.model_probe import MODEL_AVAILABILITY
 from vibe.core.llm.utility_completion import (
+    FAST_MODEL_CANDIDATES,
+    _is_public_mistral_api,
+    ensure_utility_models_probed,
     is_fast_utility_model,
     run_utility_completion,
     select_utility_model,
 )
+from vibe.core.telemetry.send import TelemetryClient
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import Backend
 
 
@@ -112,7 +124,7 @@ class TestSelectUtilityModel:
                 )
             ],
             active_model="devstral-latest",
-            allowed_models=["devstral-latest"],
+            allowed_models=["mistral-vibe-cli-latest"],
         )
 
         model, provider = select_utility_model(config)
@@ -125,11 +137,7 @@ class TestRunUtilityCompletion:
     @pytest.mark.asyncio
     async def test_returns_message_content(self, monkeypatch) -> None:
         config = build_test_vibe_config()
-        monkeypatch.setattr(
-            utility_completion,
-            "create_backend",
-            lambda **_: FakeBackend([mock_llm_chunk(content="the answer")]),
-        )
+        FakeUtilityCompletion("the answer").install(monkeypatch)
 
         content = await run_utility_completion(
             config=config,
@@ -143,15 +151,9 @@ class TestRunUtilityCompletion:
         assert content == "the answer"
 
     @pytest.mark.asyncio
-    async def test_forwards_budgets_to_the_backend(self, monkeypatch) -> None:
+    async def test_forwards_budgets_to_the_harness(self, monkeypatch) -> None:
         config = build_test_vibe_config()
-        captured: dict = {}
-
-        def fake_create_backend(**kwargs):
-            captured.update(kwargs)
-            return FakeBackend([mock_llm_chunk(content="ok")])
-
-        monkeypatch.setattr(utility_completion, "create_backend", fake_create_backend)
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
 
         await run_utility_completion(
             config=config,
@@ -162,17 +164,31 @@ class TestRunUtilityCompletion:
             retry_budget_seconds=7.0,
         )
 
-        assert captured["timeout"] == 1.5
-        assert captured["retry_max_elapsed_time"] == 7.0
+        [request] = completion.requests
+        assert request.config.timeout_s == 1.5
+        assert request.config.retry_max_elapsed_time_s == 7.0
 
     @pytest.mark.asyncio
-    async def test_propagates_backend_errors(self, monkeypatch) -> None:
-        config = build_test_vibe_config()
-        monkeypatch.setattr(
-            utility_completion,
-            "create_backend",
-            lambda **_: FakeBackend(exception_to_raise=RuntimeError("boom")),
+    async def test_follows_the_system_trust_store_setting(self, monkeypatch) -> None:
+        config = build_test_vibe_config(enable_system_trust_store=True)
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
         )
+
+        [request] = completion.requests
+        assert request.config.enable_system_trust_store is True
+
+    @pytest.mark.asyncio
+    async def test_propagates_completion_errors(self, monkeypatch) -> None:
+        config = build_test_vibe_config()
+        FakeUtilityCompletion(error=RuntimeError("boom")).install(monkeypatch)
 
         with pytest.raises(RuntimeError, match="boom"):
             await run_utility_completion(
@@ -185,16 +201,15 @@ class TestRunUtilityCompletion:
             )
 
     @pytest.mark.asyncio
-    async def test_skip_if_no_key_returns_none_without_touching_backend(
+    async def test_skip_if_no_key_returns_none_without_a_request(
         self, monkeypatch
     ) -> None:
         config = build_test_vibe_config()
         monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
-        def fail_create_backend(**_):
-            raise AssertionError("backend must not be built when the key is missing")
-
-        monkeypatch.setattr(utility_completion, "create_backend", fail_create_backend)
+        FakeUtilityCompletion(error=AssertionError("no request without a key")).install(
+            monkeypatch
+        )
 
         content = await run_utility_completion(
             config=config,
@@ -225,11 +240,7 @@ class TestRunUtilityCompletion:
             models=[ModelConfig(name="local-model", provider="local", alias="local")],
             active_model="local",
         )
-        monkeypatch.setattr(
-            utility_completion,
-            "create_backend",
-            lambda **_: FakeBackend([mock_llm_chunk(content="named")]),
-        )
+        FakeUtilityCompletion("named").install(monkeypatch)
 
         content = await run_utility_completion(
             config=config,
@@ -247,11 +258,7 @@ class TestRunUtilityCompletion:
     async def test_skip_if_no_key_runs_when_key_present(self, monkeypatch) -> None:
         config = build_test_vibe_config()
         monkeypatch.setenv("MISTRAL_API_KEY", "present")
-        monkeypatch.setattr(
-            utility_completion,
-            "create_backend",
-            lambda **_: FakeBackend([mock_llm_chunk(content="named")]),
-        )
+        FakeUtilityCompletion("named").install(monkeypatch)
 
         content = await run_utility_completion(
             config=config,
@@ -264,3 +271,718 @@ class TestRunUtilityCompletion:
         )
 
         assert content == "named"
+
+    @pytest.mark.asyncio
+    async def test_call_type_and_launch_context_ride_the_request_metadata(
+        self, monkeypatch
+    ) -> None:
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+        config = build_test_vibe_config()
+
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            call_type="worktree_title",
+            launch_context=LaunchContext(
+                agent_entrypoint="cli",
+                agent_version="1.0.0",
+                client_name="vibe_cli",
+                client_version="1.0.0",
+            ),
+            session_id="session-123",
+        )
+
+        metadata = completion.requests[0].metadata
+        assert metadata is not None
+        assert metadata["call_type"] == "worktree_title"
+        assert metadata["agent_entrypoint"] == "cli"
+        assert metadata["client_name"] == "vibe_cli"
+        assert metadata["session_id"] == "session-123"
+
+    @pytest.mark.asyncio
+    async def test_telemetry_client_emits_one_request_sent_event(
+        self, monkeypatch
+    ) -> None:
+        class RecordingTelemetry(TelemetryClient):
+            def __init__(self) -> None:
+                super().__init__(config_getter=build_test_vibe_config)
+                self.request_events: list[dict] = []
+
+            def send_request_sent(self, **kwargs) -> None:
+                self.request_events.append(kwargs)
+
+        FakeUtilityCompletion("ok").install(monkeypatch)
+        telemetry = RecordingTelemetry()
+        config = build_test_vibe_config()
+
+        await run_utility_completion(
+            config=config,
+            system_prompt="system prompt",
+            user_content="user prompt",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            call_type="title_generation",
+            telemetry=telemetry,
+        )
+
+        (event,) = telemetry.request_events
+        assert event["call_type"] == "title_generation"
+        assert event["model"] == "mistral-small"
+        assert event["reasoning_effort"] == "off"
+        assert event["nb_context_chars"] == len("system prompt") + len("user prompt")
+        assert event["nb_context_messages"] == 2
+        assert event["nb_prompt_chars"] == len("user prompt")
+
+    @pytest.mark.asyncio
+    async def test_request_sent_reports_the_reasoning_the_request_sends(
+        self, monkeypatch
+    ) -> None:
+        # A model that cannot stop reasoning runs at its lowest level when no
+        # level is configured, so the configured "off" must not be reported.
+        class RecordingTelemetry(TelemetryClient):
+            def __init__(self) -> None:
+                super().__init__(config_getter=build_test_vibe_config)
+                self.request_events: list[dict] = []
+
+            def send_request_sent(self, **kwargs) -> None:
+                self.request_events.append(kwargs)
+
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+        telemetry = RecordingTelemetry()
+        config = build_test_vibe_config(
+            models=[
+                ModelConfig(name="mistral-large-4", provider="mistral", alias="large")
+            ],
+            active_model="large",
+            utility_models={"title": "large"},
+        )
+
+        await run_utility_completion(
+            config=config,
+            system_prompt="system prompt",
+            user_content="user prompt",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            feature=UtilityFeature.TITLE,
+            telemetry=telemetry,
+        )
+
+        (event,) = telemetry.request_events
+        (request,) = completion.requests
+        sent = request.route.reasoning_setting(WireFormat.MISTRAL)
+        assert sent == "low"
+        assert event["reasoning_effort"] == sent
+
+    @pytest.mark.asyncio
+    async def test_without_a_telemetry_client_no_event_is_emitted(
+        self, monkeypatch
+    ) -> None:
+        # Worktree naming runs before a session exists: no telemetry client, so
+        # the call rides the request metadata alone.
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+        config = build_test_vibe_config()
+
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            call_type="worktree_title",
+        )
+
+        metadata = completion.requests[0].metadata
+        assert metadata is not None
+        assert metadata["call_type"] == "worktree_title"
+
+
+def _mistral_provider(api_base: str) -> ProviderConfig:
+    return ProviderConfig(
+        name="mistral",
+        api_base=api_base,
+        api_key_env_var="MISTRAL_API_KEY",
+        backend=Backend.MISTRAL,
+    )
+
+
+def _custom_front_config(**kwargs):
+    """A Mistral provider that is not the public API."""
+    return build_test_vibe_config(
+        providers=[_mistral_provider("https://llm.acme.internal/v1")],
+        models=[
+            ModelConfig(
+                name="mistral-vibe-cli-latest",
+                provider="mistral",
+                alias="devstral-latest",
+            )
+        ],
+        active_model="devstral-latest",
+        **kwargs,
+    )
+
+
+class TestPublicMistralOrigin:
+    @pytest.mark.parametrize(
+        ("api_base", "expected"),
+        [
+            ("https://api.mistral.ai/v1", True),
+            ("HTTPS://API.MISTRAL.AI:443/v1", True),
+            ("https://customer.mistral.ai/v1", False),
+            ("https://api.mistral.ai.example.com/v1", False),
+            ("http://api.mistral.ai/v1", False),
+            ("https://api.mistral.ai:8443/v1", False),
+            ("https://api.mistral.ai:not-a-port/v1", False),
+        ],
+    )
+    def test_only_the_public_api_is_assumed_to_serve_the_fast_model(
+        self, api_base: str, expected: bool
+    ) -> None:
+        assert _is_public_mistral_api(api_base) is expected
+
+
+class TestDiscoveryUsesTheProbe:
+    def test_custom_front_keeps_the_active_model_while_unprobed(self) -> None:
+        config = _custom_front_config()
+
+        model, provider = select_utility_model(config)
+
+        assert model.alias == "devstral-latest"
+        assert provider.name == "mistral"
+        assert not is_fast_utility_model(config)
+
+    def test_custom_front_uses_the_fast_model_once_probed(self) -> None:
+        config = _custom_front_config()
+        MODEL_AVAILABILITY.remember(
+            provider=_mistral_provider("https://llm.acme.internal/v1"),
+            model=FAST_MODEL_CANDIDATES[0],
+            available=True,
+        )
+
+        model, _ = select_utility_model(config)
+
+        assert model.name == FAST_MODEL_CANDIDATES[0].name
+        assert is_fast_utility_model(config)
+
+    def test_a_negative_probe_overrides_the_public_api_assumption(self) -> None:
+        config = build_test_vibe_config()
+        for candidate in FAST_MODEL_CANDIDATES:
+            MODEL_AVAILABILITY.remember(
+                provider=_mistral_provider("https://api.mistral.ai/v1"),
+                model=candidate,
+                available=False,
+            )
+
+        model, _ = select_utility_model(config)
+
+        assert model.alias == config.get_active_model().alias
+        assert not is_fast_utility_model(config)
+
+    def test_the_second_candidate_is_used_when_only_it_is_served(self) -> None:
+        config = _custom_front_config()
+        provider = _mistral_provider("https://llm.acme.internal/v1")
+        MODEL_AVAILABILITY.remember(
+            provider=provider, model=FAST_MODEL_CANDIDATES[0], available=False
+        )
+        MODEL_AVAILABILITY.remember(
+            provider=provider, model=FAST_MODEL_CANDIDATES[1], available=True
+        )
+
+        model, _ = select_utility_model(config)
+
+        assert model.name == FAST_MODEL_CANDIDATES[1].name
+        assert is_fast_utility_model(config)
+
+
+class TestFeatureOverrides:
+    def test_a_configured_model_wins_over_discovery(self) -> None:
+        config = build_test_vibe_config(
+            models=[
+                ModelConfig(
+                    name="mistral-vibe-cli-latest",
+                    provider="mistral",
+                    alias="devstral-latest",
+                ),
+                ModelConfig(
+                    name="house-small-1", provider="mistral", alias="house-small"
+                ),
+            ],
+            active_model="devstral-latest",
+            utility_models={"smart_approve": "house-small"},
+        )
+
+        classifier, _ = select_utility_model(
+            config, feature=UtilityFeature.SMART_APPROVE
+        )
+        title, _ = select_utility_model(config, feature=UtilityFeature.TITLE)
+
+        assert classifier.name == "house-small-1"
+        assert title.name == FAST_MODEL_CANDIDATES[0].name
+
+    def test_the_active_sentinel_pins_a_feature_to_the_session_model(self) -> None:
+        config = build_test_vibe_config(utility_models={"title": "active"})
+
+        model, _ = select_utility_model(config, feature=UtilityFeature.TITLE)
+
+        assert model.alias == config.get_active_model().alias
+        assert not is_fast_utility_model(config, feature=UtilityFeature.TITLE)
+
+    def test_an_unknown_alias_falls_back_to_discovery(self) -> None:
+        config = build_test_vibe_config(utility_models={"title": "no-such-model"})
+
+        model, _ = select_utility_model(config, feature=UtilityFeature.TITLE)
+
+        assert model.name == FAST_MODEL_CANDIDATES[0].name
+
+    @pytest.mark.parametrize("name", ["big-1", FAST_MODEL_CANDIDATES[1].name])
+    def test_an_override_is_never_reported_as_the_cheap_tier(self, name: str) -> None:
+        config = build_test_vibe_config(
+            models=[
+                ModelConfig(
+                    name="mistral-vibe-cli-latest",
+                    provider="mistral",
+                    alias="devstral-latest",
+                ),
+                ModelConfig(name=name, provider="mistral", alias="big"),
+            ],
+            active_model="devstral-latest",
+            utility_models={"title": "big"},
+        )
+
+        assert not is_fast_utility_model(config, feature=UtilityFeature.TITLE)
+
+
+class _RecordingSource:
+    def __init__(self, verdicts: dict[str, bool] | None = None) -> None:
+        self.verdicts = verdicts or {}
+        self.asked: list[list[str]] = []
+
+    async def check(self, *, provider, models, timeout_seconds, credentials=None):
+        self.asked.append([model.name for model in models])
+        return self.verdicts
+
+
+def _install_source(monkeypatch, source) -> None:
+    monkeypatch.setattr(MODEL_AVAILABILITY, "_source", source)
+
+
+class TestEnsureUtilityModelsProbed:
+    @pytest.mark.asyncio
+    async def test_asks_about_the_candidates_in_preference_order(
+        self, monkeypatch
+    ) -> None:
+        source = _RecordingSource()
+        _install_source(monkeypatch, source)
+
+        await ensure_utility_models_probed(_custom_front_config())
+
+        assert source.asked == [[candidate.name for candidate in FAST_MODEL_CANDIDATES]]
+
+    @pytest.mark.asyncio
+    async def test_the_verdict_decides_the_utility_model(self, monkeypatch) -> None:
+        _install_source(
+            monkeypatch,
+            _RecordingSource({
+                FAST_MODEL_CANDIDATES[0].name: False,
+                FAST_MODEL_CANDIDATES[1].name: True,
+            }),
+        )
+        config = _custom_front_config()
+
+        await ensure_utility_models_probed(config)
+        model, _ = select_utility_model(config)
+
+        assert model.name == FAST_MODEL_CANDIDATES[1].name
+
+    @pytest.mark.asyncio
+    async def test_candidates_the_allowlist_excludes_are_not_asked_about(
+        self, monkeypatch
+    ) -> None:
+        source = _RecordingSource()
+        _install_source(monkeypatch, source)
+
+        await ensure_utility_models_probed(
+            _custom_front_config(
+                allowed_models=["mistral-vibe-cli-latest", "mistral-small-latest"]
+            )
+        )
+
+        assert source.asked == [[FAST_MODEL_CANDIDATES[1].name]]
+
+    @pytest.mark.asyncio
+    async def test_asks_nothing_when_every_feature_names_a_model(
+        self, monkeypatch
+    ) -> None:
+        source = _RecordingSource()
+        _install_source(monkeypatch, source)
+
+        await ensure_utility_models_probed(
+            _custom_front_config(
+                utility_models={"title": "active", "smart_approve": "active"}
+            )
+        )
+
+        assert source.asked == []
+
+    @pytest.mark.asyncio
+    async def test_the_test_kill_switch_asks_nothing(self, monkeypatch) -> None:
+        source = _RecordingSource()
+        _install_source(monkeypatch, source)
+        monkeypatch.setenv("VIBE_TEST_DISABLE_MODEL_PROBE", "1")
+
+        await ensure_utility_models_probed(_custom_front_config())
+
+        assert source.asked == []
+
+    @pytest.mark.asyncio
+    async def test_a_failing_source_does_not_fail_session_open(
+        self, monkeypatch, caplog
+    ) -> None:
+        class FailingSource:
+            async def check(self, **_):
+                raise RuntimeError("keyring unavailable")
+
+        _install_source(monkeypatch, FailingSource())
+
+        await ensure_utility_models_probed(_custom_front_config())
+
+        assert "availability check failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_source_ignoring_its_budget_cannot_hold_session_open(
+        self, monkeypatch
+    ) -> None:
+        import time
+
+        class HangingSource:
+            async def check(self, **_):
+                await asyncio.sleep(10)
+                return {}
+
+        _install_source(monkeypatch, HangingSource())
+        start = time.perf_counter()
+
+        await ensure_utility_models_probed(_custom_front_config(), timeout_seconds=0.05)
+
+        assert time.perf_counter() - start < 1.0
+
+    @pytest.mark.asyncio
+    async def test_asks_nothing_when_no_feature_is_in_use(self, monkeypatch) -> None:
+        source = _RecordingSource()
+        _install_source(monkeypatch, source)
+
+        await ensure_utility_models_probed(_custom_front_config(), features=())
+
+        assert source.asked == []
+
+    @pytest.mark.asyncio
+    async def test_asks_nothing_without_a_mistral_provider(self, monkeypatch) -> None:
+        source = _RecordingSource()
+        _install_source(monkeypatch, source)
+
+        await ensure_utility_models_probed(_anthropic_only_config())
+
+        assert source.asked == []
+
+
+class TestFeatureLabelsTheCall:
+    @pytest.mark.parametrize(
+        ("feature", "call_type"),
+        [
+            (UtilityFeature.TITLE, "title_generation"),
+            (UtilityFeature.SMART_APPROVE, "smart_approve"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_feature_names_the_request(
+        self, monkeypatch, feature: UtilityFeature, call_type: str
+    ) -> None:
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+
+        await run_utility_completion(
+            config=build_test_vibe_config(),
+            feature=feature,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+        )
+
+        metadata = completion.requests[0].metadata
+        assert metadata is not None
+        assert metadata["call_type"] == call_type
+
+    @pytest.mark.asyncio
+    async def test_a_feature_and_a_call_type_together_is_a_caller_error(
+        self, monkeypatch
+    ) -> None:
+        FakeUtilityCompletion(
+            error=AssertionError("a mislabelled call must not be sent")
+        ).install(monkeypatch)
+
+        with pytest.raises(TypeError):
+            await run_utility_completion(
+                config=build_test_vibe_config(),
+                feature=UtilityFeature.TITLE,
+                call_type="smart_approve",
+                system_prompt="system",
+                user_content="user",
+                max_tokens=24,
+                request_timeout_seconds=1.0,
+                retry_budget_seconds=0.0,
+            )
+
+    def test_every_candidate_is_reported_under_its_own_name(self) -> None:
+        # Request telemetry reports a utility call's model by alias.
+        aliases = [candidate.alias for candidate in FAST_MODEL_CANDIDATES]
+
+        assert len(set(aliases)) == len(aliases)
+
+
+class TestSignedInConnection:
+    """A Desktop connection signed in through OIDC, with no API key."""
+
+    @pytest.mark.asyncio
+    async def test_the_probe_finds_the_fast_model_without_a_key(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        _install_source(
+            monkeypatch, _RecordingSource({FAST_MODEL_CANDIDATES[0].name: True})
+        )
+        config = _custom_front_config()
+        credentials = signed_in_credentials()
+
+        await ensure_utility_models_probed(config, credentials=credentials)
+        model, provider = select_utility_model(
+            config, feature=UtilityFeature.SMART_APPROVE, credentials=credentials
+        )
+
+        assert model.name == FAST_MODEL_CANDIDATES[0].name
+        assert provider.name == "mistral"
+
+    def test_the_public_api_uses_the_fast_model_without_a_key(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        config = build_test_vibe_config()
+
+        model, _ = select_utility_model(config, credentials=signed_in_credentials())
+
+        assert model.name == FAST_MODEL_CANDIDATES[0].name
+
+    def test_a_signed_out_connection_keeps_the_active_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        config = build_test_vibe_config()
+
+        model, _ = select_utility_model(
+            config, credentials=signed_in_credentials(FakeSignIn(signed_in=False))
+        )
+
+        assert model.alias == config.get_active_model().alias
+
+    @pytest.mark.asyncio
+    async def test_a_completion_sends_the_sign_in_without_a_key(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        completion = FakeUtilityCompletion("named").install(monkeypatch)
+
+        content = await run_utility_completion(
+            config=build_test_vibe_config(),
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            skip_if_no_key=True,
+            credentials=signed_in_credentials(),
+        )
+
+        assert content == "named"
+        [request] = completion.requests
+        assert request.route.model == FAST_MODEL_CANDIDATES[0].name
+        assert dict(request.credential.headers) == SIGNED_IN_HEADERS
+
+    @pytest.mark.asyncio
+    async def test_skip_if_no_key_skips_a_signed_out_connection(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "process-key")
+        FakeUtilityCompletion(
+            error=AssertionError("no request when signed out")
+        ).install(monkeypatch)
+
+        content = await run_utility_completion(
+            config=build_test_vibe_config(),
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            skip_if_no_key=True,
+            credentials=signed_in_credentials(FakeSignIn(signed_in=False)),
+        )
+
+        assert content is None
+
+    @pytest.mark.asyncio
+    async def test_a_third_party_provider_still_needs_its_key(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        FakeUtilityCompletion(error=AssertionError("no request without a key")).install(
+            monkeypatch
+        )
+
+        content = await run_utility_completion(
+            config=_anthropic_only_config(),
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            skip_if_no_key=True,
+            credentials=signed_in_credentials(),
+        )
+
+        assert content is None
+
+
+def _title_model_config():
+    """A session whose title model has its own sampling and offers thinking off."""
+    title_model = ModelConfig(
+        name="house-large-1",
+        provider="mistral",
+        alias="house-large",
+        temperature=0.7,
+        top_p=0.9,
+        thinking="high",
+        thinking_levels=["off", "low", "high"],
+    )
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="mistral-vibe-cli-latest",
+                provider="mistral",
+                alias="devstral-latest",
+            ),
+            title_model,
+        ],
+        active_model="devstral-latest",
+    )
+    return config, title_model
+
+
+class TestCallerSettings:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("feature", "call_type"),
+        [(None, "worktree_title"), (UtilityFeature.SMART_APPROVE, None)],
+    )
+    async def test_without_them_the_call_is_greedy_on_the_selected_model(
+        self, monkeypatch, feature, call_type
+    ) -> None:
+        """*Prepare*: A session whose active model has its own sampling.
+        *Do*: Run a utility completion as worktree naming and as a Smart
+            Approve classifier call do, with none of the caller settings.
+        *Assert*: It runs on the fast model, greedily, with no top_p, at the
+            model's configured thinking level.
+        """
+        # Prepare
+        config, _ = _title_model_config()
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+
+        # Do
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            feature=feature,
+            call_type=call_type,
+        )
+
+        # Assert
+        [request] = completion.requests
+        assert request.route.model == FAST_MODEL_CANDIDATES[0].name
+        assert request.route.temperature == 0.0
+        assert request.route.top_p is None
+        assert request.route.thinking == "off"
+        assert request.route.request_thinking is None
+
+    @pytest.mark.asyncio
+    async def test_a_fixed_model_runs_with_its_own_sampling_and_thinking_off(
+        self, monkeypatch
+    ) -> None:
+        """*Prepare*: A session whose title model has its own sampling.
+        *Do*: Run a title call on that model, at its own temperature, with
+            thinking off, as the session title call does.
+        *Assert*: The request goes to that model, not a fast one, with its
+            temperature and top_p, thinking off, and the title label.
+        """
+        # Prepare
+        config, title_model = _title_model_config()
+        completion = FakeUtilityCompletion("Billing retries").install(monkeypatch)
+
+        # Do
+        content = await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=1024,
+            request_timeout_seconds=6.0,
+            retry_budget_seconds=10.0,
+            feature=UtilityFeature.TITLE,
+            fixed_model=(title_model, config.get_provider_for_model(title_model)),
+            use_model_temperature=True,
+            thinking="off",
+        )
+
+        # Assert
+        [request] = completion.requests
+        assert content == "Billing retries"
+        assert request.route.model == "house-large-1"
+        assert request.route.temperature == 0.7
+        assert request.route.top_p == 0.9
+        assert request.route.reasoning_setting(WireFormat.MISTRAL) == "off"
+        assert request.config.max_tokens == 1024
+        assert request.metadata is not None
+        assert request.metadata["call_type"] == "title_generation"
+
+    @pytest.mark.asyncio
+    async def test_without_a_thinking_level_a_fixed_model_keeps_its_own(
+        self, monkeypatch
+    ) -> None:
+        """*Prepare*: A session whose title model thinks at ``high``.
+        *Do*: Run a call on that model with no thinking level.
+        *Assert*: The request keeps the model's ``high``.
+        """
+        # Prepare
+        config, title_model = _title_model_config()
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+
+        # Do
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            fixed_model=(title_model, config.get_provider_for_model(title_model)),
+        )
+
+        # Assert
+        [request] = completion.requests
+        assert request.route.reasoning_setting(WireFormat.MISTRAL) == "high"
+        assert request.route.temperature == 0.0

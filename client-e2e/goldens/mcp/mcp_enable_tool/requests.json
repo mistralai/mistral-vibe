@@ -1,0 +1,11 @@
+[
+ {
+  "method": "connector_catalog/toggle",
+  "params": {
+   "alias": "github_app",
+   "disabled": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "toolName": "create_issue"
+  }
+ }
+]

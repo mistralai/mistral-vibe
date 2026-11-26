@@ -1,0 +1,14 @@
+# Twin: mistralai/vibe/harness/runtime/completion/profile/ruff.toml. Keep both copies identical below this line, so ruff
+# formats and lints both copies of this package the same way.
+line-length = 88
+target-version = "py312"
+
+[format]
+skip-magic-trailing-comma = true
+
+[lint]
+select = ["F", "I", "N", "W", "UP", "B", "C4", "SIM", "ANN", "D2", "RUF022", "E4", "E7", "E9"]
+ignore = ["D203", "D205", "D213", "ANN401"]
+
+[lint.isort]
+split-on-trailing-comma = false

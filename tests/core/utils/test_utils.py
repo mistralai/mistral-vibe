@@ -363,6 +363,30 @@ class TestReadLinesSafe:
         assert got.lines == ["a", "b"]
         assert got.was_truncated is True
 
+    def test_normalizes_crlf_by_default(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_bytes(b"a\r\nb\r\n")
+        got = read_lines_safe(f, limit=10, max_bytes=1024)
+        assert got.lines == ["a", "b"]
+
+    @pytest.mark.parametrize(
+        ("raw", "lines"),
+        [
+            (b"a\r\nb\r\n", ["a\r", "b\r"]),
+            (b"a\r\nb\nc", ["a\r", "b", "c"]),
+            (b"a\rb\n", ["a\rb"]),
+            (b"", []),
+        ],
+    )
+    def test_keeps_carriage_returns_on_request(
+        self, tmp_path: Path, raw: bytes, lines: list[str]
+    ) -> None:
+        f = tmp_path / "f.txt"
+        f.write_bytes(raw)
+        got = read_lines_safe(f, limit=10, max_bytes=1024, keep_carriage_returns=True)
+        assert got.lines == lines
+        assert got.total_lines == len(lines)
+
 
 class TestFileWriteLock:
     @pytest.mark.asyncio

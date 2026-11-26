@@ -71,6 +71,28 @@ def test_end_time_converted_to_utc(save_dir: Path) -> None:
     assert result[0]["end_time"] == "2024-01-01T10:00:00+00:00"
 
 
+def test_bumped_at_converted_to_utc(save_dir: Path) -> None:
+    folder = _make_session(save_dir, "a", "aaaa")
+    metadata = json.loads((folder / "meta.json").read_text())
+    metadata["bumped_at"] = "2026-09-10T14:30:00+02:00"
+    (folder / "meta.json").write_text(json.dumps(metadata))
+
+    result = SessionIndex(save_dir, "session").list()
+
+    assert result[0]["bumped_at"] == "2026-09-10T12:30:00+00:00"
+
+
+def test_malformed_bumped_at_is_ignored(save_dir: Path) -> None:
+    folder = _make_session(save_dir, "a", "aaaa")
+    metadata = json.loads((folder / "meta.json").read_text())
+    metadata["bumped_at"] = "not-a-date"
+    (folder / "meta.json").write_text(json.dumps(metadata))
+
+    result = SessionIndex(save_dir, "session").list()
+
+    assert result[0]["bumped_at"] is None
+
+
 def test_filters_by_cwd(save_dir: Path) -> None:
     _make_session(save_dir, "a", "a", cwd="/p1")
     _make_session(save_dir, "b", "b", cwd="/p2")

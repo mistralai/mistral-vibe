@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC
-from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterator, Sequence
-import copy
 from enum import StrEnum, auto
 from pathlib import Path
-import threading
-from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -21,15 +17,15 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    PrivateAttr,
-    computed_field,
+    ValidationError,
     model_validator,
 )
 
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.tools.models import RequiredPermission
+from vibe.core.session.artifacts import SessionArtifact, WorktreeArtifact
+from vibe.core.skills.models import ManifestEntry
+from vibe.observability.logging import logger
 from vibe.user_content import UserDisplayContent, UserResource
-from vibe.utils.pricing import session_token_cost
 from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
 
@@ -46,118 +42,6 @@ class ScheduledLoop(BaseModel):
 class Backend(StrEnum):
     MISTRAL = auto()
     GENERIC = auto()
-
-
-class AgentStats(BaseModel):
-    steps: int = 0
-    session_prompt_tokens: int = 0
-    session_completion_tokens: int = 0
-    session_cached_tokens: int = 0
-    tool_calls_agreed: int = 0
-    tool_calls_rejected: int = 0
-    tool_calls_hook_denied: int = 0
-    tool_calls_failed: int = 0
-    tool_calls_succeeded: int = 0
-
-    context_tokens: int = 0
-
-    last_turn_prompt_tokens: int = 0
-    last_turn_completion_tokens: int = 0
-    last_turn_cached_tokens: int = 0
-    last_turn_duration: float = 0.0
-    tokens_per_second: float = 0.0
-
-    input_price_per_million: float = 0.0
-    output_price_per_million: float = 0.0
-    cached_input_price_per_million: float | None = None
-
-    _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
-        default_factory=dict
-    )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        if name in self._listeners:
-            self._listeners[name](self)
-
-    def trigger_listeners(self) -> None:
-        for listener in self._listeners.values():
-            listener(self)
-
-    def add_listener(
-        self, attr_name: str, listener: Callable[[AgentStats], None]
-    ) -> None:
-        self._listeners[attr_name] = listener
-
-    @staticmethod
-    def create_fresh(previous: AgentStats) -> AgentStats:
-        fresh = AgentStats()
-        fresh._listeners = previous._listeners.copy()
-        return fresh
-
-    @computed_field
-    @property
-    def session_total_llm_tokens(self) -> int:
-        return self.session_prompt_tokens + self.session_completion_tokens
-
-    @computed_field
-    @property
-    def last_turn_total_tokens(self) -> int:
-        return self.last_turn_prompt_tokens + self.last_turn_completion_tokens
-
-    @computed_field
-    @property
-    def session_cost(self) -> float:
-        """Total session cost in dollars from token usage and pricing.
-
-        If the model changes mid-session, this uses current pricing for all tokens.
-        """
-        return session_token_cost(
-            prompt_tokens=self.session_prompt_tokens,
-            completion_tokens=self.session_completion_tokens,
-            cached_tokens=self.session_cached_tokens,
-            input_price_per_million=self.input_price_per_million,
-            output_price_per_million=self.output_price_per_million,
-            cached_input_price_per_million=self.cached_input_price_per_million,
-        )
-
-    def update_pricing(
-        self,
-        input_price: float,
-        output_price: float,
-        cached_input_price: float | None = None,
-    ) -> None:
-        """Update pricing info when model changes.
-
-        NOTE: session_cost will be recalculated using new pricing for all
-        accumulated tokens. This is a known approximation when models change.
-        This should not be a big issue, pricing is only used for max_price which is in
-        programmatic mode, so user should not update models there.
-        """
-        self.input_price_per_million = input_price
-        self.output_price_per_million = output_price
-        self.cached_input_price_per_million = cached_input_price
-
-    def reset_context_state(self) -> None:
-        """Reset context-related fields while preserving cumulative session stats.
-
-        Used after config reload or similar operations where the context
-        changes but we want to preserve session totals.
-        """
-        self.context_tokens = 0
-        self.last_turn_prompt_tokens = 0
-        self.last_turn_completion_tokens = 0
-        self.last_turn_cached_tokens = 0
-        self.last_turn_duration = 0.0
-        self.tokens_per_second = 0.0
-
-
-class SessionInfo(BaseModel):
-    session_id: str
-    start_time: str
-    message_count: int
-    stats: AgentStats
-    save_dir: str
 
 
 class ChildSessionLink(BaseModel):
@@ -182,6 +66,41 @@ class WorktreeContext(BaseModel):
     created_at: int
 
 
+# A "cloud" id names a cloud project the starter did not resolve to a local one (the
+# flag was off, say): readers must still resolve it through a local project's backing.
+# "none" (no id) stamps a projectless session, which runs in a scratch folder.
+class SessionProject(BaseModel):
+    # A field a newer version adds must not invalidate the whole meta.json.
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["local", "cloud", "none"]
+    id: str | None = None
+
+
+class OwedReply(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    to_session_id: str
+    turn_id: str
+    hops: int = 1
+    # Saved as soon as the turn ends, so a send retried later, or after a
+    # restart, still reports that turn and not what the session did since.
+    text: str | None = None
+
+
+def _readable_skill_pins(raw: Any) -> Any:
+    """An unreadable pick is dropped, so it never makes the session unreadable."""
+    if not isinstance(raw, list):
+        return raw
+    pins: list[ManifestEntry] = []
+    for item in raw:
+        try:
+            pins.append(ManifestEntry.model_validate(item))
+        except ValidationError:
+            logger.warning("Dropping an unreadable session skill pick: %r", item)
+    return pins
+
+
 class SessionMetadata(BaseModel):
     session_id: str
     parent_session_id: str | None = None
@@ -200,31 +119,57 @@ class SessionMetadata(BaseModel):
     loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
+    bumped_at: str | None = None
+    # When the user pinned this session, or ``None`` while it is unpinned. A
+    # timestamp rather than a flag so the pinned shelf can be ordered by when
+    # each pin was made without a second field to keep in step.
+    pinned_at: str | None = None
+    # When the user archived this session, or ``None`` while it is visible.
+    archived_at: str | None = None
+    # These fields are absent from sessions written before unseen tracking.
+    # Null/null is the lazy migration: old sessions remain seen.
+    unseen_at: str | None = None
+    seen_at: str | None = None
     # The sticky GrowthBook variant assignment, persisted so a resumed session
     # keeps its buckets. NOTE: plan/org attributes and user_plan are user-scoped,
     # not session-scoped, so they are deliberately NOT persisted here — they are
     # re-resolved from the user-scoped whoami/identity cache on every session, so
     # resuming never reports a stale plan.
     experiments: EvalResponse | None = None
-    # Session-scoped config snapshot. New sessions pin ``active_model`` to its
-    # resolved alias before their first user turn; older snapshots remain valid.
+    # Session-scoped config snapshot. New sessions record ``active_model``
+    # (the resolved alias) and ``model_name`` (the provider model name) before
+    # their first user turn; older snapshots remain valid.
     config: dict[str, JsonValue] | None = None
+    # How the app server last drove this session's local runtime: through the
+    # Session API or by calling the runtime directly. Fixed when the session
+    # opens, so a resume after the switch changed records the new path. ``None``
+    # for sessions written before this field existed.
+    runtime_path: Literal["session_api", "direct"] | None = None
+    # The runtime that owns this session, fixed at creation. ``None`` for older
+    # sessions, which are local. Opens read it with ``_session_runtime_owner``.
+    runtime: Literal["local", "target"] | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
-
-
-StrToolChoice = Literal["auto", "none", "any", "required"]
-
-
-class AvailableFunction(BaseModel):
-    name: str
-    description: str
-    parameters: dict[str, Any]
-
-
-class AvailableTool(BaseModel):
-    type: Literal["function"] = "function"
-    function: AvailableFunction
+    # The project the session was started in, written once; None for unstamped sessions.
+    project: SessionProject | None = None
+    # Durable external work products (PRs/MRs) observed during this session.
+    # Absent from sessions written before this field existed; defaults to [].
+    artifacts: list[SessionArtifact] = Field(default_factory=list)
+    worktrees: list[WorktreeArtifact] = Field(default_factory=list)
+    owed_replies: list[OwedReply] = Field(default_factory=list)
+    # Notes for the model a change made while no process held the session,
+    # such as a move to another directory; its next turn sends and clears them.
+    pending_context_notes: list[str] = Field(default_factory=list)
+    # The git repository and the checkout (main or linked worktree) the
+    # session's folder belongs to, recorded when the folder is set so a session
+    # still groups and reads by them once the folder is gone.
+    repository_root: str | None = None
+    checkout_root: str | None = None
+    # Registry skills picked for this session only (``skills/import`` with scope
+    # ``session``); reopening the session restores them.
+    skill_pins: Annotated[
+        list[ManifestEntry], BeforeValidator(_readable_skill_pins)
+    ] = Field(default_factory=list)
 
 
 class FunctionCall(BaseModel):
@@ -262,11 +207,6 @@ class Role(StrEnum):
     user = auto()
     assistant = auto()
     tool = auto()
-
-
-class ApprovalResponse(StrEnum):
-    YES = "y"
-    NO = "n"
 
 
 class FileImageSource(BaseModel):
@@ -387,126 +327,6 @@ class LLMMessage(BaseModel):
             "context_boundary": getattr(v, "context_boundary", None),
         }
 
-    def __add__(self, other: LLMMessage) -> LLMMessage:
-        """Careful: this is not commutative!"""
-        if self.role != other.role:
-            raise ValueError("Can't accumulate messages with different roles")
-
-        if self.name != other.name:
-            raise ValueError("Can't accumulate messages with different names")
-
-        if self.tool_call_id != other.tool_call_id:
-            raise ValueError("Can't accumulate messages with different tool_call_ids")
-
-        content = (self.content or "") + (other.content or "")
-        if not content:
-            content = None
-
-        reasoning_content = (self.reasoning_content or "") + (
-            other.reasoning_content or ""
-        )
-        if not reasoning_content:
-            reasoning_content = None
-
-        reasoning_payloads = [
-            *(self.reasoning_payloads or []),
-            *(other.reasoning_payloads or []),
-        ] or None
-
-        tool_calls_map = OrderedDict[int, ToolCall]()
-        for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
-            for tc in tool_calls:
-                if tc.index is None:
-                    raise ValueError("Tool call chunk missing index")
-                if tc.index not in tool_calls_map:
-                    tool_calls_map[tc.index] = copy.deepcopy(tc)
-                else:
-                    existing_name = tool_calls_map[tc.index].function.name
-                    new_name = tc.function.name
-                    if existing_name and new_name and existing_name != new_name:
-                        raise ValueError(
-                            "Can't accumulate messages with different tool call names"
-                        )
-                    if new_name and not existing_name:
-                        tool_calls_map[tc.index].function.name = new_name
-                    new_args = (tool_calls_map[tc.index].function.arguments or "") + (
-                        tc.function.arguments or ""
-                    )
-                    tool_calls_map[tc.index].function.arguments = new_args
-
-        return LLMMessage(
-            role=self.role,
-            content=content,
-            images=self.images if self.images is not None else other.images,
-            reasoning_content=reasoning_content,
-            reasoning_payloads=reasoning_payloads,
-            reasoning_message_id=self.reasoning_message_id
-            or other.reasoning_message_id,
-            tool_calls=list(tool_calls_map.values()) or None,
-            name=self.name,
-            tool_call_id=self.tool_call_id,
-            tool_result=self.tool_result or other.tool_result,
-            message_id=self.message_id,
-            user_display_content=self.user_display_content
-            if self.user_display_content is not None
-            else other.user_display_content,
-            input_text=(
-                self.input_text if self.input_text is not None else other.input_text
-            ),
-            resources=self.resources if self.resources is not None else other.resources,
-            context_boundary=self.context_boundary or other.context_boundary,
-        )
-
-
-class LLMUsage(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    # Prompt tokens served from the provider cache; a subset of prompt_tokens.
-    cached_tokens: int = 0
-
-    def __add__(self, other: LLMUsage) -> LLMUsage:
-        return LLMUsage(
-            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
-            completion_tokens=self.completion_tokens + other.completion_tokens,
-            cached_tokens=self.cached_tokens + other.cached_tokens,
-        )
-
-
-class StopReason(StrEnum):
-    REFUSAL = "refusal"
-
-
-class StopInfo(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-    reason: str | None = None
-    category: str | None = None
-    explanation: str | None = None
-
-    @property
-    def is_refusal(self) -> bool:
-        return self.reason == StopReason.REFUSAL
-
-
-class LLMChunk(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    message: LLMMessage
-    usage: LLMUsage | None = None
-    correlation_id: str | None = None
-    stop: StopInfo | None = None
-
-    def __add__(self, other: LLMChunk) -> LLMChunk:
-        if self.usage is None and other.usage is None:
-            new_usage = None
-        else:
-            new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
-        return LLMChunk(
-            message=self.message + other.message,
-            usage=new_usage,
-            correlation_id=other.correlation_id or self.correlation_id,
-            stop=other.stop or self.stop,
-        )
-
 
 class BaseEvent(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -560,6 +380,9 @@ class ToolResultEvent(BaseEvent):
     duration: float | None = None
     tool_call_id: str
     presentation: ToolResultPresentation | None = None
+    decision: Literal["execute", "skip"] | None = None
+    approval_type: Literal["always", "never", "ask"] | None = None
+    approval_source: Literal["config", "smart", "user", "bypass", "never"] | None = None
 
 
 class ToolStreamEvent(BaseEvent):
@@ -572,27 +395,6 @@ class WaitingForInputEvent(BaseEvent):
     task_id: str
     label: str | None = None
     predefined_answers: list[str] | None = None
-
-
-class RequestEvent(BaseEvent):
-    request_id: str
-
-
-class ApprovalRequestEvent(RequestEvent):
-    tool_name: str
-    tool_args: BaseModel
-    tool_call_id: str
-    required_permissions: list[RequiredPermission] | None = None
-
-
-class UserInputRequestEvent(RequestEvent):
-    args: BaseModel
-    tool_call_id: str
-
-
-class TokenUsageUpdatedEvent(BaseEvent):
-    stats: AgentStats
-    context_window: int
 
 
 class CompactStartEvent(BaseEvent):
@@ -616,168 +418,12 @@ class CompactEndEvent(BaseEvent):
     tool_call_id: str
 
 
-class PlanReviewRequestedEvent(BaseEvent):
-    file_path: Path
-
-
-class PlanReviewEndedEvent(BaseEvent):
-    pass
-
-
 class AgentProfileChangedEvent(BaseEvent):
     """Emitted when the active agent profile changes during a turn."""
 
     agent_name: str
 
 
-class ContextClearedEvent(BaseEvent):
-    """Emitted after the context is cleared on plan accept."""
-
-    plan_file_path: Path | None = None
-
-
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
     session_id: str
-
-
-class BackgroundWorkEvent(BaseEvent):
-    work_id: str
-    kind: Literal["session_title"]
-    phase: Literal["started", "finished"]
-    session_id: str
-
-
-type SwitchAgentCallback = Callable[[str], Awaitable[None]]
-
-type ClearContextCallback = Callable[[], Awaitable[None]]
-
-
-class MessageList(Sequence[LLMMessage]):
-    def __init__(self, initial: list[LLMMessage] | None = None) -> None:
-        self._data: list[LLMMessage] = list(initial) if initial else []
-        self._reset_hooks: list[Callable[[], None]] = []
-        self._lock = threading.RLock()
-
-    def append(self, msg: LLMMessage) -> None:
-        self._data.append(msg)
-
-    def insert(self, i: int, msg: LLMMessage) -> None:
-        self._data.insert(i, msg)
-
-    def extend(self, msgs: list[LLMMessage]) -> None:
-        for msg in msgs:
-            self.append(msg)
-
-    def on_reset(self, hook: Callable[[], None]) -> None:
-        """Register a callback that fires whenever the list is reset."""
-        self._reset_hooks.append(hook)
-
-    def reset(self, new: list[LLMMessage]) -> None:
-        """Replace contents and fire reset hooks (e.g. RewindManager)."""
-        with self._lock:
-            self._data = list(new)
-            for hook in self._reset_hooks:
-                hook()
-
-    def reset_preserving_system(self, tail: list[LLMMessage]) -> None:
-        """Atomically keep existing system messages and replace the rest.
-
-        Held under the same lock as ``update_system_prompt`` so a concurrent
-        deferred-init thread cannot interleave its system-prompt insert with
-        this read-then-replace and corrupt the list.
-        """
-        with self._lock:
-            system = [m for m in self._data if m.role is Role.system]
-            self._data = [*system, *tail]
-            for hook in self._reset_hooks:
-                hook()
-
-    def update_system_prompt(self, new: str) -> None:
-        """Replace the system prompt, or insert it if none exists yet.
-
-        Under deferred init the prompt can land after messages were already
-        appended, so insert at the front rather than clobber slot 0.
-        """
-        msg = LLMMessage(role=Role.system, content=new)
-        with self._lock:
-            if self._data and self._data[0].role == Role.system:
-                self._data[0] = msg
-            else:
-                self._data.insert(0, msg)
-
-    def __len__(self) -> int:
-        return len(self._data)
-
-    @overload
-    def __getitem__(self, index: int) -> LLMMessage: ...
-    @overload
-    def __getitem__(self, index: slice) -> list[LLMMessage]: ...
-    def __getitem__(self, index: int | slice) -> LLMMessage | list[LLMMessage]:
-        return self._data[index]
-
-    def __iter__(self) -> Iterator[LLMMessage]:
-        # Snapshot under the lock: only __iter__ hands element-by-element
-        # control back to Python, so the deferred-init thread's insert(0)
-        # could shift indices mid-iteration. Other read dunders are single
-        # C-level ops and stay atomic under the GIL without locking.
-        with self._lock:
-            return iter(list(self._data))
-
-    def __contains__(self, item: object) -> bool:
-        return item in self._data
-
-    def __bool__(self) -> bool:
-        return bool(self._data)
-
-
-class RateLimitError(Exception):
-    def __init__(self, provider: str, model: str) -> None:
-        self.provider = provider
-        self.model = model
-        super().__init__(
-            "Rate limits exceeded. Please wait a moment before trying again."
-        )
-
-
-class ContextTooLongError(Exception):
-    def __init__(self, provider: str, model: str) -> None:
-        self.provider = provider
-        self.model = model
-        super().__init__(
-            "The conversation context exceeds the model's maximum limit. "
-            "Use /rewind to undo recent actions, then /compact to summarize the conversation."
-        )
-
-
-class ResponseTooLongError(Exception):
-    def __init__(self, provider: str, model: str) -> None:
-        self.provider = provider
-        self.model = model
-        super().__init__(
-            "The model's response exceeded the maximum output token limit."
-        )
-
-
-class RefusalError(Exception):
-    def __init__(
-        self,
-        provider: str,
-        model: str,
-        category: str | None = None,
-        explanation: str | None = None,
-    ) -> None:
-        self.provider = provider
-        self.model = model
-        self.category = category
-        self.explanation = explanation
-        super().__init__(self._fmt())
-
-    def _fmt(self) -> str:
-        lead = "The model declined to respond to this request and stopped early."
-        if self.category:
-            lead += f" (category: {self.category})"
-        detail = self.explanation or (
-            "Try rephrasing your request or starting a new conversation."
-        )
-        return f"{lead} {detail}"

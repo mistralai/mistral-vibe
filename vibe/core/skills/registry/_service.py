@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum, auto
 from http import HTTPStatus
@@ -11,16 +11,27 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from vibe.core.config import resolve_api_key
-from vibe.core.config._defaults import DEFAULT_MISTRAL_API_ENV_KEY
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.harness_files._paths import GLOBAL_SKILLS_DIR
-from vibe.core.skills.models import REGISTRY_LATEST_ALIAS, SkillScope
-from vibe.core.skills.registry import _ledger, _manifest, _notify, _resolved, _store
+from vibe.core.platform_auth import (
+    PlatformCredentialFactory,
+    PlatformCredentialProvider,
+)
+from vibe.core.platform_auth._mistral import mistral_credentials
+from vibe.core.skills.models import REGISTRY_LATEST_ALIAS, ManifestEntry, SkillScope
+from vibe.core.skills.registry import (
+    _eviction,
+    _known_manifests,
+    _manifest,
+    _notify,
+    _resolved,
+    _store,
+)
 from vibe.core.skills.registry._client import RegistrySkillsClient, RegistrySkillsError
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
-from vibe.core.skills.registry.models import SkillVersionInfo
+from vibe.core.skills.registry._manifest import ManifestReadError, SkillManifest
+from vibe.core.skills.registry.models import RegistrySkillItem, SkillVersionInfo
 from vibe.observability.logging import logger
+from vibe.utils.paths import resolves_within
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -40,6 +51,23 @@ class RegistrySyncResult:
     status: RegistrySyncStatus
     written: int = 0
     skipped: int = 0
+
+
+@dataclass
+class _Counts:
+    """A pin the registry no longer has is skipped, not failed: no later sync can fetch
+    it either.
+    """
+
+    written: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+    def missed(self, exc: RegistrySkillsError) -> None:
+        if exc.status == HTTPStatus.NOT_FOUND:
+            self.skipped += 1
+        else:
+            self.failed += 1
 
 
 class CatalogItem(BaseModel):
@@ -78,20 +106,19 @@ class SkillUpdate:
 @dataclass(frozen=True)
 class _Endpoint:
     api_base: str
-    api_key: str
+    credentials: PlatformCredentialProvider
 
 
-def _resolve_endpoint(config: VibeConfigSchema) -> _Endpoint | None:
-    provider = config.get_mistral_provider()
-    if provider is None:
-        logger.debug("Registry skills enabled but no Mistral provider is configured")
+def _resolve_endpoint(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> _Endpoint | None:
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
+        logger.debug("Registry skills enabled but no Mistral credential is available")
         return None
-    env_var = provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
-    api_key = resolve_api_key(env_var)
-    if not api_key:
-        logger.info("Registry skills enabled but %s is not set; skipping", env_var)
-        return None
-    return _Endpoint(api_base=provider.api_base, api_key=api_key)
+    return _Endpoint(
+        api_base=mistral.provider.api_base, credentials=mistral.credentials
+    )
 
 
 async def _manifest_paths(roots: Sequence[Path] | None = None) -> list[Path]:
@@ -114,34 +141,43 @@ def _unsafe_pin(entry: ManifestEntry) -> bool:
 
 
 async def refresh_registry_skills(
-    config: VibeConfigSchema, roots: Sequence[Path] | None = None
+    config: VibeConfigSchema,
+    roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> RegistrySyncResult:
     """Session-start sync.
 
     Resolves every pinned skill to a concrete version and downloads any missing
-    bodies into the local store, then prunes versions no longer pinned. Runs so
-    that, e.g., a teammate who clones a repo with a committed ``.vibe/skills.toml``
-    but no local cache gets the bodies.
+    bodies into the local store. Runs so that, e.g., a teammate who clones a repo
+    with a committed ``.vibe/skills.toml`` but no local cache gets the bodies.
 
     ``roots`` are the caller's session project roots (the agent loop's
     ``harness_files.project_roots``); when omitted the global harness singleton
-    is used.
+    is used. SKIPPED means the registry could not be asked: the flag is off or
+    no credentials are configured. With nothing to fetch the sync is OK, and a
+    pin whose fetch failed makes it FAILED, so the session tries again. The
+    project manifests it reads go on record for later cleanups.
     """
     if not config.experimental_enable_registry_skills:
         return RegistrySyncResult(RegistrySyncStatus.SKIPPED)
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    await asyncio.to_thread(
+        _known_manifests.remember, await _manifest.project_manifest_paths(roots)
+    )
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return RegistrySyncResult(RegistrySyncStatus.SKIPPED)
     if not await _needs_sync(roots):
-        await _prune_shared(_ledger.repo_key(roots), await _local_active(roots), roots)
-        return RegistrySyncResult(RegistrySyncStatus.SKIPPED)
+        return RegistrySyncResult(RegistrySyncStatus.OK)
 
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             latest_by_id = await _resolve_latest_versions(
                 client, await _latest_pinned_skill_ids(roots)
             )
-            active, written, skipped = await _sync_pins(client, latest_by_id, roots)
+            counts = await _sync_pins(client, latest_by_id, roots)
     except RegistrySkillsError as exc:
         logger.warning("Failed to sync registry skills: %s", exc.reason)
         return RegistrySyncResult(RegistrySyncStatus.FAILED)
@@ -149,85 +185,14 @@ async def refresh_registry_skills(
         logger.warning("Failed to materialize registry skills: %s", exc)
         return RegistrySyncResult(RegistrySyncStatus.FAILED)
 
-    await _prune_shared(_ledger.repo_key(roots), active, roots)
-    logger.info("Synced registry skills: %d fetched, %d skipped", written, skipped)
-    return RegistrySyncResult(RegistrySyncStatus.OK, written=written, skipped=skipped)
-
-
-async def _prune_shared(
-    key: str, active: set[tuple[str, int]], roots: Sequence[Path] | None = None
-) -> None:
-    """Record this repo's active set, then prune against the union across repos.
-
-    The store is shared across repositories, so pruning against only this repo's
-    pins would evict a sibling repo's version of the same skill. Recording per
-    repo and pruning against the union keeps every repo's pinned versions.
-
-    Each scope records what it actually pins: deriving the repo entry by
-    subtracting the global one would drop a project's claim on a version the
-    global manifest happens to pin too.
-    """
-    safe = await _prune_safe(active)
-    await _record_pins(key, roots)
-    keep = await asyncio.to_thread(_ledger.union)
-    await _store.prune(keep | safe, recheck=_ledger.union)
-
-
-async def _record_pins(key: str, roots: Sequence[Path] | None = None) -> None:
-    shared = await _prune_safe(await _scoped_active([_manifest.global_manifest_path()]))
-    await asyncio.to_thread(_ledger.record, _ledger.GLOBAL_KEY, shared)
-    if key != _ledger.GLOBAL_KEY:
-        project = await _prune_safe(
-            await _scoped_active(await _manifest.project_manifest_paths(roots))
-        )
-        await asyncio.to_thread(_ledger.record, key, project)
-
-
-async def publish_local_pins(roots: Sequence[Path] | None = None) -> None:
-    """Republish this repository's pins to the shared ledger.
-
-    A sibling repository prunes against the ledger to learn which versions this
-    one still claims. The ledger is otherwise only written during a session-start
-    sync, so a pin added or removed mid-session stays invisible and the sibling
-    can delete a body this repository just materialized.
-
-    ``roots`` resolves to the open project roots when omitted: an unresolved
-    ``None`` keys the write as ``global``, which drops this repository's own
-    project claims instead of recording them.
-    """
-    resolved = get_harness_files_manager().project_roots if roots is None else roots
-    await _record_pins(_ledger.repo_key(resolved), resolved)
-
-
-async def _scoped_active(paths: Sequence[Path]) -> set[tuple[str, int]]:
-    """Active pins recorded by the manifests in ``paths`` only.
-
-    Each ledger scope records what it pins itself, so dropping a pin in one
-    scope takes effect on the next sync instead of lingering in another
-    scope's entry.
-    """
-    active: set[tuple[str, int]] = set()
-    for path in paths:
-        manifest = await _manifest.load(path)
-        for entry in manifest.skills:
-            if _unsafe_pin(entry):
-                continue
-            version = await _pinned_version(entry)
-            if version is not None:
-                active.add((entry.skill_id, version))
-    return active
-
-
-async def _pinned_version(entry: ManifestEntry) -> int | None:
-    """The concrete version an entry currently pins, or None if unresolved."""
-    if isinstance(entry.version, int):
-        return entry.version
-    if entry.version == REGISTRY_LATEST_ALIAS:
-        return await _store.latest_materialized(entry.skill_id)
-    version = await asyncio.to_thread(_resolved.get, entry.skill_id, entry.version)
-    if version is None:
-        version = await _store.latest_materialized(entry.skill_id)
-    return version
+    logger.info(
+        "Synced registry skills: %d fetched, %d skipped, %d failed",
+        counts.written,
+        counts.skipped,
+        counts.failed,
+    )
+    status = RegistrySyncStatus.FAILED if counts.failed else RegistrySyncStatus.OK
+    return RegistrySyncResult(status, written=counts.written, skipped=counts.skipped)
 
 
 async def _needs_sync(roots: Sequence[Path] | None = None) -> bool:
@@ -283,15 +248,13 @@ async def _resolve_latest_versions(
 
 
 def _add_target(
-    active: set[tuple[str, int]],
     known: list[tuple[str, int, str]],
     seen: set[tuple[str, int]],
     sid: str,
     version: int,
     name: str,
 ) -> None:
-    """Mark (sid, version) active and queue it for batch materialization once."""
-    active.add((sid, version))
+    """Queue (sid, version) for batch materialization once."""
     if (sid, version) not in seen:
         seen.add((sid, version))
         known.append((sid, version, name))
@@ -301,11 +264,11 @@ async def _sync_alias(
     client: RegistrySkillsClient,
     entry: ManifestEntry,
     alias: str,
-    active: set[tuple[str, int]],
     resolved_aliases: dict[tuple[str, str], int],
     alias_seen: set[tuple[str, str]],
-) -> tuple[int, int]:
-    """Resolve + materialize a custom alias pin; return (written, skipped).
+    counts: _Counts,
+) -> None:
+    """Resolve + materialize a custom alias pin, counting it in ``counts``.
 
     Resolved inline because ``get_skill(alias=...)`` already returns the body,
     and deduplicated so the same alias in several manifests hits the server once.
@@ -313,7 +276,7 @@ async def _sync_alias(
     sid = entry.skill_id
     key = (sid, alias)
     if key in alias_seen:
-        return 0, 0
+        return
     alias_seen.add(key)
     try:
         item = await client.get_skill(sid, alias=alias)
@@ -321,51 +284,39 @@ async def _sync_alias(
         logger.warning(
             "Failed to resolve alias '%s' for '%s': %s", alias, entry.name, exc.reason
         )
-        fallback = await asyncio.to_thread(_resolved.get, sid, alias)
-        if fallback is None:
-            fallback = await _store.latest_materialized(sid)
-        if fallback is not None:
-            active.add((sid, fallback))
-        return 0, 0
+        counts.missed(exc)
+        return
     resolved_aliases[key] = item.version
     if await _store.is_materialized(sid, item.version):
-        active.add((sid, item.version))
-        return 0, 0
+        return
     if await _store.materialize(item, entry.name) is None:
-        fallback = await asyncio.to_thread(_resolved.get, sid, alias)
-        if fallback is None:
-            fallback = await _store.latest_materialized(sid)
-        if fallback is not None:
-            logger.debug(
-                "Alias '%s' for %s resolved to v%d with an empty body; keeping v%d",
-                alias,
-                sid,
-                item.version,
-                fallback,
-            )
-            active.add((sid, fallback))
-        return 0, 1
-    active.add((sid, item.version))
-    return 1, 0
+        logger.debug(
+            "Alias '%s' for %s resolved to v%d with an empty body",
+            alias,
+            sid,
+            item.version,
+        )
+        counts.skipped += 1
+        return
+    counts.written += 1
 
 
 async def _sync_pins(
     client: RegistrySkillsClient,
     latest_by_id: dict[str, int],
     roots: Sequence[Path] | None = None,
-) -> tuple[set[tuple[str, int]], int, int]:
-    """Resolve and materialize every pin; return (active versions, written, skipped).
+) -> _Counts:
+    """Resolve and materialize every pin, and count them.
 
     Frozen ints use their number; ``latest`` uses the catalog's newest version
     (falling back to newest-on-disk if absent); custom aliases resolve
     server-side (cached in ``_resolved`` so discovery finds them offline).
     """
-    active: set[tuple[str, int]] = set()
     known: list[tuple[str, int, str]] = []
     seen: set[tuple[str, int]] = set()
     resolved_aliases: dict[tuple[str, str], int] = {}
     alias_seen: set[tuple[str, str]] = set()
-    written = skipped = 0
+    counts = _Counts()
 
     for path in await _manifest_paths(roots):
         manifest = await _manifest.load(path)
@@ -374,14 +325,12 @@ async def _sync_pins(
                 continue
             sid = entry.skill_id
             if isinstance(entry.version, int):
-                _add_target(active, known, seen, sid, entry.version, entry.name)
+                _add_target(known, seen, sid, entry.version, entry.name)
                 continue
             if entry.version != REGISTRY_LATEST_ALIAS:
-                w, s = await _sync_alias(
-                    client, entry, entry.version, active, resolved_aliases, alias_seen
+                await _sync_alias(
+                    client, entry, entry.version, resolved_aliases, alias_seen, counts
                 )
-                written += w
-                skipped += s
                 continue
             version = latest_by_id.get(sid)
             if version is None:
@@ -395,74 +344,60 @@ async def _sync_pins(
                     "Skipping '%s': 'latest' has no version to resolve", entry.name
                 )
                 continue
-            _add_target(active, known, seen, sid, version, entry.name)
+            _add_target(known, seen, sid, version, entry.name)
 
     await asyncio.to_thread(_resolved.record, resolved_aliases)
-    w, s = await _materialize_missing(client, known)
-    return await _prune_safe(active), written + w, skipped + s
-
-
-async def _local_active(roots: Sequence[Path] | None = None) -> set[tuple[str, int]]:
-    """Active (skill_id, version) set from local state only (no network).
-
-    Lets the fast path still prune versions no longer pinned when nothing needs
-    downloading.
-    """
-    return await _scoped_active(await _manifest_paths(roots))
-
-
-async def _prune_safe(active: set[tuple[str, int]]) -> set[tuple[str, int]]:
-    """Resolve the active set to versions actually on disk.
-
-    Never prune a skill's only usable body because a new target failed to
-    download: for any resolved target that isn't materialized, substitute an
-    existing on-disk version so prune doesn't strip the skill entirely.
-    """
-    safe: set[tuple[str, int]] = set()
-    for sid, version in active:
-        if await _store.is_materialized(sid, version):
-            safe.add((sid, version))
-        elif (fallback := await _store.latest_materialized(sid)) is not None:
-            safe.add((sid, fallback))
-    return safe
+    await _materialize_missing(client, known, counts)
+    return counts
 
 
 async def _materialize_missing(
-    client: RegistrySkillsClient, targets: list[tuple[str, int, str]]
-) -> tuple[int, int]:
+    client: RegistrySkillsClient, targets: list[tuple[str, int, str]], counts: _Counts
+) -> None:
     pending: list[tuple[str, int, str]] = []
     for target in targets:
         if not await _store.is_materialized(target[0], target[1]):
             pending.append(target)
     if not pending:
-        return 0, 0
+        return
     semaphore = asyncio.Semaphore(_MATERIALIZE_CONCURRENCY)
 
-    async def fetch_one(skill_id: str, version: int, name: str) -> bool:
-        """True if the version was written, False if fetch failed or body empty."""
+    async def fetch_one(skill_id: str, version: int, name: str) -> None:
         async with semaphore:
             try:
                 item = await client.get_skill(skill_id, version=version)
             except RegistrySkillsError as exc:
                 logger.warning("Failed to fetch skill '%s': %s", name, exc.reason)
-                return False
-        return await _store.materialize(item, name) is not None
+                counts.missed(exc)
+                return
+        try:
+            stored = await _store.materialize(item, name)
+        except OSError:
+            logger.warning("Failed to store skill '%s'", name, exc_info=True)
+            counts.failed += 1
+            return
+        if stored is None:
+            counts.skipped += 1
+            return
+        counts.written += 1
 
-    results = await asyncio.gather(*(fetch_one(*target) for target in pending))
-    written = sum(results)
-    return written, len(results) - written
+    await asyncio.gather(*(fetch_one(*target) for target in pending))
 
 
-async def has_registry_endpoint(config: VibeConfigSchema) -> bool:
-    """Is a Mistral provider configured with a usable API key?"""
-    return await asyncio.to_thread(_resolve_endpoint, config) is not None
+async def has_registry_endpoint(
+    config: VibeConfigSchema, *, credentials: PlatformCredentialFactory | None = None
+) -> bool:
+    """Is a Mistral provider configured with a usable credential?"""
+    return await asyncio.to_thread(_resolve_endpoint, config, credentials) is not None
 
 
-async def list_catalog(config: VibeConfigSchema) -> list[CatalogItem]:
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+async def list_catalog(
+    config: VibeConfigSchema, *, credentials: PlatformCredentialFactory | None = None
+) -> list[CatalogItem]:
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return []
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
         items = await client.list_catalog(page_size=_PAGE_SIZE)
     catalog: list[CatalogItem] = []
     for item in items:
@@ -482,26 +417,36 @@ async def list_catalog(config: VibeConfigSchema) -> list[CatalogItem]:
 
 
 async def get_skill_body(
-    config: VibeConfigSchema, skill_id: str, *, version: int | None = None
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    version: int | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> str:
     """Fetch a single skill's SKILL.md body (for preview/details). No caching."""
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         raise RegistrySkillsError("no authenticated Mistral endpoint available")
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
         item = await client.get_skill(skill_id, version=version)
     return item.skill.skill_body
 
 
 async def get_skill_details(
-    config: VibeConfigSchema, skill_id: str, *, version: int | None = None
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    version: int | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> SkillDetails | None:
     """Fetch a skill version's full registry object (metadata + body)."""
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return None
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             item = await client.get_skill(skill_id, version=version)
     except RegistrySkillsError as exc:
         logger.warning("Failed to load skill details: %s", exc.reason)
@@ -532,48 +477,148 @@ async def import_skill(
     alias: str | None = None,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry:
     """Materialize a skill and pin it.
 
     The pin is, in priority order: an explicit ``version`` (frozen), a custom
     ``alias`` (moving), or the reserved ``latest`` alias by default. Aliases are
     resolved server-side. ``roots`` selects the project scope's manifest (session
-    project roots); defaults to the global harness singleton.
+    project roots); defaults to the global harness singleton. A scope pins one
+    skill per name, so another shared skill pinned there under the same name is
+    refused rather than replaced.
     """
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
-    if endpoint is None:
-        raise RegistrySkillsError("no authenticated Mistral endpoint available")
-    pin: int | str
-    if version is not None:
-        pin = version
-    elif alias is not None:
-        pin = alias
-    else:
-        pin = REGISTRY_LATEST_ALIAS
-
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
-        if isinstance(pin, int):
-            item = await client.get_skill(skill_id, version=pin)
-        else:
-            item = await client.get_skill(skill_id, alias=pin)
-
-    name = item.resolved_name
-    if name is None:
-        raise RegistrySkillsError(f"skill {skill_id} has no usable name")
-    if await _store.materialize(item, name) is None:
-        raise RegistrySkillsError(f"skill {skill_id} has an empty body")
-
-    if isinstance(pin, str) and pin != REGISTRY_LATEST_ALIAS:
-        await asyncio.to_thread(_resolved.record, {(skill_id, pin): item.version})
-
+    pin = _pin_for(version, alias)
+    item, name = await _fetch(config, skill_id, pin, credentials)
     path = _manifest_path_for_scope(scope, roots)
-    manifest = await _manifest.load(path)
+    manifest = await _writable_manifest(path)
+    if any(
+        pinned.name == name and pinned.skill_id != skill_id
+        for pinned in manifest.skills
+    ):
+        raise RegistrySkillsError(
+            f"another shared skill named {name!r} is pinned in {scope.value}; "
+            "remove it first"
+        )
+    await _store_fetched(item, skill_id, name, pin)
     entry = ManifestEntry(
         name=name, skill_id=skill_id, version=pin, description=item.resolved_description
     )
     manifest.upsert(entry)
     await _manifest.save(path, manifest)
+    if scope is SkillScope.PROJECT:
+        await asyncio.to_thread(_known_manifests.remember, [path])
     return entry
+
+
+async def import_session_skill(
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    version: int | None = None,
+    alias: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> ManifestEntry:
+    """Materialize a skill and return its pin, writing no manifest.
+
+    The pin holds the version fetched now, so the session keeps running what it
+    imported; importing again moves it to the alias's current version.
+    """
+    pin = _pin_for(version, alias)
+    item, name = await _fetch(config, skill_id, pin, credentials)
+    await _store_fetched(item, skill_id, name, pin)
+    return ManifestEntry(
+        name=name,
+        skill_id=skill_id,
+        version=item.version,
+        description=item.resolved_description,
+    )
+
+
+async def restore_session_skills(
+    config: VibeConfigSchema,
+    pins: Sequence[ManifestEntry],
+    *,
+    credentials: PlatformCredentialFactory | None = None,
+) -> list[str]:
+    """Fetch again the picked versions a store cleanup took, so a reopened session
+    runs what it picked. Returns the names of those still missing.
+    """
+    targets = [
+        (pin.skill_id, pin.version, pin.name)
+        for pin in pins
+        if isinstance(pin.version, int)
+        and _store.is_safe_skill_id(pin.skill_id)
+        and not await _store.is_materialized(pin.skill_id, pin.version)
+    ]
+    if not targets:
+        return []
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
+    if endpoint is None:
+        logger.warning("Could not restore the session's skills: no Mistral credential")
+        return [name for _, _, name in targets]
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
+        await _materialize_missing(client, targets, _Counts())
+    return [
+        name
+        for skill_id, version, name in targets
+        if not await _store.is_materialized(skill_id, version)
+    ]
+
+
+def _pin_for(version: int | None, alias: str | None) -> int | str:
+    if version is not None:
+        return version
+    if alias is not None:
+        return alias
+    return REGISTRY_LATEST_ALIAS
+
+
+async def _fetch(
+    config: VibeConfigSchema,
+    skill_id: str,
+    pin: int | str,
+    credentials: PlatformCredentialFactory | None,
+) -> tuple[RegistrySkillItem, str]:
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
+    if endpoint is None:
+        raise RegistrySkillsError("no authenticated Mistral endpoint available")
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
+        if isinstance(pin, int):
+            item = await client.get_skill(skill_id, version=pin)
+        else:
+            item = await client.get_skill(skill_id, alias=pin)
+    name = item.resolved_name
+    if name is None:
+        raise RegistrySkillsError(f"skill {skill_id} has no usable name")
+    return item, name
+
+
+async def _store_fetched(
+    item: RegistrySkillItem, skill_id: str, name: str, pin: int | str
+) -> None:
+    try:
+        stored = await _store.materialize(item, name)
+    except OSError as exc:
+        reason = str(exc) or type(exc).__name__
+        raise RegistrySkillsError(
+            f"could not store skill {skill_id}: {reason}"
+        ) from exc
+    if stored is None:
+        raise RegistrySkillsError(f"skill {skill_id} has an empty body")
+    if isinstance(pin, str) and pin != REGISTRY_LATEST_ALIAS:
+        await asyncio.to_thread(_resolved.record, {(skill_id, pin): item.version})
+
+
+async def _writable_manifest(path: Path) -> SkillManifest:
+    try:
+        return await _manifest.read(path)
+    except ManifestReadError as exc:
+        raise RegistrySkillsError(_unwritable(exc)) from exc
+
+
+def _unwritable(exc: ManifestReadError) -> str:
+    return f"{exc}. Fix or delete the file; it was left unchanged"
 
 
 def _manifest_path_for_scope(
@@ -589,7 +634,7 @@ def _manifest_path_for_scope(
                 "no project skills manifest is available for a project-scoped pin"
             )
         path = project_paths[0]
-        if not _within_project_roots(path, effective_roots):
+        if not resolves_within(path, effective_roots):
             raise RegistrySkillsError(
                 f"refusing to write a project skills manifest outside the "
                 f"project root: {path}"
@@ -608,13 +653,18 @@ def project_scope_available(roots: Sequence[Path] | None = None) -> bool:
 
 
 async def list_skill_versions(
-    config: VibeConfigSchema, skill_id: str
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> list[SkillVersionInfo]:
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return []
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             return await client.list_versions(skill_id)
     except RegistrySkillsError as exc:
         logger.warning("Failed to list skill versions: %s", exc.reason)
@@ -658,6 +708,66 @@ def _find_skill_id(
     return entry.skill_id if entry is not None else None
 
 
+async def _pinned_versions(roots: Sequence[Path] | None = None) -> set[tuple[str, int]]:
+    pinned = await asyncio.to_thread(_resolved.recorded_versions)
+    known = await asyncio.to_thread(_known_manifests.remembered)
+    for path in dict.fromkeys([*await _manifest_paths(roots), *known]):
+        for entry in (await _manifest.load(path)).skills:
+            if _unsafe_pin(entry):
+                continue
+            version = await asyncio.to_thread(_resolved_version, entry)
+            if version is not None:
+                pinned.add((entry.skill_id, version))
+    return pinned
+
+
+async def cleanup_candidates(
+    roots: Sequence[Path] | None = None,
+) -> dict[str, list[int]]:
+    """Claims the day's cleanup first, so within a day of the last one it lists nothing."""
+    if not await asyncio.to_thread(_eviction.claim_cleanup):
+        return {}
+    pinned = await _pinned_versions(roots)
+    return await asyncio.to_thread(_eviction.unused_versions, pinned)
+
+
+async def still_served(
+    config: VibeConfigSchema,
+    unused: Mapping[str, Sequence[int]],
+    *,
+    credentials: PlatformCredentialFactory | None = None,
+) -> dict[str, list[int]]:
+    """None without credentials, or when the registry cannot say."""
+    latest = await _catalog_latest(config, credentials)
+    return {
+        skill_id: [version for version in versions if version <= latest[skill_id]]
+        for skill_id, versions in unused.items()
+        if skill_id in latest
+    }
+
+
+async def _catalog_latest(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None
+) -> dict[str, int]:
+    """The registry serves every version up to the latest a listing shows, as a version
+    is never changed or deleted; none without credentials, or when the listing fails.
+    """
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
+    if endpoint is None:
+        return {}
+    try:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
+            items = await client.list_catalog(page_size=_PAGE_SIZE)
+    except RegistrySkillsError as exc:
+        logger.debug("Keeping every stored version: %s", exc.reason)
+        return {}
+    return {
+        item.skill_id: item.metadata.latest_version or item.version for item in items
+    }
+
+
 def _resolved_version(entry: ManifestEntry) -> int | None:
     """The concrete on-disk version this pin currently maps to, if materialized."""
     if isinstance(entry.version, int):
@@ -699,32 +809,13 @@ def _local_skill_dir(
         else:
             return None
         target = base / "skills" / name
-        if not _within_project_roots(target, roots):
+        if not resolves_within(target, roots):
             logger.warning(
                 "Refusing project skill write outside the project root: %s", target
             )
             return None
         return target
     return GLOBAL_SKILLS_DIR.path / name
-
-
-def _within_project_roots(base: Path, roots: Sequence[Path]) -> bool:
-    """Is ``base`` inside a project root once symlinks are resolved?
-
-    Project manifest discovery follows symlinks, so a repository-controlled
-    ``.vibe`` link could otherwise redirect writes outside the workspace.
-    """
-    try:
-        resolved = base.resolve()
-    except OSError:
-        return False
-    for root in roots:
-        try:
-            if resolved.is_relative_to(root.resolve()):
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def convert_skill_to_local(
@@ -751,7 +842,7 @@ def convert_skill_to_local(
         return None
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        _store.export_local_sync(entry.skill_id, version, target)
+        _store.export_local_sync(entry.skill_id, version, target, entry.name)
     except OSError:
         shutil.rmtree(target, ignore_errors=True)
         raise
@@ -765,13 +856,20 @@ async def set_skill_version(
     version: int,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry | None:
     """Freeze an imported skill at a specific version, in the given scope."""
     skill_id = _find_skill_id(name, scope, roots)
     if skill_id is None:
         return None
     return await import_skill(
-        config, skill_id, version=version, scope=scope, roots=roots
+        config,
+        skill_id,
+        version=version,
+        scope=scope,
+        roots=roots,
+        credentials=credentials,
     )
 
 
@@ -780,12 +878,16 @@ async def set_skill_latest(
     name: str,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry | None:
     """Switch a scope's pin to the 'latest' alias (resolved server-side)."""
     skill_id = _find_skill_id(name, scope, roots)
     if skill_id is None:
         return None
-    return await import_skill(config, skill_id, scope=scope, roots=roots)
+    return await import_skill(
+        config, skill_id, scope=scope, roots=roots, credentials=credentials
+    )
 
 
 async def set_skill_alias(
@@ -794,12 +896,16 @@ async def set_skill_alias(
     alias: str,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry | None:
     """Pin a scope to a custom alias (a moving pointer like 'latest')."""
     skill_id = _find_skill_id(name, scope, roots)
     if skill_id is None:
         return None
-    return await import_skill(config, skill_id, alias=alias, scope=scope, roots=roots)
+    return await import_skill(
+        config, skill_id, alias=alias, scope=scope, roots=roots, credentials=credentials
+    )
 
 
 def remove_skill(
@@ -819,13 +925,16 @@ def remove_skill(
         paths = [
             path
             for path in _manifest.project_manifest_paths_sync(effective_roots)
-            if _within_project_roots(path, effective_roots)
+            if resolves_within(path, effective_roots)
         ]
     else:
         paths = [_manifest.global_manifest_path()]
     removed = False
     for path in paths:
-        manifest = _manifest.load_sync(path)
+        try:
+            manifest = _manifest.read_sync(path)
+        except ManifestReadError as exc:
+            raise RegistrySkillsError(_unwritable(exc)) from exc
         if manifest.remove(name):
             _manifest.save_sync(path, manifest)
             removed = True
@@ -833,14 +942,17 @@ def remove_skill(
 
 
 async def check_updates(
-    config: VibeConfigSchema, roots: Sequence[Path] | None = None
+    config: VibeConfigSchema,
+    roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> list[SkillUpdate]:
     """Frozen pins whose registry latest is newer than the pinned version.
 
     Tracking pins are excluded: they advance to latest on every refresh, so a
     newer version is never 'available' for them, it is simply adopted.
     """
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return []
     manifests = await _load_update_manifests(roots)
@@ -853,7 +965,9 @@ async def check_updates(
     if not frozen_ids:
         return []
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             latest_by_id = await _resolve_latest_versions(client, frozen_ids)
     except RegistrySkillsError as exc:
         logger.warning("Failed to check registry skill updates: %s", exc.reason)
@@ -892,14 +1006,17 @@ async def _load_update_manifests(
 
 
 async def check_new_versions(
-    config: VibeConfigSchema, roots: Sequence[Path] | None = None
+    config: VibeConfigSchema,
+    roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> list[SkillUpdate]:
     """Like ``check_updates`` but only versions that are new *since last session*.
 
     Used by the session-start prompt: a frozen pin lagging behind is surfaced
     once per registry release, then recorded so it does not nag every launch.
     """
-    updates = await check_updates(config, roots)
+    updates = await check_updates(config, roots, credentials=credentials)
     if not updates:
         return []
     ids = await _ids_by_name(roots)

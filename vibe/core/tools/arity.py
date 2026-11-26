@@ -142,17 +142,23 @@ ARITY: dict[str, int] = {
 }
 
 
-def build_session_pattern(tokens: list[str]) -> str:
-    """Build a session-level permission pattern from command tokens.
+def known_session_pattern_arity(tokens: list[str]) -> int | None:
+    """How many leading tokens name the command, ``None`` if it is not modelled.
 
-    Uses arity rules to find the meaningful command prefix, then appends " *"
-    to allow matching any arguments. Falls back to first token.
+    ``None`` is not ``1``: ``build_session_pattern`` guesses a boundary of 1 for
+    an unmodelled command, which puts a wrapper's payload -- the program in
+    ``sudo $CMD`` -- past the guess and so apparently wildcarded away. Callers
+    judging whether an unreadable token is safe need the real boundary or none.
     """
+    for length in range(len(tokens), 0, -1):
+        arity = ARITY.get(" ".join(tokens[:length]))
+        if arity is not None:
+            return arity
+    return None
+
+
+def build_session_pattern(tokens: list[str]) -> str:
     if not tokens:
         return ""
-    for length in range(len(tokens), 0, -1):
-        prefix = " ".join(tokens[:length])
-        arity = ARITY.get(prefix)
-        if arity is not None:
-            return " ".join(tokens[:arity]) + " *"
-    return tokens[0] + " *"
+    arity = known_session_pattern_arity(tokens)
+    return " ".join(tokens[: 1 if arity is None else arity]) + " *"

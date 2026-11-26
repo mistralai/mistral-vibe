@@ -13,13 +13,13 @@ import pytest
 
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
-    ansi_tolerant_pattern,
+    drain_child_output,
     poll_until,
     send_ctrl_c_until_quit_confirmation,
     strip_ansi,
-    wait_for_main_screen,
     wait_for_rendered_text,
     wait_for_request_count_while_draining_child_output,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import StreamingMockServer
 from vibe.utils.io import read_safe
@@ -50,22 +50,29 @@ def _usage_by_run_factory(
 def _saved_session_has_usage(
     vibe_home: Path, expected_prompt_tokens: int, expected_completion_tokens: int
 ) -> bool:
-    session_log_dir = vibe_home / "logs" / "session"
-    if not session_log_dir.exists():
+    """Read the cumulative session usage from the unified session store.
+
+    The unified runtime persists each generation's projection state, whose
+    ``snapshot.session.tokenUsage`` carries the session's cumulative input
+    and output tokens. An early generation may carry ``null`` usage — this
+    reader is polled while the session runs, so that state must read as
+    "not yet" rather than crash.
+    """
+    session_root = vibe_home / "logs" / "session" / "unified"
+    if not session_root.exists():
         return False
 
-    for metadata_path in session_log_dir.glob("session_*/meta.json"):
+    for projection_path in session_root.glob("*/generations/*/projection-state.json"):
         try:
-            metadata = json.loads(read_safe(metadata_path).text)
+            state = json.loads(read_safe(projection_path).text)
         except (OSError, json.JSONDecodeError):
             continue
 
-        stats = metadata.get("stats", {})
-        if not isinstance(stats, dict):
-            continue
+        usage = (state.get("snapshot") or {}).get("session", {}).get("tokenUsage")
         if (
-            stats.get("session_prompt_tokens") == expected_prompt_tokens
-            and stats.get("session_completion_tokens") == expected_completion_tokens
+            isinstance(usage, dict)
+            and usage.get("inputTokens") == expected_prompt_tokens
+            and usage.get("outputTokens") == expected_completion_tokens
         ):
             return True
 
@@ -102,17 +109,14 @@ def _finish_turn(
         expected_count=expected_request_count,
         timeout=10,
     )
-    child.expect(ansi_tolerant_pattern(expected_reply), timeout=10)
+    wait_for_rendered_text(child, captured, expected_reply, timeout=10)
 
     start = time.monotonic()
     last_change = start
     last_size = len(captured.getvalue())
 
     while time.monotonic() - start < 5:
-        try:
-            child.expect(r"\S", timeout=0.05)
-        except pexpect.TIMEOUT:
-            pass
+        drain_child_output(child, timeout=0.05)
 
         current_size = len(captured.getvalue())
         if current_size != last_size:
@@ -130,6 +134,7 @@ def _finish_turn(
 
 
 @pytest.mark.timeout(30)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_usage_by_run_factory, id="fresh-usage-after-resume")],
@@ -142,7 +147,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("First run")
         child.send("\r")
 
@@ -172,7 +177,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
         resumed_child,
         resumed_captured,
     ):
-        wait_for_main_screen(resumed_child, timeout=15)
+        wait_for_session_ready(resumed_child, resumed_captured, timeout=15)
         wait_for_rendered_text(
             resumed_child, resumed_captured, "Resumed session", timeout=15
         )

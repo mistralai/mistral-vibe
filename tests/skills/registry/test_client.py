@@ -4,9 +4,19 @@ import httpx
 import pytest
 import respx
 
+from vibe.core.platform_auth import (
+    ApiKeyPlatformCredentialProvider,
+    PlatformCredentialRequired,
+    PlatformCredentialResult,
+    PlatformCredentialTarget,
+)
 from vibe.core.skills.registry._client import RegistrySkillsClient, RegistrySkillsError
 
 _URL = "https://api.mistral.ai/v1/skills"
+
+
+def _key() -> ApiKeyPlatformCredentialProvider:
+    return ApiKeyPlatformCredentialProvider.from_api_key("key")
 
 
 def _page(skill_id: str, *, next_token: str = "") -> dict[str, object]:
@@ -27,7 +37,7 @@ async def test_list_catalog_paginates() -> None:
         httpx.Response(200, json=_page("b")),
     ]
 
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         items = await client.list_catalog(page_size=50)
 
     assert [item.skill_id for item in items] == ["a", "b"]
@@ -41,7 +51,7 @@ async def test_list_catalog_paginates() -> None:
 @respx.mock
 async def test_list_catalog_single_page() -> None:
     respx.get(_URL).mock(return_value=httpx.Response(200, json=_page("only")))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         items = await client.list_catalog(page_size=100)
     assert [item.skill_id for item in items] == ["only"]
 
@@ -50,7 +60,7 @@ async def test_list_catalog_single_page() -> None:
 @respx.mock
 async def test_unauthorized_raises() -> None:
     respx.get(_URL).mock(return_value=httpx.Response(401, json={"message": "no"}))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="unauthorized"):
             await client.list_catalog(page_size=10)
 
@@ -59,7 +69,7 @@ async def test_unauthorized_raises() -> None:
 @respx.mock
 async def test_server_error_raises() -> None:
     respx.get(_URL).mock(return_value=httpx.Response(503))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="unexpected status"):
             await client.list_catalog(page_size=10)
 
@@ -68,7 +78,7 @@ async def test_server_error_raises() -> None:
 @respx.mock
 async def test_non_json_raises() -> None:
     respx.get(_URL).mock(return_value=httpx.Response(200, text="not json"))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="valid JSON"):
             await client.list_catalog(page_size=10)
 
@@ -77,7 +87,7 @@ async def test_non_json_raises() -> None:
 @respx.mock
 async def test_network_error_raises() -> None:
     respx.get(_URL).mock(side_effect=httpx.ConnectError("boom"))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="request failed"):
             await client.list_catalog(page_size=10)
 
@@ -86,7 +96,7 @@ async def test_network_error_raises() -> None:
 @respx.mock
 async def test_list_catalog_sends_fields_mask() -> None:
     route = respx.get(_URL).mock(return_value=httpx.Response(200, json=_page("a")))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         await client.list_catalog(page_size=10)
     params = route.calls[0].request.url.params
     assert params["pageSize"] == "10"
@@ -112,7 +122,7 @@ async def test_list_versions_parses_aliases_and_sorts_desc() -> None:
             },
         )
     )
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         versions = await client.list_versions("sid")
 
     assert [v.version for v in versions] == [3, 2, 1]
@@ -127,7 +137,7 @@ async def test_list_versions_invalid_payload_raises() -> None:
     respx.get(f"{_URL}/sid/versions").mock(
         return_value=httpx.Response(200, json={"items": [{"noVersion": 1}]})
     )
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="invalid versions response"):
             await client.list_versions("sid")
 
@@ -145,7 +155,7 @@ async def test_get_skill_by_id() -> None:
             },
         )
     )
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         item = await client.get_skill("sid")
     assert item.skill_id == "sid"
     assert item.version == 3
@@ -155,7 +165,7 @@ async def test_get_skill_by_id() -> None:
 @respx.mock
 async def test_get_skill_not_found_raises() -> None:
     respx.get(f"{_URL}/missing").mock(return_value=httpx.Response(404))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="not found"):
             await client.get_skill("missing")
 
@@ -168,7 +178,7 @@ async def test_get_skill_invalid_payload_raises() -> None:
     respx.get(f"{_URL}/sid").mock(
         return_value=httpx.Response(200, json="not-an-object")
     )
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="invalid skill response"):
             await client.get_skill("sid")
 
@@ -177,7 +187,7 @@ async def test_get_skill_invalid_payload_raises() -> None:
 @respx.mock
 async def test_list_catalog_invalid_payload_raises() -> None:
     respx.get(_URL).mock(return_value=httpx.Response(200, json="not-an-object"))
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="invalid catalog response"):
             await client.list_catalog(page_size=10)
 
@@ -190,6 +200,31 @@ async def test_list_catalog_raises_when_page_cap_exceeded() -> None:
     respx.get(_URL).mock(
         return_value=httpx.Response(200, json=_page("a", next_token="more"))
     )
-    async with RegistrySkillsClient("https://api.mistral.ai/v1", "key") as client:
+    async with RegistrySkillsClient("https://api.mistral.ai/v1", _key()) as client:
         with pytest.raises(RegistrySkillsError, match="maximum number of pages"):
             await client.list_catalog(page_size=10)
+
+
+class _SignedOut:
+    async def resolve(
+        self, target: PlatformCredentialTarget
+    ) -> PlatformCredentialResult:
+        del target
+        return PlatformCredentialRequired(reason="missing")
+
+    async def reject(
+        self, *_args: object, **_kwargs: object
+    ) -> PlatformCredentialResult:
+        return PlatformCredentialRequired(reason="missing")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_signed_out_credential_raises_without_a_request() -> None:
+    route = respx.get(_URL).mock(return_value=httpx.Response(200, json=_page("a")))
+    async with RegistrySkillsClient(
+        "https://api.mistral.ai/v1", _SignedOut()
+    ) as client:
+        with pytest.raises(RegistrySkillsError, match="no platform credential"):
+            await client.list_catalog(page_size=10)
+    assert not route.called

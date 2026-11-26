@@ -27,12 +27,6 @@ class NoAudioInputDeviceError(Exception):
     pass
 
 
-class IncompatibleSampleRateError(Exception):
-    def __init__(self, message: str, fallback_sample_rate: int) -> None:
-        super().__init__(message)
-        self.fallback_sample_rate = fallback_sample_rate
-
-
 class AudioRecorderPort(Protocol):
     @property
     def is_recording(self) -> bool: ...
@@ -60,4 +54,4 @@ class AudioRecorderPort(Protocol):
 
     def cancel(self) -> None: ...
 
-    def audio_stream(self) -> AsyncGenerator[bytes, None]: ...
+    def audio_stream(self) -> AsyncGenerator[bytes]: ...

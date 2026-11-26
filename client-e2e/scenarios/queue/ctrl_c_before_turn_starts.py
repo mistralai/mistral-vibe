@@ -1,0 +1,11 @@
+"""Before the turn starts, the Ctrl+C hint follows the prompts shown as queued."""
+
+from __future__ import annotations
+
+from e2e.app_server.scenario import Timeline
+
+# Step 1 offers Ctrl+C for `second`; once it is removed, the unstarted first prompt is interruptible.
+timeline: Timeline = ["first\r", "second\r", "\x03"]
+
+screen_contains = ("Esc/Ctrl+C to interrupt",)
+screen_excludes = ("> second", "cancel last queued message")

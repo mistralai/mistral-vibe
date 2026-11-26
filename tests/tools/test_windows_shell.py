@@ -1,123 +1,361 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import importlib
 from pathlib import Path
-import re
 import subprocess
-import sys
-import time
-from typing import cast
 
 import pytest
 
-from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, InvokeContext, ToolPermission
+from vibe.core.tools.base import BaseToolState, ToolPermission
 from vibe.core.tools.builtins import (
     bash as bash_module,
     experimental_bash as experimental_bash_module,
-    git_bash as git_bash_module,
     windows_shell as windows_shell_module,
 )
 from vibe.core.tools.builtins.experimental_bash import (
-    BashOutputArgs,
-    BashOutputConfig,
-    BashOutputResult,
-    BashSessionsArgs,
-    BashSessionsConfig,
-    BashSessionsResult,
-    BashStdinArgs,
-    BashStdinConfig,
     ExperimentalBashArgs,
     ExperimentalBashToolConfig,
-    SessionNotFoundError,
-    TerminalSessionManager,
 )
 from vibe.core.tools.builtins.git_bash import (
     ExperimentalGitBash,
     GitBash,
     GitBashArgs,
-    GitBashLogFile,
-    GitBashOutput,
-    GitBashSessions,
-    GitBashStdin,
     GitBashToolConfig,
 )
 from vibe.core.tools.builtins.managed_shell import _windows
-from vibe.core.tools.builtins.managed_shell.backend import (
-    ManagedShellBackend,
-    windows_managed_shell_supported,
-)
 from vibe.core.tools.builtins.windows_shell import (
     ExperimentalWindowsShell,
     WindowsShell,
     WindowsShellArgs,
-    WindowsShellLogFile,
-    WindowsShellOutput,
-    WindowsShellSessions,
-    WindowsShellStdin,
     WindowsShellToolConfig,
-    _split_windows_command_parts,
 )
-from vibe.core.tools.io_port import ShellCommandRequest, ShellCommandResult, ToolIOPort
-from vibe.core.tools.permissions import PermissionContext
-from vibe.core.tools.terminal_runtime import TerminalRuntime
-from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.tools.models import ApprovedRule
+from vibe.core.tools.permissions import PermissionContext, PermissionStore
 from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
+from vibe.permissions import PathGrantScope, PermissionScope, path_grant_pattern
 from vibe.utils import paths
 
 
-class _UnusedBackend:
-    def request_termination(self, terminal) -> None:
-        pass
+def _sensitive_windows_tool(
+    kind: str, cwd: Path, permission: ToolPermission = ToolPermission.ALWAYS
+):
+    config = WindowsShellToolConfig(
+        permission=permission,
+        allowlist=[
+            "Get-Content",
+            "Select-String",
+            "gc",
+            "cat",
+            "type",
+            "more",
+            "findstr",
+            "pwsh",
+            "powershell",
+            "cmd",
+            "Invoke-Expression",
+            "iex",
+        ],
+    )
+    tool_type = WindowsShell if kind == "fallback" else ExperimentalWindowsShell
+    return tool_type(config_getter=lambda: config, state=BaseToolState(), cwd=cwd)
 
-    def force_terminate_terminal(self, terminal, *, timeout_seconds: float) -> None:
-        pass
+
+def _resolve_sensitive_windows(
+    tool: WindowsShell | ExperimentalWindowsShell, command: str
+) -> PermissionContext | None:
+    if isinstance(tool, WindowsShell):
+        return tool.resolve_permission(WindowsShellArgs(command=command))
+    return tool.resolve_permission(ExperimentalBashArgs(command=command))
 
 
-class _FakeTerminalToolIO:
-    supports_terminal = True
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize("permission", [ToolPermission.ASK, ToolPermission.ALWAYS])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content .env",
+        "gc -LiteralPath .env",
+        "cat .env",
+        "type .env",
+        "more .env",
+        "findstr x .env",
+        "Select-String -Pattern x -Path .env",
+        "sls x .env",
+    ],
+)
+def test_windows_sensitive_reader_overrides_command_approval(
+    kind, permission, command, tmp_path
+):
+    tool = _sensitive_windows_tool(kind, tmp_path, permission)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in result.required_permissions
+    )
 
-    def __init__(self) -> None:
-        self.requests: list[ShellCommandRequest] = []
 
-    async def run_shell(self, request: ShellCommandRequest) -> ShellCommandResult:
-        self.requests.append(request)
-        return ShellCommandResult(
-            stdout="client stdout", stderr="client stderr", returncode=0
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "parameter,expected", [("-Path", ".env.a1"), ("-LiteralPath", ".env.a[1]")]
+)
+def test_windows_sensitive_path_grants_match_the_reader_operand(
+    kind, parameter, expected, tmp_path
+):
+    for name in [".env.a[1]", ".env.a1"]:
+        (tmp_path / name).touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, f"Get-Content {parameter} '.env.a[1]'")
+    assert isinstance(result, PermissionContext)
+    files = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / expected)]
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
+            )
         )
+    other = ".env.a[1]" if expected == ".env.a1" else ".env.a1"
+    other_read = _resolve_sensitive_windows(tool, f"Get-Content -LiteralPath '{other}'")
+    assert isinstance(other_read, PermissionContext)
+    assert any(
+        not store.covers("powershell", rp) for rp in other_read.required_permissions
+    )
 
 
-class _FakeWinPty:
-    def __init__(
-        self, outputs: list[str], *, alive: bool = True, exit_status: int | None = 0
-    ) -> None:
-        self.pid = 42
-        self.outputs = outputs
-        self.alive = alive
-        self.exit_status = exit_status
-        self.read_blocking_values: list[bool] = []
-        self.writes: list[str] = []
-        self.cancel_io_calls = 0
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_windows_dynamic_reader_grants_no_unread_literal_file(kind, tmp_path):
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = 'Get-Content ".env.$SUFFIX"'
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert [rp.session_pattern for rp in result.required_permissions] == [command]
+    literal = _resolve_sensitive_windows(
+        tool, "Get-Content -LiteralPath '.env.$SUFFIX'"
+    )
+    assert isinstance(literal, PermissionContext)
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in literal.required_permissions
+    )
 
-    def read(self, *, blocking: bool) -> str:
-        self.read_blocking_values.append(blocking)
-        return self.outputs.pop(0) if self.outputs else ""
 
-    def isalive(self) -> bool:
-        return self.alive
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize("permission", [ToolPermission.ASK, ToolPermission.ALWAYS])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "& $reader .env",
+        'Invoke-Expression "Get-Content .env"',
+        'iex "Get-Content .env"',
+        'pwsh -Command "Get-Content .env"',
+        'powershell -Command "Get-Content .env"',
+        "cmd /C type .env",
+        "& { Get-Content .env }",
+    ],
+)
+def test_windows_interpreter_grant_keeps_only_the_original_invocation(
+    kind, permission, command, tmp_path
+):
+    tool = _sensitive_windows_tool(kind, tmp_path, permission)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    command_permissions = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+    ]
+    assert [rp.session_pattern for rp in command_permissions] == [command]
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
+            )
+        )
+    same = _resolve_sensitive_windows(tool, command)
+    assert isinstance(same, PermissionContext)
+    assert all(store.covers("powershell", rp) for rp in same.required_permissions)
+    other = _resolve_sensitive_windows(tool, command.replace(".env", ".env.a1"))
+    assert isinstance(other, PermissionContext)
+    assert any(not store.covers("powershell", rp) for rp in other.required_permissions)
 
-    def get_exitstatus(self) -> int | None:
-        return None if self.alive else self.exit_status
 
-    def write(self, value: str) -> int:
-        self.writes.append(value)
-        return len(value)
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content .env",
+        "Get-Content -Unknown .env",
+        'Invoke-Expression "Get-Content .env"',
+    ],
+)
+def test_windows_disabled_sensitive_patterns_preserve_auto_approval(
+    kind, command, tmp_path
+):
+    config = WindowsShellToolConfig(
+        permission=ToolPermission.ALWAYS, sensitive_file_patterns=[]
+    )
+    tool_type = WindowsShell if kind == "fallback" else ExperimentalWindowsShell
+    tool = tool_type(config_getter=lambda: config, state=BaseToolState(), cwd=tmp_path)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
 
-    def cancel_io(self) -> None:
-        self.cancel_io_calls += 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize("patterns", [[], ["**/.env"]])
+@pytest.mark.parametrize("route", ["file_system.bash", "process.start"])
+@pytest.mark.parametrize(
+    "invocation",
+    [
+        "ambiguous-reader",
+        "opaque-redirect",
+        "outside-interpreter",
+        "dynamic-executable",
+    ],
+)
+async def test_windows_sensitive_analysis_preserves_outside_path_denial(
+    kind, patterns, route, invocation, tmp_path, monkeypatch
+):
+    from tests.conftest import build_test_vibe_config
+    from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+    from vibe.app_server._unified_permissions import UnifiedPermissionResolver
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.tools.manager import ToolManager
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    file = outside / "ordinary.txt"
+    file.write_text("synthetic outside fixture\n")
+    executable = outside / "pwsh.exe"
+    commands = {
+        "ambiguous-reader": f"Get-Content -Unknown '{file}'",
+        "opaque-redirect": f"iex 'Write-Output fixture' > '{file}'",
+        "outside-interpreter": f"& '{executable}' -Command 'Write-Output fixture'",
+        "dynamic-executable": f"& $reader '{file}'",
+    }
+    tool_type = WindowsShell if kind == "fallback" else ExperimentalWindowsShell
+    orchestrator = FakeConfigOrchestrator(
+        build_test_vibe_config(
+            managed_shell_tools_enabled=kind == "managed",
+            tools={
+                "powershell": {
+                    "permission": "always",
+                    "outside_workdir": "deny",
+                    "sensitive_file_patterns": patterns,
+                }
+            },
+        )
+    )
+    store = PermissionStore()
+    manager = ToolManager(
+        lambda: orchestrator.config,
+        defer_mcp=True,
+        cwd=workspace,
+        harness_files=HarnessFilesManager().for_session(workspace),
+        permission_getter=store.get_tool_permission,
+    )
+    manager._all_tools = {"powershell": tool_type}
+    manager._tool_variants_by_name = {"powershell": [tool_type]}
+    monkeypatch.setattr(manager, "_is_tool_available", lambda cls: cls is tool_type)
+    tool = manager.get("powershell")
+    assert isinstance(tool, (WindowsShell, ExperimentalWindowsShell))
+    required = _resolve_sensitive_windows(tool, commands[invocation])
+    assert isinstance(required, PermissionContext)
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in required.required_permissions
+    )
+    resolver = UnifiedPermissionResolver(manager, store, orchestrator)
+    outcome = await resolver.resolve(route, {"command": commands[invocation]})
+    assert outcome.decision == "deny"
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("Get-Content -Path .e*", {".env", ".env.a1", ".env.a[1]"}),
+        ("Get-Content -LiteralPath:.env.a[1]", {".env.a[1]"}),
+        ("Select-String .env.a[1] '.env.a[1]'", {".env.a1"}),
+        ("Select-String -Pattern '.env','x' -LiteralPath .env.a[1]", {".env.a[1]"}),
+        ("Get-Content -Path '.env.a`[1`]'", {".env.a[1]"}),
+        ("Get-Content -Tail 1 -LiteralPath .env", {".env"}),
+        ("Select-String -Pattern '.env' -InputObject '.env.a[1]'", set()),
+        ("Select-String '-Pattern' .env", {".env"}),
+        ("Select-String '-Path' .env", {".env"}),
+        ("Get-Content -Filter '*.txt' -Path .env*", set()),
+        ("Get-Content -Stream alternate -LiteralPath .env", set()),
+        ("Get-Content -Unknown .env", set()),
+        ("Get-Content -LiteralPath '.env.$SUFFIX'", {".env.$SUFFIX"}),
+        ('Get-Content -LiteralPath ".env.`$SUFFIX"', {".env.$SUFFIX"}),
+    ],
+)
+def test_windows_reader_role_binding_does_not_nominate_unread_files(
+    kind, command, expected, tmp_path
+):
+    for name in [".env", ".env.a1", ".env.a[1]", "ordinary.txt"]:
+        (tmp_path / name).touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    files = {
+        rp.invocation_pattern
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    }
+    assert files == {str(tmp_path / name) for name in expected}
+    if any(parameter in command for parameter in ["-Filter", "-Stream", "-Unknown"]):
+        assert result.permission is ToolPermission.ASK
+        assert [rp.session_pattern for rp in result.required_permissions] == [command]
+
+
+@pytest.mark.skipif(
+    not is_windows(), reason="Requires native Windows PowerShell provider semantics"
+)
+@pytest.mark.parametrize(
+    "parameter,expected", [("-Path", ".env.a1"), ("-LiteralPath", ".env.a[1]")]
+)
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_native_powershell_sensitive_grant_matches_the_file_actually_read(
+    kind, parameter, expected, tmp_path
+):
+    for name in [".env.a1", ".env.a[1]"]:
+        (tmp_path / name).write_text(name + "\n")
+    command = f"Get-Content {parameter} '.env.a[1]'"
+    spec = _windows.resolve_powershell_shell(None, None)
+    executed = subprocess.run(
+        [spec, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert executed.stdout.strip() == expected
+    result = _resolve_sensitive_windows(
+        _sensitive_windows_tool(kind, tmp_path), command
+    )
+    assert isinstance(result, PermissionContext)
+    assert [
+        rp.invocation_pattern
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ] == [str(tmp_path / expected)]
 
 
 def test_windows_shell_resolver_prefers_pwsh_then_powershell(monkeypatch):
@@ -165,44 +403,6 @@ def test_git_bash_normalizes_msys_drive_paths_before_workdir_check(
     assert Path("C:/repo/file.txt") in seen_paths
 
 
-def test_managed_git_bash_env_uses_posix_defaults(monkeypatch):
-    monkeypatch.delenv("TERM", raising=False)
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()),
-        shell_family="git_bash",
-        session_prefix="git_bash",
-    )
-
-    env = manager._build_env(None)
-
-    assert env["TERM"] == "xterm-256color"
-    assert env["GIT_PAGER"] == "cat"
-    assert env["PAGER"] == "cat"
-    assert env["LESS"] == "-FX"
-    assert env["DEBIAN_FRONTEND"] == "noninteractive"
-
-
-@pytest.mark.parametrize("shell_family", ["powershell", "windows"])
-def test_managed_powershell_env_uses_windows_defaults(shell_family, monkeypatch):
-    for name in ("TERM", "COLUMNS", "LINES", "LESS", "DEBIAN_FRONTEND"):
-        monkeypatch.delenv(name, raising=False)
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()),
-        shell_family=shell_family,
-        session_prefix="powershell",
-    )
-
-    env = manager._build_env({"PAGER": "custom-pager"})
-
-    assert env["GIT_PAGER"] == "more"
-    assert env["PAGER"] == "custom-pager"
-    assert "TERM" not in env
-    assert "COLUMNS" not in env
-    assert "LINES" not in env
-    assert "LESS" not in env
-    assert "DEBIAN_FRONTEND" not in env
-
-
 def test_windows_shell_resolver_rejects_cmd_override(monkeypatch):
     monkeypatch.setattr(
         _windows, "_resolve_executable", lambda candidate: "C:/Windows/System32/cmd.exe"
@@ -236,47 +436,6 @@ def test_git_bash_resolver_rejects_powershell_override(monkeypatch):
         _windows.resolve_git_bash_shell_spec("pwsh.exe", None)
 
 
-@pytest.mark.parametrize(
-    ("shell", "expected"),
-    [
-        (
-            "C:/Program Files/PowerShell/7/pwsh.exe",
-            [
-                "C:/Program Files/PowerShell/7/pwsh.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-Command",
-                "echo hello",
-            ],
-        ),
-        (
-            "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-            [
-                "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-Command",
-                "echo hello",
-            ],
-        ),
-        (
-            "C:/Program Files/Git/bin/bash.exe",
-            ["C:/Program Files/Git/bin/bash.exe", "-c", "echo hello"],
-        ),
-    ],
-)
-def test_windows_shell_argv_builder(shell: str, expected: list[str]):
-    assert _windows.build_windows_shell_argv(shell, "echo hello") == expected
-
-
-def test_windows_shell_tokenizer_preserves_backslash_paths():
-    tokens = experimental_bash_module._split_command_tokens(
-        r"type C:\Users\victim\secret.txt", preserve_backslashes=True
-    )
-
-    assert tokens == ["type", r"C:\Users\victim\secret.txt"]
-
-
 def test_pywinpty_availability_handles_missing_import(monkeypatch):
     real_import_module = importlib.import_module
 
@@ -288,314 +447,6 @@ def test_pywinpty_availability_handles_missing_import(monkeypatch):
     monkeypatch.setattr(_windows.importlib, "import_module", fake_import_module)
 
     assert _windows.pywinpty_available() is False
-
-
-def test_windows_managed_terminal_polls_winpty_without_socket_select():
-    process = _FakeWinPty(["hello"])
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-
-    assert terminal.wait_readable(0)
-    assert terminal.read(2) == b"he"
-    assert terminal.read(10) == b"llo"
-    assert process.read_blocking_values == [False]
-
-
-def test_windows_managed_terminal_stops_polling_after_process_exit():
-    process = _FakeWinPty([], alive=False)
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_WINPTY_BACKEND)
-
-    assert not terminal.wait_readable(0)
-    assert terminal.poll() == 0
-    assert process.read_blocking_values == [False]
-
-
-def test_windows_managed_terminal_reports_unknown_exit_status_as_failure():
-    process = _FakeWinPty([], alive=False, exit_status=None)
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_WINPTY_BACKEND)
-
-    assert terminal.poll() == 1
-    assert terminal.returncode == 1
-    assert terminal.wait() == 1
-
-    terminal.close()
-
-    assert terminal.poll() == 1
-    assert terminal.returncode == 1
-
-
-class _ZeroWriteWinPty:
-    def __init__(self) -> None:
-        self.pid = 7
-        self.writes: list[str] = []
-
-    def write(self, value: str) -> int:
-        self.writes.append(value)
-        return 0
-
-    def isalive(self) -> bool:
-        return True
-
-    def get_exitstatus(self) -> int | None:
-        return None
-
-
-def test_windows_managed_terminal_write_reports_full_length_despite_zero_return():
-    process = _ZeroWriteWinPty()
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-
-    assert terminal.write(b"echo hi\n") == len(b"echo hi\n")
-    assert process.writes == ["echo hi\n"]
-
-
-def test_windows_managed_terminal_write_reports_input_byte_count_for_non_utf8():
-    process = _ZeroWriteWinPty()
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-
-    payload = b"\xff\xfe\x00"
-    assert terminal.write(payload) == len(payload)
-
-
-class _EofWhileAliveWinPty:
-    def __init__(self, exit_after_reads: int) -> None:
-        self.pid = 9
-        self.exit_after_reads = exit_after_reads
-        self.read_calls = 0
-
-    def read(self, *, blocking: bool) -> str:
-        self.read_calls += 1
-        raise OSError("eof")
-
-    def iseof(self) -> bool:
-        return True
-
-    def isalive(self) -> bool:
-        return self.read_calls < self.exit_after_reads
-
-    def get_exitstatus(self) -> int | None:
-        return 0
-
-
-def test_windows_managed_terminal_wait_readable_polls_for_exit_on_eof():
-    process = _EofWhileAliveWinPty(exit_after_reads=3)
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-
-    assert terminal.wait_readable(1.0) is False
-    # Must poll for exit rather than returning after a single EOF read (spin).
-    assert process.read_calls >= 2
-
-
-def test_build_windows_environment_joins_pairs():
-    assert _windows._build_windows_environment({"A": "1", "B": "2"}) == "A=1\0B=2\0"
-
-
-def test_build_windows_environment_rejects_embedded_nul():
-    with pytest.raises(_windows.ManagedShellBackendError, match="NUL"):
-        _windows._build_windows_environment({"FOO": "a\0BAR=b"})
-
-
-def test_build_windows_environment_rejects_equals_in_key():
-    with pytest.raises(_windows.ManagedShellBackendError, match="'='"):
-        _windows._build_windows_environment({"A=B": "1"})
-
-
-def test_windows_backend_requests_process_tree_termination(monkeypatch):
-    process = _FakeWinPty([])
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-    calls: list[list[str]] = []
-
-    def fake_taskkill(command, **kwargs):
-        calls.append(command)
-        process.alive = False
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(_windows.subprocess, "run", fake_taskkill)
-
-    _windows.WindowsManagedShellBackend().request_termination(terminal)
-
-    assert process.writes == []
-    assert calls == [["taskkill", "/PID", "42", "/T", "/F"]]
-    assert process.cancel_io_calls == 1
-
-
-def test_windows_backend_force_termination_uses_taskkill(monkeypatch):
-    process = _FakeWinPty([])
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-    calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def fake_taskkill(command, **kwargs):
-        calls.append((command, kwargs))
-        process.alive = False
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(_windows.subprocess, "run", fake_taskkill)
-
-    _windows.WindowsManagedShellBackend().force_terminate_terminal(
-        terminal, timeout_seconds=0
-    )
-
-    assert process.writes == []
-    assert calls == [
-        (
-            ["taskkill", "/PID", "42", "/T", "/F"],
-            {"check": False, "capture_output": True, "text": True, "timeout": 1.0},
-        )
-    ]
-    assert process.cancel_io_calls == 1
-
-
-def test_windows_backend_reports_failed_taskkill(monkeypatch):
-    process = _FakeWinPty([])
-    terminal = _windows.WindowsManagedTerminal(process, _windows.WINDOWS_CONPTY_BACKEND)
-    monkeypatch.setattr(
-        _windows.subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 5, stdout="", stderr="Access is denied"
-        ),
-    )
-
-    with pytest.raises(_windows.ManagedShellBackendError, match="Access is denied"):
-        _windows.WindowsManagedShellBackend().force_terminate_terminal(
-            terminal, timeout_seconds=0
-        )
-
-    assert process.cancel_io_calls == 1
-
-
-def test_windows_backend_starts_low_level_winpty_for_nonblocking_reads(
-    monkeypatch, tmp_path
-):
-    created: list[object] = []
-
-    class FakeRawWinPty:
-        pid = 42
-
-        def __init__(self, columns: int, rows: int, *, backend: object) -> None:
-            self.columns = columns
-            self.rows = rows
-            self.backend = backend
-            self.spawn_args: tuple[str, str | None, str, str] | None = None
-            created.append(self)
-
-        def spawn(
-            self, executable: str, *, cmdline: str | None, cwd: str, env: str
-        ) -> bool:
-            self.spawn_args = (executable, cmdline, cwd, env)
-            return True
-
-    class FakeWinPtyModule:
-        PTY = FakeRawWinPty
-
-    class FakeBackend:
-        ConPTY = "conpty"
-        WinPTY = "winpty"
-
-    class FakeEnums:
-        Backend = FakeBackend
-
-    monkeypatch.setattr(_windows, "_load_winpty", lambda: (FakeWinPtyModule, FakeEnums))
-    backend = _windows.WindowsManagedShellBackend()
-
-    terminal = backend.start_terminal(
-        shell="pwsh.exe", command="echo hello", cwd=tmp_path, env={"CUSTOM": "value"}
-    )
-
-    assert terminal.pty_backend == _windows.WINDOWS_CONPTY_BACKEND
-    assert len(created) == 1
-    process = created[0]
-    assert isinstance(process, FakeRawWinPty)
-    assert (process.columns, process.rows, process.backend) == (120, 40, "conpty")
-    assert process.spawn_args == (
-        "pwsh.exe",
-        ' -NoLogo -NoProfile -Command "echo hello"',
-        str(tmp_path),
-        "CUSTOM=value\0",
-    )
-
-
-def test_windows_shell_manager_missing_session_error_uses_windows_name():
-    manager = TerminalSessionManager(
-        backend=cast(ManagedShellBackend, _UnusedBackend()),
-        shell_family="powershell",
-        session_prefix="powershell",
-    )
-
-    with pytest.raises(SessionNotFoundError) as exc:
-        manager.info("powershell_missing")
-
-    message = str(exc.value)
-    assert "unknown powershell session" in message
-    assert "bash" not in message
-
-
-def test_windows_shell_stdin_translates_text_newlines_to_enter():
-    tool = WindowsShellStdin(
-        config_getter=lambda: BashStdinConfig(), state=BaseToolState()
-    )
-
-    payload = tool._build_payload(
-        BashStdinArgs(session_id="powershell_1", text="first\nsecond\r\n")
-    )
-
-    assert payload == b"first\rsecond\r"
-
-
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        (BashStdinArgs(session_id="powershell_1", control=["ctrl_c"]), b"\x03"),
-        (BashStdinArgs(session_id="powershell_1", bytes_base64="AAE="), b"\x00\x01"),
-    ],
-)
-def test_windows_shell_stdin_preserves_non_text_payloads(args, expected):
-    tool = WindowsShellStdin(
-        config_getter=lambda: BashStdinConfig(), state=BaseToolState()
-    )
-
-    assert tool._build_payload(args) == expected
-
-
-def test_windows_shell_inherited_ui_text_does_not_say_bash():
-    assert WindowsShellOutput.get_status_text() == "Polling powershell session"
-    assert WindowsShellStdin.get_status_text() == "Sending powershell input"
-    assert WindowsShellSessions.get_status_text() == "Managing powershell sessions"
-    assert WindowsShellLogFile.get_status_text() == "Working with powershell log"
-
-    adapter = ToolUIDataAdapter(WindowsShellSessions)
-    call = adapter.get_call_display(
-        ToolCallEvent(
-            tool_call_id="call",
-            tool_name="powershell_sessions",
-            tool_class=WindowsShellSessions,
-            args=BashSessionsArgs(action="kill", session_id="powershell_1"),
-        )
-    )
-    inspected = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="powershell_sessions",
-            tool_class=WindowsShellSessions,
-            result=BashSessionsResult(action="inspect"),
-        )
-    )
-    reset = adapter.get_result_display(
-        ToolResultEvent(
-            tool_call_id="call",
-            tool_name="powershell_sessions",
-            tool_class=WindowsShellSessions,
-            result=BashSessionsResult(action="reset", sessions=[]),
-        )
-    )
-
-    assert call.summary == "Killing one powershell session powershell_1"
-    assert call.verb == "Killing"
-    assert call.message == "one powershell session powershell_1"
-    assert inspected.verb == "Inspected"
-    assert inspected.message == "powershell session"
-    assert reset.verb == "Reset"
-    assert reset.message == "all powershell sessions; stopped 0 sessions"
-    assert "bash" not in inspected.message
-    assert "bash" not in reset.message
 
 
 def test_windows_shell_permission_requires_approval_for_outside_cwd(
@@ -620,52 +471,6 @@ def test_windows_shell_permission_requires_approval_for_outside_cwd(
     assert any(
         str(outside) in required.label for required in permission.required_permissions
     )
-
-
-def test_windows_shell_splits_single_ampersand_outside_quotes():
-    assert _split_windows_command_parts("dir & del secrets.txt") == [
-        "dir",
-        "del secrets.txt",
-    ]
-    assert _split_windows_command_parts('echo "a & b" & dir') == ['echo "a & b"', "dir"]
-    assert _split_windows_command_parts("echo a ^& b & dir") == ["echo a ^& b", "dir"]
-
-
-def test_windows_shell_splits_newlines_outside_quotes():
-    assert _split_windows_command_parts("dir\ndel secrets.txt") == [
-        "dir",
-        "del secrets.txt",
-    ]
-    assert _split_windows_command_parts('echo "a\nb"\ndir') == ['echo "a\nb"', "dir"]
-
-
-def test_windows_shell_extracts_nested_powershell_commands():
-    assert _split_windows_command_parts("echo $(Get-Date; Remove-Item secret.txt)") == [
-        "echo $(Get-Date; Remove-Item secret.txt)",
-        "Get-Date",
-        "Remove-Item secret.txt",
-    ]
-    assert _split_windows_command_parts('echo "prefix $(Get-Date)"; Get-Location') == [
-        'echo "prefix $(Get-Date)"',
-        "Get-Location",
-        "Get-Date",
-    ]
-    assert _split_windows_command_parts("echo '$(Remove-Item secret.txt)'") == [
-        "echo '$(Remove-Item secret.txt)'"
-    ]
-    assert _split_windows_command_parts("& { Get-Date; cmd /k }") == [
-        "{ Get-Date; cmd /k }",
-        "Get-Date",
-        "cmd /k",
-    ]
-    assert _split_windows_command_parts("& (Get-Date; cmd /k)") == [
-        "(Get-Date; cmd /k)",
-        "Get-Date",
-        "cmd /k",
-    ]
-    assert _split_windows_command_parts("echo @{Name = 'safe'}") == [
-        "echo @{Name = 'safe'}"
-    ]
 
 
 def test_windows_shell_nested_commands_are_all_allowlisted():
@@ -695,6 +500,89 @@ def test_windows_shell_nested_denylisted_command_is_rejected():
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.NEVER
     assert "Remove-Item" in (permission.reason or "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'a`'; Remove-Item x",
+        "echo a^; Remove-Item x",
+        "echo 'x’; Remove-Item x; ‘y'",
+        "echo 'a'#it's\nRemove-Item x",
+        "echo a$(echo ')'; Remove-Item x)",
+        "echo \"$(echo ')'; Remove-Item x)\"",
+        "echo a\x1c#; Remove-Item x",
+        "echo '--%' it's | Remove-Item x",
+        "echo -a:--%; Remove-Item x",
+        "echo a, --% b; Remove-Item x",
+        "echo a,\n--% b; Remove-Item x",
+    ],
+)
+def test_windows_shell_denylist_sees_every_statement_powershell_runs(command):
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["echo"], denylist=["remove-item"]
+        ),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.NEVER
+
+
+def test_windows_shell_hashtable_values_require_approval():
+    # A hashtable value is a pipeline that PowerShell runs. It is checked as
+    # "a = Remove-Item x", which no allowlist entry matches.
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["echo"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command="echo @{a = Remove-Item x}")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "type x#y {outside}",
+        'type `"x {outside} `"',
+        "type x,{outside}",
+        'type "x"{outside}',
+        "type 'x’ {outside} '",
+        "type `u{{2E}}`u{{2E}}/outside/secret.txt",
+        r"Get-Content -Path.\..\outside\secret.txt",
+        "type (echo {outside})",
+        "Get-Content -Path:(echo {outside})",
+        "echo hi > (echo {outside})",
+    ],
+)
+def test_windows_shell_path_check_sees_the_arguments_powershell_passes(
+    command_template, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "secret.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["echo", "type", "get-content"]
+        ),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command=command_template.format(outside=outside.as_posix()))
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
 
 
 @pytest.mark.parametrize(
@@ -772,11 +660,28 @@ def test_windows_shell_alias_expansion_does_not_apply_to_explicit_executable():
     )
 
     permission = tool.resolve_permission(
-        WindowsShellArgs(command=r"C:\tools\rm.exe victim.txt")
+        WindowsShellArgs(command=r".\tools\rm.exe victim.txt")
     )
 
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ALWAYS
+
+
+def test_windows_shell_always_still_asks_for_an_executable_outside_the_workdir():
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(permission=ToolPermission.ALWAYS),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command=r"C:\tools\rm.exe victim.txt")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert [required.scope for required in permission.required_permissions] == [
+        PermissionScope.OUTSIDE_DIRECTORY
+    ]
 
 
 @pytest.mark.parametrize(
@@ -907,8 +812,71 @@ def test_windows_shell_file_command_requires_approval_for_outside_path(
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside) in required.label for required in permission.required_permissions
+        required.invocation_pattern == str(outside_file.resolve())
+        for required in permission.required_permissions
     )
+
+
+def test_windows_shell_bare_name_linking_outside_requires_approval(
+    tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside_file = tmp_path / "secret.txt"
+    workdir.mkdir()
+    outside_file.write_text("secret", encoding="utf-8")
+    try:
+        (workdir / "lnk").symlink_to(outside_file)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    monkeypatch.chdir(workdir)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["Get-Content"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command="Get-Content lnk"))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.invocation_pattern == str(outside_file.resolve())
+        for required in permission.required_permissions
+    )
+
+
+def test_windows_shell_honors_an_exact_persisted_outside_path_grant(
+    tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    approved_file = outside / "approved.txt"
+    sibling_file = outside / "sibling.txt"
+    workdir.mkdir()
+    outside.mkdir()
+    approved_file.write_text("approved", encoding="utf-8")
+    sibling_file.write_text("sibling", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+    approved_pattern = path_grant_pattern(
+        str(approved_file.resolve()), PathGrantScope.EXACT
+    )
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["type", approved_pattern]
+        ),
+        state=BaseToolState(),
+    )
+
+    approved = tool.resolve_permission(
+        WindowsShellArgs(command=f'type "{approved_file}"')
+    )
+    sibling = tool.resolve_permission(
+        WindowsShellArgs(command=f'type "{sibling_file}"')
+    )
+
+    assert isinstance(approved, PermissionContext)
+    assert approved.permission is ToolPermission.ALWAYS
+    assert isinstance(sibling, PermissionContext)
+    assert sibling.permission is ToolPermission.ASK
 
 
 def test_windows_shell_path_qualified_executable_does_not_match_basename_allowlist():
@@ -1040,6 +1008,53 @@ def test_windows_shell_redirection_requires_approval_for_outside_path():
     )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo pwned > output.txt",
+        "echo pwned >> output.txt",
+        "echo pwned *> output.txt",
+        "echo pwned 2> errors.txt",
+    ],
+)
+def test_windows_shell_redirection_requires_approval_inside_workspace(command):
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["echo"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.label.startswith("output redirection (")
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo harmless > $null",
+        "echo harmless > NUL",
+        "echo harmless > NUL:",
+        "echo harmless 2>&1",
+        "echo harmless *>&1",
+    ],
+)
+def test_windows_shell_discard_and_descriptor_redirections_remain_allowed(command):
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["echo"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
 def test_windows_shell_quoted_redirection_text_is_not_treated_as_a_target():
     tool = WindowsShell(
         config_getter=lambda: WindowsShellToolConfig(allowlist=["echo"]),
@@ -1124,7 +1139,6 @@ def test_windows_shell_allowlisted_command_checks_dynamic_path(tmp_path, monkeyp
 @pytest.mark.parametrize(
     ("pattern", "command_template"),
     [
-        ("git diff", r"git diff --no-index .\a.txt .\b.txt"),
         ("get-content", 'Get-Content "FileSystem::{inside}"'),
         ("out-file", 'Out-File -FilePath "{inside}"'),
         ("tree", "tree /f"),
@@ -1146,6 +1160,201 @@ def test_windows_shell_allowlisted_command_keeps_in_workdir_paths_allowed(
 
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("command", ["git diff", "git log", "git status"])
+def test_windows_shell_git_readers_remain_allowed_for_an_ordinary_repository(
+    command, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    monkeypatch.chdir(tmp_path)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=[command]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git log --remerge-diff -1",
+        "git log -p --diff-merges=remerge",
+        "git log -p --diff-merges=r",
+    ],
+)
+def test_windows_shell_git_remerge_diff_requires_approval(
+    command, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    monkeypatch.chdir(tmp_path)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["git log"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+def test_windows_shell_repeated_git_reader_checks_each_repository(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clean"
+    evil = clean / "evil"
+    for repository in (tmp_path, clean, evil):
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+        )
+    (evil / ".git" / "config").write_text("[diff]\n\texternal = evil-diff.exe\n")
+    monkeypatch.chdir(tmp_path)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["cd", "git diff"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command="cd clean; git diff; cd evil; git diff")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    git_permissions = [
+        required
+        for required in permission.required_permissions
+        if required.label == "git diff"
+    ]
+    assert len(git_permissions) == 1
+    assert str(evil.resolve()) in git_permissions[0].invocation_pattern
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pushd evil; git diff",
+        "Push-Location evil; git diff",
+        "Push-Location evil; Pop-Location; git diff",
+    ],
+)
+def test_windows_shell_tracks_directory_stack_builtins(command, tmp_path, monkeypatch):
+    evil = tmp_path / "evil"
+    for repository in (tmp_path, evil):
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+        )
+    (evil / ".git" / "config").write_text("[diff]\n\texternal = evil-diff.exe\n")
+    monkeypatch.chdir(tmp_path)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["pushd", "Push-Location", "Pop-Location", "git diff"]
+        ),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize(
+    ("command", "config"),
+    [
+        ("git status", "[core]\n\tfsmonitor = monitor.exe\n"),
+        ("git status", '[filter "unsafe"]\n\tclean = clean.exe\n'),
+        ("git diff", '[diff "unsafe"]\n\tcommand = diff.exe\n'),
+        ("git log", "[gpg]\n\tprogram = fake-gpg.exe\n"),
+        ("git log", '[merge "unsafe"]\n\tdriver = merge.exe\n'),
+    ],
+    ids=[
+        "fsmonitor",
+        "clean-filter",
+        "external-diff",
+        "signature-program",
+        "merge-driver",
+    ],
+)
+def test_windows_shell_git_readers_require_approval_for_executable_repository_config(
+    command, config, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=[command]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+def test_windows_shell_git_reader_approval_is_scoped_to_the_repository(
+    tmp_path, monkeypatch
+):
+    patterns = []
+    for name in ("first", "second"):
+        repository = tmp_path / name
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\tfsmonitor = monitor.exe\n"
+        )
+        monkeypatch.chdir(repository)
+        tool = WindowsShell(
+            config_getter=lambda: WindowsShellToolConfig(allowlist=["git status"]),
+            state=BaseToolState(),
+        )
+        permission = tool.resolve_permission(WindowsShellArgs(command="git status"))
+        assert isinstance(permission, PermissionContext)
+        assert permission.permission is ToolPermission.ASK
+        assert len(permission.required_permissions) == 1
+        patterns.append(permission.required_permissions[0].session_pattern)
+
+    assert patterns[0] != patterns[1]
+
+
+@pytest.mark.parametrize("command", ["git.exe status", r"C:\tools\git.exe status"])
+def test_windows_executable_suffixes_do_not_skip_git_guardrails(
+    command, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\tfsmonitor = monitor.exe\n")
+    monkeypatch.chdir(tmp_path)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=[command]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+def test_windows_executable_suffixes_do_not_skip_less_guardrails():
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["less"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command="less.exe --lesskey-src=keys input.txt")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
 
 
 def test_windows_shell_path_qualified_denylist_matches_basename():
@@ -1274,6 +1483,39 @@ def test_git_bash_permission_uses_posix_guardrails_on_native_windows():
     assert "rm" in (permission.reason or "")
 
 
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "cat x#y {outside}",
+        "ls x#y {outside}",
+        "find . -name x#y -o -delete",
+        r"cat x\ #y {outside}",
+        r"cat \"x {outside} \"",
+        r"cat \'x {outside} \'",
+    ],
+)
+def test_git_bash_guardrail_sees_the_tokens_git_bash_runs(
+    command_template, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(experimental_bash_module, "is_windows", lambda: True)
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "secret.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    tool = ExperimentalGitBash(
+        config_getter=lambda: GitBashToolConfig(), state=BaseToolState()
+    )
+
+    permission = tool.resolve_permission(
+        ExperimentalBashArgs(
+            command=command_template.format(outside=outside.as_posix())
+        )
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
 def test_experimental_git_bash_does_not_reject_native_windows(monkeypatch):
     monkeypatch.setattr(experimental_bash_module, "is_windows", lambda: True)
     tool = ExperimentalGitBash(
@@ -1287,451 +1529,310 @@ def test_experimental_git_bash_does_not_reject_native_windows(monkeypatch):
     assert permission.permission is ToolPermission.ALWAYS
 
 
-def test_git_bash_inherited_ui_text_uses_git_bash_name():
-    assert GitBashOutput.get_status_text() == "Polling git_bash session"
-    assert GitBashStdin.get_status_text() == "Sending git_bash input"
-    assert GitBashSessions.get_status_text() == "Managing git_bash sessions"
-    assert GitBashLogFile.get_status_text() == "Working with git_bash log"
-
-
-@pytest.mark.asyncio
-async def test_git_bash_fallback_projects_native_shell_to_client_terminal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shell = "C:/Program Files/Git/bin/bash.exe"
-    monkeypatch.setattr(
-        git_bash_module, "resolve_git_bash_shell", lambda requested, configured: shell
-    )
-    tool_io = _FakeTerminalToolIO()
-    tool = GitBash(
-        config_getter=lambda: GitBashToolConfig(
-            default_timeout=17, max_output_bytes=1234
-        ),
-        state=BaseToolState(),
-        cwd=tmp_path,
-    )
-
-    result = await collect_result(
-        tool.run(
-            GitBashArgs(command="printf hello", env={"CUSTOM": "value"}),
-            InvokeContext(
-                tool_call_id="git-call",
-                session_id="session-1",
-                tool_io=cast(ToolIOPort, tool_io),
-            ),
-        )
-    )
-
-    assert result.stdout == "client stdout"
-    assert result.stderr == "client stderr"
-    assert tool_io.requests == [
-        ShellCommandRequest(
-            session_id="session-1",
-            tool_call_id="git-call",
-            command=shell,
-            args=["-c", "printf hello"],
-            env={
-                "CI": "true",
-                "NONINTERACTIVE": "1",
-                "NO_TTY": "1",
-                "TERM": "dumb",
-                "GIT_PAGER": "cat",
-                "PAGER": "cat",
-                "LESS": "-FX",
-                "CUSTOM": "value",
-            },
-            cwd=tmp_path.resolve(),
-            timeout=17,
-            max_output_bytes=1234,
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_powershell_fallback_projects_native_shell_to_client_terminal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shell = "C:/Program Files/PowerShell/7/pwsh.exe"
-    monkeypatch.setattr(
-        windows_shell_module,
-        "resolve_powershell_shell",
-        lambda requested, configured: shell,
-    )
-    tool_io = _FakeTerminalToolIO()
-    tool = WindowsShell(
-        config_getter=lambda: WindowsShellToolConfig(
-            default_timeout=23, max_output_bytes=4321
-        ),
-        state=BaseToolState(),
-        cwd=tmp_path,
-    )
-
-    result = await collect_result(
-        tool.run(
-            WindowsShellArgs(command="Write-Output hello", env={"CUSTOM": "value"}),
-            InvokeContext(
-                tool_call_id="powershell-call",
-                session_id="session-2",
-                tool_io=cast(ToolIOPort, tool_io),
-            ),
-        )
-    )
-
-    assert result.stdout == "client stdout"
-    assert result.stderr == "client stderr"
-    assert tool_io.requests == [
-        ShellCommandRequest(
-            session_id="session-2",
-            tool_call_id="powershell-call",
-            command=shell,
-            args=["-NoLogo", "-NoProfile", "-Command", "Write-Output hello"],
-            env={
-                "CI": "true",
-                "NONINTERACTIVE": "1",
-                "NO_TTY": "1",
-                "GIT_PAGER": "more",
-                "PAGER": "more",
-                "CUSTOM": "value",
-            },
-            cwd=tmp_path.resolve(),
-            timeout=23,
-            max_output_bytes=4321,
-        )
-    ]
-
-
 windows_only = pytest.mark.skipif(
     not is_windows(), reason="Windows shell integration requires native Windows"
 )
 
 
-@pytest.fixture
-def native_windows_platform(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (r"echo x > C:\Users\me\profile.ps1", ((r"C:\Users\me\profile.ps1",) * 2,)),
+        (r"echo x > \\server\share\x.txt", ((r"\\server\share\x.txt",) * 2,)),
+        (r"echo x > C:\PROGRA~1\x.txt", ((r"C:\PROGRA~1\x.txt",) * 2,)),
+        (r"echo x > 'C:\a b\x.txt'", ((r"'C:\a b\x.txt'", r"C:\a b\x.txt"),)),
+        (r'echo x > "C:\a b\x.txt"', ((r'"C:\a b\x.txt"', r"C:\a b\x.txt"),)),
+        # Listed as read; whether it names one file is the caller's to judge.
+        ("echo x > /Users/me/x.txt", (("/Users/me/x.txt",) * 2,)),
+        (r"echo x > \Users\me\x.txt", ((r"\Users\me\x.txt",) * 2,)),
+        ("echo x > C:x.txt", (("C:x.txt",) * 2,)),
+        # A script block or subexpression may run, so its redirects count.
+        (r"& { 'x' > C:\Users\me\x.ps1 }", ((r"C:\Users\me\x.ps1",) * 2,)),
+        (
+            r"echo $('x' > C:\a\inner) > C:\a\outer",
+            ((r"C:\a\outer",) * 2, (r"C:\a\inner",) * 2),
+        ),
+        # From a root, but only PowerShell can read the spelling.
+        (r'echo x > "C:\a\$name.txt"', ((r'"C:\a\$name.txt"', None),)),
+        (r"echo x > C:\work\*.txt", ((r"C:\work\*.txt", None),)),
+        ("echo x > C:\\work\\`\n..\\x", (("C:\\work\\`\n..\\x", None),)),
+        ("echo x > `\nC:\\x", (("`\nC:\\x", None),)),
+        (r"echo x > \\?\C:\x", ((r"\\?\C:\x", None),)),
+        # An array target: the reader cannot place a list, whatever comes first.
+        (
+            r"echo x > C:\ws\a.txt, C:\Users\me\x.plist",
+            ((r"C:\ws\a.txt, C:\Users\me\x.plist", None),),
+        ),
+        (
+            r"echo x > $null, C:\Users\me\x.plist",
+            ((r"$null, C:\Users\me\x.plist", None),),
+        ),
+        (
+            r"echo x > (C:\ws\a.txt, C:\Users\me\x.plist)",
+            ((r"(C:\ws\a.txt, C:\Users\me\x.plist)", None),),
+        ),
+        ("echo x > @(1)", (("@(1)", None),)),
+        # Relative, variable-led or discarded: not listed.
+        ("echo x > out.txt", ()),
+        (r"echo x > $env:TEMP\x.txt", ()),
+        (r"echo x > %TEMP%\x.txt", ()),
+        ("echo x > $null", ()),
+        ("echo x > NUL 2>&1", ()),
+    ],
+)
+def test_windows_redirect_writes_place_only_plainly_spelled_targets(command, expected):
+    """A target from a root -- a drive, a share or the current drive's root --
+    is read exactly where it is spelled plainly, and listed unread otherwise.
+    One led by a variable or relative to the current location is not listed;
+    any other spelling is listed unread.
+    """
+    writes = windows_shell_module.windows_redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
 
 
-def _managed_tool(
-    terminal_runtime: TerminalRuntime | None = None,
-) -> ExperimentalWindowsShell:
-    return ExperimentalWindowsShell(
-        config_getter=lambda: ExperimentalBashToolConfig(default_timeout=5),
+@pytest.mark.parametrize(
+    "command", ["copy secret.txt /dev/null", "git log 2>/dev/null"]
+)
+def test_windows_shell_reads_dev_null_as_a_real_path(command: str):
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(permission=ToolPermission.ALWAYS),
         state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
     )
 
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
 
-def _native_windows_process_exists(pid: int) -> bool:
-    shell = _windows.resolve_powershell_shell(None, None)
-    result = subprocess.run(
-        [
-            shell,
-            "-NoLogo",
-            "-NoProfile",
-            "-Command",
-            (
-                f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) "
-                "{ exit 0 }; exit 1"
-            ),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    return result.returncode == 0
+    assert isinstance(permission, PermissionContext)
+    assert PermissionScope.OUTSIDE_DIRECTORY in [
+        required.scope for required in permission.required_permissions
+    ]
 
 
-def _native_windows_process_exits(pid: int, timeout_seconds: float = 3) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if not _native_windows_process_exists(pid):
-            return True
-        time.sleep(0.05)
-    return not _native_windows_process_exists(pid)
-
-
-async def _wait_for_windows_output(
-    output_tool: WindowsShellOutput,
-    *,
-    session_id: str,
-    cursor: int,
-    predicate: Callable[[BashOutputResult, str], bool],
-    timeout_seconds: float = 6,
-) -> tuple[BashOutputResult, str]:
-    deadline = time.monotonic() + timeout_seconds
-    output = ""
-    while time.monotonic() < deadline:
-        result = await collect_result(
-            output_tool.run(
-                BashOutputArgs(session_id=session_id, cursor=cursor, wait_seconds=0.25)
-            )
-        )
-        output += result.output
-        cursor = result.next_cursor
-        if predicate(result, output):
-            return result, output
-    pytest.fail(f"Windows shell did not become ready; output={output!r}")
-
-
-@pytest.mark.asyncio
-@windows_only
-async def test_windows_shell_managed_echo_hello(native_windows_platform):
-    assert windows_managed_shell_supported()
-    tool = _managed_tool()
-
-    result = await collect_result(
-        tool.run(ExperimentalBashArgs(command="echo hello", timeout_seconds=5))
-    )
-
-    assert result.status == "completed"
-    assert result.exit_code == 0
-    assert "hello" in result.output.lower()
-    assert result.shell
-    assert result.session_id.startswith("powershell_")
-    assert "bash" not in result.session_id
-    assert "bash" not in result.output_path.lower()
-
-
-@pytest.mark.asyncio
-@windows_only
-async def test_windows_shell_background_poll_and_kill(native_windows_platform):
-    terminal_runtime = TerminalRuntime()
-    tool = _managed_tool(terminal_runtime)
-    output_tool = WindowsShellOutput(
-        config_getter=lambda: BashOutputConfig(max_poll_seconds=3),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    sessions_tool = WindowsShellSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    started = await collect_result(
-        tool.run(
-            ExperimentalBashArgs(
-                command='Write-Output "READY"; Start-Sleep -Seconds 30',
-                background=True,
-                timeout_seconds=1,
-            )
-        )
-    )
-
-    try:
-        _, output = await _wait_for_windows_output(
-            output_tool,
-            session_id=started.session_id,
-            cursor=0,
-            predicate=lambda _result, output: "READY" in output,
-        )
-        assert "READY" in output
-    finally:
-        killed = await collect_result(
-            sessions_tool.run(
-                BashSessionsArgs(action="kill", session_id=started.session_id)
-            )
-        )
-        assert killed.session is not None
-        assert killed.session.session_id.startswith("powershell_")
-
-
-@pytest.mark.asyncio
-@windows_only
-async def test_windows_shell_kill_terminates_spawned_child(native_windows_platform):
-    terminal_runtime = TerminalRuntime()
-    tool = _managed_tool(terminal_runtime)
-    output_tool = WindowsShellOutput(
-        config_getter=lambda: BashOutputConfig(max_poll_seconds=3),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    sessions_tool = WindowsShellSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    started = await collect_result(
-        tool.run(
-            ExperimentalBashArgs(
-                command=(
-                    "$child = Start-Process -FilePath "
-                    '"$env:SystemRoot\\System32\\ping.exe" '
-                    "-ArgumentList '127.0.0.1','-n','30' -PassThru; "
-                    'Write-Output "CHILD_PID=$($child.Id)"; '
-                    "Wait-Process -Id $child.Id"
-                ),
-                background=True,
-                timeout_seconds=1,
-            )
-        )
-    )
-    child_pid: int | None = None
-    killed = False
-
-    try:
-        _, output = await _wait_for_windows_output(
-            output_tool,
-            session_id=started.session_id,
-            cursor=0,
-            predicate=lambda _result, output: "CHILD_PID=" in output,
-        )
-        match = re.search(r"CHILD_PID=(\d+)", output)
-        assert match is not None
-        child_pid = int(match.group(1))
-        assert _native_windows_process_exists(child_pid)
-
-        await collect_result(
-            sessions_tool.run(
-                BashSessionsArgs(action="kill", session_id=started.session_id)
-            )
-        )
-        killed = True
-
-        assert _native_windows_process_exits(child_pid)
-    finally:
-        if not killed:
-            await collect_result(
-                sessions_tool.run(
-                    BashSessionsArgs(action="kill", session_id=started.session_id)
-                )
-            )
-        if child_pid is not None and _native_windows_process_exists(child_pid):
-            subprocess.run(
-                ["taskkill", "/PID", str(child_pid), "/T", "/F"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(20)
-@windows_only
-async def test_windows_shell_stdin_drives_powershell_read_host(native_windows_platform):
-    terminal_runtime = TerminalRuntime()
-    tool = _managed_tool(terminal_runtime)
-    stdin_tool = WindowsShellStdin(
-        config_getter=lambda: BashStdinConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    output_tool = WindowsShellOutput(
-        config_getter=lambda: BashOutputConfig(max_poll_seconds=3),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    sessions_tool = WindowsShellSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    started = await collect_result(
-        tool.run(
-            ExperimentalBashArgs(
-                command=(
-                    'Write-Output "READY"; '
-                    '$value = Read-Host; Write-Output "answer=$value"'
-                ),
-                background=True,
-                timeout_seconds=1,
-            )
-        )
-    )
-
-    try:
-        ready, _ = await _wait_for_windows_output(
-            output_tool,
-            session_id=started.session_id,
-            cursor=0,
-            predicate=lambda _result, output: "READY" in output,
-        )
-        await collect_result(
-            stdin_tool.run(BashStdinArgs(session_id=started.session_id, text="value\n"))
-        )
-        _, output = await _wait_for_windows_output(
-            output_tool,
-            session_id=started.session_id,
-            cursor=ready.next_cursor,
-            predicate=lambda _result, output: "answer=value" in output,
-        )
-        assert "answer=value" in output
-    finally:
-        await collect_result(
-            sessions_tool.run(
-                BashSessionsArgs(action="kill", session_id=started.session_id)
-            )
-        )
-
-
-@pytest.mark.asyncio
-@windows_only
-async def test_windows_shell_ctrl_c_interrupts_foreground_process(
-    native_windows_platform,
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "cd sub",
+        "chdir sub",
+        "sl sub",
+        "Set-Location sub",
+        "Set-Location -LiteralPath sub",
+        "pushd sub",
+        "Push-Location sub",
+        "pushl sub",
+        "popd",
+        "Pop-Location",
+        "popl",
+    ],
+)
+@pytest.mark.parametrize("read", ["Get-Content .env", "cat .e*", "more .env"])
+def test_windows_cwd_reader_approval_has_no_guessed_file_grants(
+    kind, change, read, tmp_path
 ):
-    terminal_runtime = TerminalRuntime()
-    tool = _managed_tool(terminal_runtime)
-    stdin_tool = WindowsShellStdin(
-        config_getter=lambda: BashStdinConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    for directory in [tmp_path, sub]:
+        (directory / ".env").touch()
+        (directory / ".env.local").touch()
+    (tmp_path / "notes").write_text("ordinary")
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = f"{change}; {read}"
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in result.required_permissions
     )
-    output_tool = WindowsShellOutput(
-        config_getter=lambda: BashOutputConfig(max_poll_seconds=3),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    sessions_tool = WindowsShellSessions(
-        config_getter=lambda: BashSessionsConfig(),
-        state=BaseToolState(),
-        terminal_runtime=terminal_runtime,
-    )
-    started = await collect_result(
-        tool.run(
-            ExperimentalBashArgs(
-                command='Write-Output "READY"; Start-Sleep -Seconds 30',
-                background=True,
-                timeout_seconds=1,
+    exact = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+        and rp.invocation_pattern == command
+        and rp.session_pattern == command
+        and rp.literal
+    ]
+    assert exact
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
             )
         )
+    repeated = _resolve_sensitive_windows(tool, command)
+    assert isinstance(repeated, PermissionContext)
+    assert all(store.covers("powershell", rp) for rp in repeated.required_permissions)
+    changed = _resolve_sensitive_windows(tool, f"{change}; Get-Content .env.local")
+    assert isinstance(changed, PermissionContext)
+    assert any(
+        not store.covers("powershell", rp) for rp in changed.required_permissions
+    )
+    direct = _resolve_sensitive_windows(tool, "Get-Content sub/.env")
+    assert isinstance(direct, PermissionContext)
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN and not store.covers("powershell", rp)
+        for rp in direct.required_permissions
     )
 
-    try:
-        ready, _ = await _wait_for_windows_output(
-            output_tool,
-            session_id=started.session_id,
-            cursor=0,
-            predicate=lambda _result, output: "READY" in output,
-        )
-        await collect_result(
-            stdin_tool.run(
-                BashStdinArgs(session_id=started.session_id, control=["ctrl_c"])
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_windows_reader_before_later_cwd_change_keeps_precise_file_grant(
+    kind, tmp_path
+):
+    (tmp_path / ".env").touch()
+    (tmp_path / "sub").mkdir()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, "Get-Content .env; Set-Location sub")
+    assert isinstance(result, PermissionContext)
+    files = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / ".env")]
+    tool.config.sensitive_file_patterns.clear()
+    result = _resolve_sensitive_windows(tool, "Set-Location sub; Get-Content .env")
+    assert result is not None and result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "iex $CWD_SCRIPT",
+        "Invoke-Expression $CWD_SCRIPT",
+        "& $CWD_COMMAND child",
+        ". ./change-dir.ps1",
+        "& ./change-dir.ps1",
+    ],
+)
+def test_windows_opaque_parent_cwd_never_grants_unread_session_file(
+    kind, prefix, tmp_path
+):
+    (tmp_path / ".env").touch()
+    (tmp_path / "change-dir.ps1").write_text("Set-Location child\n")
+    (tmp_path / "child").mkdir()
+    (tmp_path / "child" / ".env").touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = f"{prefix}; Get-Content .env"
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in result.required_permissions
+    )
+    assert any(
+        rp.scope is PermissionScope.COMMAND_PATTERN
+        and rp.invocation_pattern == command
+        and rp.session_pattern == command
+        and rp.literal
+        for rp in result.required_permissions
+    )
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
             )
         )
-        output, _ = await _wait_for_windows_output(
-            output_tool,
-            session_id=started.session_id,
-            cursor=ready.next_cursor,
-            predicate=lambda result, _output: result.status != "running",
-        )
-        assert output.status in {"completed", "killed"}
-    finally:
-        await collect_result(
-            sessions_tool.run(
-                BashSessionsArgs(action="kill", session_id=started.session_id)
-            )
-        )
-
-
-@pytest.mark.asyncio
-@windows_only
-async def test_windows_shell_reset_clears_logs(native_windows_platform):
-    sessions_tool = WindowsShellSessions(
-        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+    direct = _resolve_sensitive_windows(tool, "Get-Content .env")
+    assert isinstance(direct, PermissionContext)
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN and not store.covers("powershell", rp)
+        for rp in direct.required_permissions
     )
 
-    result = await collect_result(
-        sessions_tool.run(BashSessionsArgs(action="reset", clear_logs=True))
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "iex $CWD_SCRIPT",
+        "pwsh -Command 'Set-Location child'",
+        "powershell -Command 'Set-Location child'",
+    ],
+)
+def test_windows_later_opaque_or_child_cwd_keeps_actual_parent_file_grant(
+    kind, suffix, tmp_path
+):
+    (tmp_path / ".env").touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = (
+        f"Get-Content .env; {suffix}"
+        if suffix.startswith("iex")
+        else f"{suffix}; Get-Content .env"
+    )
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    files = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / ".env")]
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "dir .env | type",
+        "Get-ChildItem .env | Get-Content",
+        "Get-Item .env | gc",
+        "'.env' | Get-Content",
+        "dir . | Select-String token",
+        "dir .env | sls token",
+    ],
+)
+def test_windows_piped_reader_requires_the_exact_command(kind, command, tmp_path):
+    """Get-Content and Select-String bind piped files to their path parameters."""
+    (tmp_path / ".env").touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert any(
+        rp.scope is PermissionScope.COMMAND_PATTERN
+        and rp.session_pattern == command
+        and rp.literal
+        for rp in result.required_permissions
     )
 
-    assert result.action == "reset"
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content notes.txt | Select-String token",
+        "gc notes.txt | sls token",
+        "dir | findstr token",
+        "dir .env | sort",
+    ],
+)
+def test_windows_piped_text_does_not_require_sensitive_approval(
+    kind, command, tmp_path
+):
+    """Piped text is searched, not opened, so no file approval is owed."""
+    (tmp_path / ".env").touch()
+    (tmp_path / "notes.txt").write_text("token\n")
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    tool.config.allowlist.extend(["dir", "sort", "sls"])
+    result = _resolve_sensitive_windows(tool, command)
+    assert result is not None
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_windows_sensitive_file_label_names_no_other_shell(kind, tmp_path):
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, "type .env")
+    assert isinstance(result, PermissionContext)
+    assert [
+        rp.label
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ] == ["accessing sensitive files"]

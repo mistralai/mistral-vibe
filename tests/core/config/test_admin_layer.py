@@ -89,9 +89,74 @@ async def test_write_to_lower_layer_stays_shadowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_global_compaction_threshold_cannot_be_bypassed_by_model() -> None:
+async def test_a_users_model_threshold_wins_over_an_admin_global() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={"active_model": "mistral-medium-3.5"})
+    admin = AdminConfigLayer(data={"auto_compact_threshold": 50_000})
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    # The admin global fills a model without a threshold of its own.
+    assert orchestrator.config.get_active_model().auto_compact_threshold == 50_000
+    alias = orchestrator.config.get_active_model().alias
+
+    failures = await orchestrator.set_field(
+        f"/models/{alias}/auto_compact_threshold", 120_000
+    )
+
+    assert failures == []
+    assert orchestrator.config.get_active_model().auto_compact_threshold == 120_000
+
+
+@pytest.mark.asyncio
+async def test_an_admin_model_threshold_wins_over_the_users() -> None:
     defaults = DefaultConfigLayer(schema=VibeConfigSchema)
     overrides = OverridesLayer(data={})
+    admin = AdminConfigLayer()
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+    model = orchestrator.config.get_active_model()
+    alias = model.alias
+    admin.load_managed_toml(
+        f'[[models]]\nalias = "{alias}"\nname = "{model.name}"\n'
+        f'provider = "{model.provider}"\nauto_compact_threshold = 300000\n'
+    )
+    await orchestrator.reload()
+
+    failures = await orchestrator.set_field(
+        f"/models/{alias}/auto_compact_threshold", 120_000
+    )
+
+    assert failures == []
+    assert orchestrator.config.get_active_model().auto_compact_threshold == 300_000
+
+
+@pytest.mark.asyncio
+async def test_admin_global_compaction_threshold_overrides_a_declared_window() -> None:
+    # A context window is not a threshold of the model's own: the admin
+    # global wins over the default the window would derive.
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(
+        data={
+            "active_model": "m",
+            "models": [
+                {
+                    "name": "m",
+                    "provider": "mistral",
+                    "alias": "m",
+                    "max_context_length": 262_144,
+                }
+            ],
+        }
+    )
     admin = AdminConfigLayer(data={"auto_compact_threshold": 50_000})
 
     orchestrator = await ConfigOrchestrator.create(
@@ -101,11 +166,102 @@ async def test_admin_global_compaction_threshold_cannot_be_bypassed_by_model() -
     )
 
     assert orchestrator.config.get_active_model().auto_compact_threshold == 50_000
-    alias = orchestrator.config.get_active_model().alias
 
-    failures = await orchestrator.set_field(
-        f"/models/{alias}/auto_compact_threshold", 0
+
+@pytest.mark.asyncio
+async def test_admin_allowed_model_names_cannot_be_bypassed_by_a_user_alias() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(
+        data={
+            "models": [
+                {
+                    "name": "unapproved-model",
+                    "provider": "mistral",
+                    "alias": "mistral-vibe-cli-latest",
+                }
+            ]
+        }
+    )
+    admin = AdminConfigLayer(data={"allowed_models": ["mistral-vibe-cli-latest"]})
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
     )
 
-    assert failures == []
-    assert orchestrator.config.get_active_model().auto_compact_threshold == 50_000
+    assert set(orchestrator.config.available_models()) == {"mistral-medium-3.5"}
+
+
+@pytest.mark.asyncio
+async def test_admin_enable_auto_approve_false_shadows_lower_layers() -> None:
+    overrides = OverridesLayer(data={"enable_auto_approve": True})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml("enable_auto_approve = false\n")
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.enable_auto_approve is False
+
+    # A lower-layer write cannot re-enable the mode.
+    await orchestrator.set_field("/enable_auto_approve", True)
+    assert orchestrator.config.enable_auto_approve is False
+
+
+@pytest.mark.asyncio
+async def test_admin_enable_pr_monitoring_false_shadows_lower_layers() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={"enable_pr_monitoring": True})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml("enable_pr_monitoring = false\n")
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.enable_pr_monitoring is False
+
+    # A lower-layer write cannot turn monitoring back on.
+    await orchestrator.set_field("/enable_pr_monitoring", True)
+    assert orchestrator.config.enable_pr_monitoring is False
+
+
+@pytest.mark.asyncio
+async def test_admin_enable_model_catalog_false_shadows_lower_layers() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={"enable_model_catalog": True})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml("enable_model_catalog = false\n")
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.enable_model_catalog is False
+
+    await orchestrator.set_field("/enable_model_catalog", True)
+    assert orchestrator.config.enable_model_catalog is False
+
+
+@pytest.mark.asyncio
+async def test_unmatched_admin_allowed_model_names_fail_closed() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={})
+    admin = AdminConfigLayer(data={"allowed_models": ["missing-model"]})
+
+    with pytest.raises(
+        ValueError, match="Admin allowed_models matches none of the configured models"
+    ):
+        await ConfigOrchestrator.create(
+            schema=VibeConfigSchema,
+            layers=[defaults, overrides, admin],
+            default_layer_resolver=lambda: overrides,
+        )

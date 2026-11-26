@@ -19,6 +19,7 @@ from vibe.app_server.events import (
 from vibe.app_server.models import (
     ContentBlock,
     PreparedPrompt,
+    PublicGoal,
     PublicHistoryEntry,
     PublicSession,
     PublicSessionState,
@@ -28,6 +29,12 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     EmptyResponse,
+    GoalClearParams,
+    GoalClearResponse,
+    GoalGetParams,
+    GoalGetResponse,
+    GoalSetParams,
+    GoalSetResponse,
     LoopsClearParams,
     LoopsClearResponse,
     LoopsCreateParams,
@@ -78,8 +85,6 @@ from vibe.app_server.protocol import (
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
     WorkspaceTrustStatusResponse,
-    WorkspaceUntrustedConfigParams,
-    WorkspaceUntrustedConfigResponse,
 )
 from vibe.app_server.review import ReviewOwner, ReviewTarget
 
@@ -95,8 +100,8 @@ class ShellResource:
         self._events: dict[str, asyncio.Queue[ShellTimelineEvent]] = {}
 
     async def run(
-        self, command: str, *, timeout_seconds: float = 30.0
-    ) -> AsyncGenerator[ShellTimelineEvent, None]:
+        self, command: str, *, timeout_seconds: float | None = None
+    ) -> AsyncGenerator[ShellTimelineEvent]:
         client = await self._connection.connect()
         operation_id = str(uuid4())
         events = BoundedEventQueue[ShellTimelineEvent]()
@@ -189,15 +194,6 @@ class SessionResource:
                 break
             cursor = response.next_cursor
         return sessions
-
-    async def resolve_continue_session(self, cwd: str | None = None) -> str | None:
-        """The session `--continue` resumes, resolved server-side (pointer-first)."""
-        client = await self._connection.connect()
-        response = validate_wire(
-            SessionListResponse,
-            await client.request("session/list", SessionListParams(cwd=cwd)),
-        )
-        return response.continue_session_id
 
     @property
     def history_before_cursor(self) -> str | None:
@@ -325,6 +321,7 @@ class SessionResource:
     async def _fetch_history_page(
         self,
         *,
+        session_id: str | None = None,
         turn_id: str | None = None,
         cursor: str | None = None,
         limit: int,
@@ -336,7 +333,7 @@ class SessionResource:
             await client.request(
                 "session/history/list",
                 SessionHistoryListParams(
-                    session_id=self._state.session_id,
+                    session_id=session_id or self._state.session_id,
                     turn_id=turn_id,
                     page=PageRequest(
                         cursor=cursor, limit=limit, direction=sort_direction
@@ -359,12 +356,14 @@ class SessionResource:
     async def list_history(
         self,
         *,
+        session_id: str | None = None,
         turn_id: str | None = None,
         before: str | None = None,
         after: str | None = None,
         limit: int = 200,
     ) -> SessionHistoryListResponse:
         return await self._fetch_history_page(
+            session_id=session_id,
             turn_id=turn_id,
             cursor=before or after,
             limit=limit,
@@ -575,20 +574,6 @@ class WorkspaceResource:
             ),
         )
 
-    async def untrusted_config_dirs(
-        self, cwd: str | None = None
-    ) -> WorkspaceUntrustedConfigResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            WorkspaceUntrustedConfigResponse,
-            await client.request(
-                "workspace/trust/untrustedConfig",
-                WorkspaceUntrustedConfigParams(
-                    cwd=cwd or self._state.state.session.cwd
-                ),
-            ),
-        )
-
 
 class LoopsResource:
     def __init__(
@@ -607,14 +592,19 @@ class LoopsResource:
         )
         return list(response.loops)
 
-    async def create(self, interval: str, prompt: str) -> ScheduledLoop:
+    async def create(
+        self, interval: str | None, prompt: str, *, cron: str | None = None
+    ) -> ScheduledLoop:
         client = await self._connection.connect()
         response = validate_wire(
             LoopsCreateResponse,
             await client.request(
                 "loops/create",
                 LoopsCreateParams(
-                    session_id=self._state.session_id, interval=interval, prompt=prompt
+                    session_id=self._state.session_id,
+                    interval=interval,
+                    cron=cron,
+                    prompt=prompt,
                 ),
             ),
         )
@@ -640,3 +630,54 @@ class LoopsResource:
             ),
         )
         return response.count
+
+
+class GoalResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    async def get(self) -> PublicGoal | None:
+        client = await self._connection.connect()
+        response = validate_wire(
+            GoalGetResponse,
+            await client.request(
+                "goal/get", GoalGetParams(session_id=self._state.session_id)
+            ),
+        )
+        return response.goal
+
+    async def set(self, **fields: object) -> PublicGoal:
+        """Send ``goal/set`` with only the given fields.
+
+        An omitted ``token_budget`` keeps the budget, so the request carries only
+        what the caller set: a full dump would send ``null`` and remove it.
+        """
+        params = GoalSetParams.model_validate({
+            "session_id": self._state.session_id,
+            **fields,
+        })
+        client = await self._connection.connect()
+        response = validate_wire(
+            GoalSetResponse,
+            await client.request(
+                "goal/set",
+                params.model_dump(mode="json", by_alias=True, exclude_unset=True),
+            ),
+        )
+        return response.goal
+
+    async def clear(self, expected_goal_id: str) -> bool:
+        client = await self._connection.connect()
+        response = validate_wire(
+            GoalClearResponse,
+            await client.request(
+                "goal/clear",
+                GoalClearParams(
+                    session_id=self._state.session_id, expected_goal_id=expected_goal_id
+                ),
+            ),
+        )
+        return response.cleared

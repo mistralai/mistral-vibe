@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from nturl2path import url2pathname as windows_url2pathname
-import os
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
 from urllib.parse import unquote, urlparse
@@ -52,6 +51,20 @@ def normalize_windows_path(raw: str) -> str:
     return f"{match[1].upper()}:{suffix}"
 
 
+def to_git_bash_path(raw: str) -> str:
+    """Spell a drive-qualified Windows path (``C:\\Users``) as ``/c/Users``.
+
+    Paths without both a drive letter and a root, such as UNC shares or
+    drive-relative ``C:file``, are returned unchanged.
+    """
+    path = PureWindowsPath(raw)
+    if not path.root or not re.fullmatch(r"[A-Za-z]:", path.drive):
+        return raw
+
+    suffix = "/".join(path.parts[1:])
+    return f"/{path.drive[0].lower()}/{suffix}"
+
+
 def target_pure_path(raw: str) -> PurePath:
     """Read a path by the target platform's rules; ``Path`` follows the host's."""
     return PureWindowsPath(raw) if is_windows() else PurePosixPath(raw)
@@ -70,6 +83,25 @@ def normalize_windows_input_path(raw: str) -> str:
     return normalized
 
 
+def resolves_within(path: Path, roots: Sequence[Path]) -> bool:
+    """Is ``path`` inside one of ``roots`` once symlinks are resolved?
+
+    A link inside a folder a write targets could otherwise redirect the write
+    anywhere on the machine.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 class GlobalPath:
     def __init__(self, resolver: Callable[[], Path]) -> None:
         self._resolver = resolver
@@ -77,15 +109,6 @@ class GlobalPath:
     @property
     def path(self) -> Path:
         return self._resolver()
-
-
-_DEFAULT_VIBE_HOME = Path.home() / ".vibe"
-
-
-def get_vibe_home() -> Path:
-    if vibe_home := os.getenv("VIBE_HOME"):
-        return Path(vibe_home).expanduser().resolve()
-    return _DEFAULT_VIBE_HOME
 
 
 def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:

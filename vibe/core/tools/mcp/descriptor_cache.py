@@ -17,6 +17,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.tools.remote import RemoteTool
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 _FORMAT = "mistral.vibe.legacy-mcp-descriptors/v1"
 _MAX_TOOLS = 1_000
@@ -235,7 +236,7 @@ class LegacyMCPDescriptorCache:
         return self._root / f"{hashlib.sha256(key.encode()).hexdigest()}.json"
 
     def _ensure_root(self) -> None:
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._root.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
         try:
             self._root.chmod(0o700)
         except OSError:

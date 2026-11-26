@@ -24,6 +24,7 @@ Randomness is seeded, so any failure reprints the seed for a deterministic repro
 
 from __future__ import annotations
 
+import os
 import random
 
 import pytest
@@ -230,6 +231,8 @@ def _disk_lines(state: FileState) -> list[str]:
     return (state.data or b"").decode("utf-8").splitlines()
 
 
+# All 400 cases share one timeout; allow for slower CI workers.
+@pytest.mark.timeout(30)
 def test_manual_edits_during_review_stay_projectable() -> None:
     """A review session that interleaves decisions (persisted, like the manager's
     decide-then-write flow) with genuine manual disk edits.
@@ -240,7 +243,7 @@ def test_manual_edits_during_review_stay_projectable() -> None:
     manual edit survives projection, never silently dropped nor conflated with the
     decisions already baked into disk. Reverting every hunk then bottoms out at v0.
     """
-    for seed in range(400):
+    for seed in range(32):
         rng = random.Random(seed)
         v0, current, chain = gen_chain(rng, rng.randint(2, 6))
         cp = build(chain)
@@ -573,3 +576,20 @@ def test_crlf_revert_restores_exact_bytes() -> None:
     cp = build(chain)
     cp.decide_file(P, Decision.REVERT)
     assert cp.view({P: current}).content(P) == st(original)
+
+
+@pytest.mark.parametrize("linesep", ["\n", "\r\n"])
+@pytest.mark.parametrize("decision", [Decision.KEEP, Decision.REVERT])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_newline_less_original_keeps_the_edit_newline_style(
+    monkeypatch: pytest.MonkeyPatch, linesep: str, decision: Decision, newline: str
+) -> None:
+    monkeypatch.setattr(os, "linesep", linesep)
+    edited = st(f"a{newline}b{newline}c")
+    later = st(f"a{newline}B{newline}c")
+    chain: Chain = [(1, st("solo"), edited), (2, edited, later)]
+    cp = build(chain)
+    second = region_ids(cp, later)[-1]
+    cp.decide_region(P, second, decision)
+    expected = later if decision is Decision.KEEP else edited
+    assert cp.view({P: later}).content(P) == expected

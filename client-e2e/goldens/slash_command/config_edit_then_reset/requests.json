@@ -1,0 +1,34 @@
+[
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "set",
+     "path": "/auto_compact_threshold",
+     "targetLayer": "user-toml",
+     "value": 64000
+    }
+   ],
+   "reason": "config screen edit",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "remove",
+     "path": "/auto_compact_threshold",
+     "targetLayer": "user-toml",
+     "value": null
+    }
+   ],
+   "reason": "config screen reset",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

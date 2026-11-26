@@ -1,0 +1,22 @@
+[
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/setEnabled",
+  "params": {
+   "enabled": false,
+   "name": "code-review",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

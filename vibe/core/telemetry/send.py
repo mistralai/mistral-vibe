@@ -1,28 +1,37 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Callable, Mapping
+from enum import Enum
+import math
+from types import NoneType, UnionType
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin
 from urllib.parse import urljoin
 
-import httpx
+import httpx2
 
 from vibe import __version__
 from vibe.core.config import ProviderConfig, VibeConfigSchema
 from vibe.core.config.admin_config import AdminConfigOutcome
-from vibe.core.llm.format import ResolvedToolCall
+from vibe.core.platform_auth import (
+    PlatformCredentialFactory,
+    PlatformCredentialRequired,
+    PlatformCredentialTarget,
+)
+from vibe.core.platform_auth._mistral import (
+    MistralCredentials,
+    fetched_for_current_account,
+    is_user_principal,
+    mistral_credentials,
+    resolve_principal,
+    resolve_snapshot,
+)
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AttachmentKind,
     ExperimentAssignment,
     LaunchContext,
-    ProjectPickerTelemetryPayload,
-    RemoteProjectOutcome,
     TelemetryCallType,
-    TeleportContextSummaryStatus,
-    TeleportFailureDetails,
-    TeleportFailureStage,
 )
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
@@ -34,7 +43,6 @@ from vibe.utils.http import (
 )
 
 if TYPE_CHECKING:
-    from vibe.core.agent_loop import ToolDecision
     from vibe.core.experiments.active import ExperimentSurface
     from vibe.core.experiments.models import ExperimentAttributes
 
@@ -42,10 +50,46 @@ _DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
 _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
 
 type SubagentOperation = Literal[
-    "list", "spawn", "wait", "send_message", "interrupt", "close"
+    "list", "list_configs", "spawn", "wait", "send_message", "interrupt", "close"
 ]
 type SubagentOutcome = Literal["success", "failure", "timeout"]
 type SubagentProfileSource = Literal["generic", "vibe_profile"]
+# What moved the session to another mode: the user, uninstalling the agent it
+# ran, the org config disabling its mode, or a move (a worktree) to a folder
+# without its mode. Resuming a session whose saved mode is gone is not a move:
+# it starts in the default mode.
+type AgentModeTrigger = Literal[
+    "user", "agent_uninstalled", "org_policy", "agent_unavailable"
+]
+
+
+type ConfigValue = bool | int | float | str | None
+
+
+def config_snapshot(config: VibeConfigSchema) -> dict[str, ConfigValue]:
+    """The live bool, number and enum settings; strings and lists can hold PII."""
+    snapshot: dict[str, ConfigValue] = {}
+    for name, field in type(config).model_fields.items():
+        if field.deprecated or not _is_safe_config_type(field.annotation):
+            continue
+        value = getattr(config, name)
+        if isinstance(value, Enum):
+            value = value.value
+        # JSON has no inf or nan: one would drop the whole event.
+        if isinstance(value, float) and not math.isfinite(value):
+            value = None
+        snapshot[name] = value
+    return snapshot
+
+
+def _is_safe_config_type(annotation: Any) -> bool:
+    if get_origin(annotation) in {Union, UnionType}:
+        return all(_is_safe_config_type(arg) for arg in get_args(annotation))
+    if annotation is NoneType:
+        return True
+    return isinstance(annotation, type) and issubclass(
+        annotation, (bool, int, float, Enum)
+    )
 
 
 def get_mistral_provider_and_api_key(
@@ -72,11 +116,61 @@ def get_mistral_provider_and_api_key(
     return provider, api_key
 
 
-def _extract_file_extension(path: object) -> str | None:
-    if not isinstance(path, (str, Path)):
+def mistral_credential_cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
+    """Stable, anonymous cache key for the Mistral credential and tenant.
+
+    The shared key for managed config, experiment eval, and model catalog:
+    the credential's principal (the hashed API key, or the user and tenant).
+    None means no credential or no known principal, so the caller has no
+    entry to read or write. Never refreshes nor reaches the network.
+    """
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
         return None
-    suffix = Path(path).suffix.lower()
-    return suffix or None
+    return mistral.cached_principal()
+
+
+async def resolve_credential_cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
+    """The principal a fetch starts under, resolving the credential when it is
+    not known yet (a token refresh, a tenant discovery).
+
+    Pass it to the store as ``fetched_for``: a user token's principal, unlike
+    an API key's, does not name the material a request carried, so the store
+    keeps only a response fetched for the account still signed in. ``None``
+    when it cannot be resolved in time (fetch, but cache nothing).
+    """
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
+        return None
+    return await resolve_principal(mistral)
+
+
+def credential_cache_key_is_current(
+    fetched_for: str,
+    config: VibeConfigSchema | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> bool:
+    """``fetched_for_current_account`` for a fetch that holds the config."""
+    mistral = mistral_credentials(config, credentials) if config is not None else None
+    if mistral is None:
+        return not is_user_principal(fetched_for)
+    return fetched_for_current_account(mistral.credentials, fetched_for)
+
+
+def _subagent_depth(caller_agent_path: str) -> int:
+    """Depth of the subagent level an operation acts on: the caller's depth + 1.
+
+    Agent paths are absolute (``/root``, ``/root/research``), so the number of
+    segments is the caller's depth (root = 0) plus one.
+    """
+    segments = [segment for segment in caller_agent_path.split("/") if segment]
+    if not caller_agent_path.startswith("/") or not segments:
+        raise ValueError(f"not an absolute agent path: {caller_agent_path!r}")
+    return len(segments)
 
 
 def send_unified_subagent_tool_call_finished(
@@ -85,7 +179,9 @@ def send_unified_subagent_tool_call_finished(
     operation: SubagentOperation,
     outcome: SubagentOutcome,
     model: str,
+    caller_agent_path: str,
     profile_source: SubagentProfileSource | None = None,
+    message_id: str | None = None,
 ) -> None:
     """Record one terminal Unified subagent operation without user content.
 
@@ -93,10 +189,14 @@ def send_unified_subagent_tool_call_finished(
     legacy ``ResolvedToolCall`` path. Keep their analytics on the existing
     tool-finished event while exposing only the approved low-cardinality
     dimensions. In particular, never add agent names, child IDs, prompts,
-    paths, or error messages here.
+    paths, or error messages here: ``caller_agent_path`` is reduced to the
+    ``subagent_depth`` integer and never emitted.
     """
     core_operation = "stop" if operation == "close" else operation
     payload: dict[str, Any] = {
+        # An analytics key, not a wire name: Core's tools are now `agents.*`,
+        # but this keeps the pre-rename `subagent.<op>` spelling on purpose so
+        # dashboards built on it stay continuous. Do not rename it.
         "tool_name": f"subagent.{core_operation}",
         "status": "success" if outcome == "success" else "failure",
         "decision": None,
@@ -106,47 +206,58 @@ def send_unified_subagent_tool_call_finished(
         "nb_files_created": 0,
         "nb_files_modified": 0,
         "file_extension": None,
-        "message_id": None,
+        "message_id": message_id,
         "subagent_operation": operation,
         "subagent_outcome": outcome,
-        "subagent_depth": 1,
+        "subagent_depth": _subagent_depth(caller_agent_path),
     }
     if profile_source is not None:
         payload["subagent_profile_source"] = profile_source
     client.send_telemetry_event("vibe.tool_call_finished", payload)
 
 
-def send_unified_tool_call_finished(
+def send_unified_tool_call_finished(  # noqa: PLR0913
     client: TelemetryClient,
     *,
     tool_name: str,
     status: Literal["success", "failure", "skipped"],
     model: str,
     agent_profile_name: str | None,
+    approval_policy: str | None = None,
     nb_files_created: int = 0,
     nb_files_modified: int = 0,
     file_extension: str | None = None,
     message_id: str | None = None,
+    decision: Literal["execute", "skip"] | None = None,
+    approval_type: Literal["always", "never", "ask"] | None = None,
+    approval_source: Literal["config", "smart", "user", "bypass", "never"]
+    | None = None,
+    error_code: str | None = None,
+    error_reason: str | None = None,
 ) -> None:
     """Record one terminal ordinary (non-subagent) Unified tool call.
 
     The harness runs tool calls in Core, so they never pass through the legacy
     ``ResolvedToolCall`` path. Hand-build the same ``vibe.tool_call_finished``
     payload the legacy loop emits, sourcing name/status/file counts from the
-    reconciled effect. ``decision``/``approval_type`` are unavailable in the
-    snapshot and stay ``None`` (the harness resolves approvals in Core).
+    reconciled effect and ``decision``/``approval_type``/``approval_source``
+    from the effect state.
     """
     payload: dict[str, Any] = {
         "tool_name": tool_name,
         "status": status,
-        "decision": None,
-        "approval_type": None,
+        "decision": decision,
+        "approval_type": approval_type,
+        "approval_source": approval_source,
         "agent_profile_name": agent_profile_name,
+        "approval_policy": approval_policy,
         "model": model,
         "nb_files_created": nb_files_created,
         "nb_files_modified": nb_files_modified,
         "file_extension": file_extension,
         "message_id": message_id,
+        "error_code": error_code,
+        "error_reason": error_reason,
     }
     client.send_telemetry_event("vibe.tool_call_finished", payload)
 
@@ -164,8 +275,10 @@ class TelemetryClient:
             Callable[[], ExperimentAttributes | None] | None
         ) = None,
         harness_backend: ExperimentSurface | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> None:
         self._config_getter = config_getter
+        self._credentials = credentials
         self._session_id_getter = session_id_getter
         self._parent_session_id_getter = parent_session_id_getter
         self._launch_context = launch_context
@@ -181,12 +294,8 @@ class TelemetryClient:
         base = get_server_url_from_api_base(api_base) or _DEFAULT_TELEMETRY_BASE_URL
         return urljoin(base.rstrip("/"), _DATALAKE_EVENTS_PATH)
 
-    def _get_mistral_api_key(self) -> str | None:
-        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
-        if provider_and_api_key is None:
-            return None
-        _, api_key = provider_and_api_key
-        return api_key
+    def _mistral(self) -> MistralCredentials | None:
+        return mistral_credentials(self._config_getter(), self._credentials)
 
     def _is_enabled(self) -> bool:
         try:
@@ -195,14 +304,14 @@ class TelemetryClient:
             return False
 
     def is_active(self) -> bool:
-        return self._is_enabled() and self._get_mistral_api_key() is not None
+        return self._is_enabled() and self._mistral() is not None
 
     @property
     def client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(5.0),
-                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                timeout=httpx2.Timeout(5.0),
+                limits=httpx2.Limits(max_keepalive_connections=5, max_connections=10),
                 verify=build_ssl_context(),
             )
         return self._client
@@ -260,12 +369,12 @@ class TelemetryClient:
     ) -> None:
         if not self._is_enabled():
             return
-        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
-        if provider_and_api_key is None:
+        mistral = self._mistral()
+        if mistral is None:
             return
-        provider, mistral_api_key = provider_and_api_key
-        telemetry_url = self._get_telemetry_url(provider.api_base)
-        user_agent = get_user_agent(provider.backend)
+        credentials = mistral.credentials
+        telemetry_url = self._get_telemetry_url(mistral.provider.api_base)
+        user_agent = get_user_agent(mistral.provider.backend)
         properties = self.build_client_event_metadata() | properties
         logger.debug(
             "telemetry event=%s properties=%s correlation_id=%s",
@@ -280,15 +389,32 @@ class TelemetryClient:
 
         async def _send() -> None:
             try:
-                await self.client.post(
-                    telemetry_url,
-                    json=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {mistral_api_key}",
-                        "User-Agent": user_agent,
-                    },
-                )
+                # Bound credential resolution (a token refresh) too.
+                async with asyncio.timeout(5):
+                    snapshot = await resolve_snapshot(credentials, telemetry_url)
+                    if isinstance(snapshot, PlatformCredentialRequired):
+                        return
+                    extra: dict[str, Any] = (
+                        {}
+                        if snapshot.follows_redirects
+                        else {"follow_redirects": False}
+                    )
+                    response = await self.client.post(
+                        telemetry_url,
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            **snapshot.headers,
+                            "User-Agent": user_agent,
+                        },
+                        **extra,
+                    )
+                    if response.status_code == httpx2.codes.UNAUTHORIZED:
+                        await credentials.reject(
+                            PlatformCredentialTarget(telemetry_url),
+                            observed=snapshot.identity,
+                            reason="http_unauthorized",
+                        )
             except Exception:
                 pass  # Silently swallow all exceptions for fire-and-forget telemetry
 
@@ -302,87 +428,6 @@ class TelemetryClient:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-
-    def _calculate_file_metrics(
-        self,
-        tool_call: ResolvedToolCall,
-        status: Literal["success", "failure", "skipped"],
-        result: dict[str, Any] | None = None,
-    ) -> tuple[int, int, str | None]:
-        nb_files_created = 0
-        nb_files_modified = 0
-        file_extension: str | None = None
-        if status == "success" and result is not None:
-            match tool_call.tool_name:
-                case "write_file":
-                    nb_files_created = 1
-                    file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("file_path")
-                    )
-                case "edit":
-                    nb_files_modified = 1
-                    file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("file_path")
-                    )
-                case "read_file":
-                    file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("file_path")
-                    )
-        return nb_files_created, nb_files_modified, file_extension
-
-    def _extract_bash_background(
-        self, tool_call: ResolvedToolCall, result: dict[str, Any] | None
-    ) -> bool | None:
-        # Result reports the actual mode (a sync command that soft-timed-out
-        # becomes background); fall back to the requested mode on the failure
-        # path where no result is available.
-        if result is not None and isinstance(result.get("background"), bool):
-            return result["background"]
-        requested = tool_call.args_dict.get("background")
-        return requested if isinstance(requested, bool) else None
-
-    def send_tool_call_finished(
-        self,
-        *,
-        tool_call: ResolvedToolCall,
-        status: Literal["success", "failure", "skipped"],
-        decision: ToolDecision | None,
-        agent_profile_name: str,
-        model: str,
-        result: dict[str, Any] | None = None,
-        message_id: str | None = None,
-    ) -> None:
-        verdict_value = decision.verdict.value if decision else None
-        approval_type_value = decision.approval_type.value if decision else None
-
-        nb_files_created, nb_files_modified, file_extension = (
-            self._calculate_file_metrics(tool_call, status, result)
-        )
-        bash_background = self._extract_bash_background(tool_call, result)
-
-        payload: dict[str, Any] = {
-            "tool_name": tool_call.tool_name,
-            "status": status,
-            "decision": verdict_value,
-            "approval_type": approval_type_value,
-            "agent_profile_name": agent_profile_name,
-            "model": model,
-            "nb_files_created": nb_files_created,
-            "nb_files_modified": nb_files_modified,
-            "file_extension": file_extension,
-            "message_id": message_id,
-        }
-        if bash_background is not None:
-            payload["bash_background"] = bash_background
-        self.send_telemetry_event("vibe.tool_call_finished", payload)
-
-    def send_user_copied_text(self, text: str) -> None:
-        payload = {"text_length": len(text)}
-        self.send_telemetry_event("vibe.user_copied_text", payload)
-
-    def send_user_cancelled_action(self, action: str) -> None:
-        payload = {"action": action}
-        self.send_telemetry_event("vibe.user_cancelled_action", payload)
 
     def send_auto_compact_triggered(
         self,
@@ -416,14 +461,19 @@ class TelemetryClient:
             payload["parent_session_id"] = parent_session_id
         self.send_telemetry_event("vibe.compaction_failed", payload)
 
-    def send_slash_command_used(
-        self, command: str, command_type: Literal["builtin", "skill"]
-    ) -> None:
-        payload = {"command": command.lstrip("/"), "command_type": command_type}
-        self.send_telemetry_event("vibe.slash_command_used", payload)
-
     def send_new_session(
-        self, has_agents_md: bool, nb_skills: int, nb_mcp_servers: int, nb_models: int
+        self,
+        has_agents_md: bool,
+        nb_skills: int,
+        nb_mcp_servers: int,
+        nb_models: int,
+        *,
+        has_outside_workdir_deny: bool,
+        nb_post_agent_scoped_hooks: int,
+        nb_post_agent_main_hooks: int,
+        nb_hooks_by_type: Mapping[str, int] | None = None,
+        started_by_session_id: str | None = None,
+        start_link: Literal["attached", "detached"] | None = None,
     ) -> None:
         lc = self._launch_context
         payload = {
@@ -431,6 +481,14 @@ class TelemetryClient:
             "nb_skills": nb_skills,
             "nb_mcp_servers": nb_mcp_servers,
             "nb_models": nb_models,
+            "has_outside_workdir_deny": has_outside_workdir_deny,
+            "nb_post_agent_scoped_hooks": nb_post_agent_scoped_hooks,
+            "nb_post_agent_main_hooks": nb_post_agent_main_hooks,
+            # One count per hook type (``nb_hooks_pre_tool``...), plugins included.
+            **{
+                f"nb_hooks_{hook_type}": count
+                for hook_type, count in (nb_hooks_by_type or {}).items()
+            },
             "entrypoint": lc.agent_entrypoint if lc else "unknown",
             "host_kind": "local",
             "version": __version__,
@@ -441,11 +499,120 @@ class TelemetryClient:
                 if lc and lc.terminal_emulator is not None
                 else None
             ),
+            "config": config_snapshot(self._config_getter()),
         }
+        if start_link is not None:
+            payload["started_by_session_id"] = started_by_session_id
+            payload["start_link"] = start_link
         self.send_telemetry_event("vibe.new_session", payload)
 
-    def send_session_closed(self) -> None:
-        self.send_telemetry_event("vibe.session_closed", {})
+    def send_session_closed(self, *, reason: str) -> None:
+        # ``exit``, ``clear``, ``other`` or ``client_disconnected``.
+        self.send_telemetry_event("vibe.session_closed", {"reason": reason})
+
+    def send_config_updated(
+        self, *, fields: list[str], target_layers: list[str]
+    ) -> None:
+        # Field names only: values and the client's free-text reason can hold PII.
+        payload = {"fields": fields, "target_layers": target_layers}
+        self.send_telemetry_event("vibe.config.updated", payload)
+
+    def send_agent_mode_selected(
+        self, *, from_agent: str, to_agent: str, trigger: AgentModeTrigger
+    ) -> None:
+        """Record the session moving from one agent to another."""
+        payload = {"from_agent": from_agent, "to_agent": to_agent, "trigger": trigger}
+        self.send_telemetry_event("vibe.agent_mode.selected", payload)
+
+    def send_approval_policy_selected(
+        self, *, from_policy: str, to_policy: str, trigger: AgentModeTrigger
+    ) -> None:
+        """Record the session moving from one approval policy to another."""
+        payload = {
+            "from_policy": from_policy,
+            "to_policy": to_policy,
+            "trigger": trigger,
+        }
+        self.send_telemetry_event("vibe.approval_policy.selected", payload)
+
+    def send_tool_approval_resolved(
+        self,
+        *,
+        tool_name: str,
+        decision: str,
+        path_scope: str | None,
+        agent_profile_name: str | None,
+        approval_policy: str | None,
+        wait_ms: int,
+        is_subagent: bool,
+        has_feedback: bool,
+        message_id: str | None,
+    ) -> None:
+        """Record the user's answer to one tool approval prompt.
+
+        ``vibe.tool_call_finished`` sees only whether the call ran: not how far
+        an approval reaches (once, session, permanently, path scope), a turn
+        the answer cancelled, or how long the user took. ``has_feedback`` stands
+        for the free-text reason, which is never sent. ``agent_profile_name`` and
+        ``approval_policy`` are None for a subagent's prompt, which runs under
+        the subagent's profile.
+        """
+        payload = {
+            "tool_name": tool_name,
+            "decision": decision,
+            "path_scope": path_scope,
+            "agent_profile_name": agent_profile_name,
+            "approval_policy": approval_policy,
+            "wait_ms": wait_ms,
+            "is_subagent": is_subagent,
+            "has_feedback": has_feedback,
+            "message_id": message_id,
+        }
+        self.send_telemetry_event("vibe.tool_approval.resolved", payload)
+
+    def send_turn_failed(
+        self, *, error_code: str | None, http_status: int | None, message_id: str | None
+    ) -> None:
+        payload = {
+            "error_code": error_code,
+            "http_status": http_status,
+            "message_id": message_id,
+        }
+        self.send_telemetry_event("vibe.turn.failed", payload)
+
+    def send_remote_plugins_sync_done(
+        self,
+        *,
+        status: str,
+        error_type: str | None,
+        skip_reason: str | None,
+        trigger: str,
+        listed_count: int,
+        enabled_count: int,
+        downloaded_count: int,
+        failed_count: int,
+        duration_ms: int,
+    ) -> None:
+        """One sync of the user's plugin library (``vibe.core.plugins.remote``).
+
+        Counts and codes only: plugin names, ids and messages stay out.
+        """
+        payload = {
+            "status": status,
+            "error_type": error_type,
+            "skip_reason": skip_reason,
+            "trigger": trigger,
+            "listed_count": listed_count,
+            "enabled_count": enabled_count,
+            "downloaded_count": downloaded_count,
+            "failed_count": failed_count,
+            "duration_ms": duration_ms,
+        }
+        self.send_telemetry_event("vibe.remote_plugins.sync.done", payload)
+
+    def send_hook_triggered(self, *, hook_type: str, from_plugin: bool) -> None:
+        payload = {"hook_type": hook_type, "from_plugin": from_plugin}
+        self.send_telemetry_event("vibe.hook.triggered", payload)
 
     def send_admin_config_applied(
         self,
@@ -475,11 +642,13 @@ class TelemetryClient:
         nb_context_messages: int,
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
+        reasoning_effort: str,
         message_id: str | None = None,
         attachment_counts: dict[AttachmentKind, int] | None = None,
     ) -> None:
         payload = {
             "model": model,
+            "reasoning_effort": reasoning_effort,
             "nb_context_chars": nb_context_chars,
             "nb_context_messages": nb_context_messages,
             "nb_prompt_chars": nb_prompt_chars,
@@ -494,25 +663,42 @@ class TelemetryClient:
         }
         self.send_telemetry_event("vibe.request_sent", payload)
 
+    def send_tool_call_detected(
+        self,
+        *,
+        model: str,
+        backend: str,
+        api_style: str,
+        call_type: TelemetryCallType,
+        reasons: list[str],
+        nb_unusable_attempts: int,
+        nb_dropped_tool_calls: int,
+        status: Literal["success", "error"],
+        message_id: str | None = None,
+    ) -> None:
+        """Record one model request whose responses broke the tool call contract.
+
+        Sent once per request, when it ends, and only when the runtime had to
+        repair at least one response. Carries counts and closed values only:
+        never tool names, arguments, or response text.
+        """
+        payload = {
+            "model": model,
+            "backend": backend,
+            "api_style": api_style,
+            "call_source": "vibe_code",
+            "call_type": call_type,
+            "message_id": message_id,
+            "reasons": reasons,
+            "nb_unusable_attempts": nb_unusable_attempts,
+            "nb_dropped_tool_calls": nb_dropped_tool_calls,
+            "status": status,
+        }
+        self.send_telemetry_event("vibe.tool_call.detected", payload)
+
     def send_ready(self, *, init_duration_ms: int) -> None:
         payload = {"init_duration_ms": init_duration_ms}
         self.send_telemetry_event("vibe.ready", payload)
-
-    def send_at_mention_inserted(
-        self,
-        *,
-        nb_mentions: int,
-        context_types: dict[str, int],
-        file_extensions: dict[str, int] | None,
-        message_id: str | None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "nb_mentions": nb_mentions,
-            "context_types": context_types,
-            "file_extensions": file_extensions,
-            "message_id": message_id,
-        }
-        self.send_telemetry_event("vibe.at_mention_inserted", payload)
 
     def send_user_rating_feedback(self, rating: int, model: str) -> None:
         self.send_telemetry_event(
@@ -520,56 +706,3 @@ class TelemetryClient:
             {"rating": rating, "version": __version__, "model": model},
             correlation_id=self.last_correlation_id,
         )
-
-    def send_teleport_completed(
-        self,
-        *,
-        push_required: bool,
-        nb_session_messages: int,
-        context_summary: TeleportContextSummaryStatus = "skipped",
-        context_summary_chars: int | None = None,
-        project_picker: ProjectPickerTelemetryPayload | None = None,
-    ) -> None:
-        payload: dict[str, object] = {
-            "push_required": push_required,
-            "nb_session_messages": nb_session_messages,
-            "context_summary": context_summary,
-            "context_summary_chars": context_summary_chars,
-        }
-        if project_picker is not None:
-            payload.update(project_picker)
-        self.send_telemetry_event("vibe.teleport_completed", dict(payload))
-
-    def send_teleport_failed(
-        self,
-        *,
-        stage: TeleportFailureStage,
-        error_class: str,
-        push_required: bool,
-        nb_session_messages: int,
-        context_summary: TeleportContextSummaryStatus = "skipped",
-        context_summary_chars: int | None = None,
-        error_details: TeleportFailureDetails | None = None,
-        project_picker: ProjectPickerTelemetryPayload | None = None,
-    ) -> None:
-        payload: dict[str, object] = {
-            "stage": stage,
-            "error_class": error_class,
-            "push_required": push_required,
-            "nb_session_messages": nb_session_messages,
-            "context_summary": context_summary,
-            "context_summary_chars": context_summary_chars,
-            **(error_details or {}),
-        }
-        if project_picker is not None:
-            payload.update(project_picker)
-        self.send_telemetry_event("vibe.teleport_failed", dict(payload))
-
-    def send_remote_project_configured(
-        self,
-        *,
-        outcome: RemoteProjectOutcome,
-        project_picker: ProjectPickerTelemetryPayload,
-    ) -> None:
-        payload: dict[str, object] = {"outcome": outcome, **project_picker}
-        self.send_telemetry_event("vibe.remote_project_configured", dict(payload))

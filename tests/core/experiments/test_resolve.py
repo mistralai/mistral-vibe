@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from vibe.core.experiments import resolve
 from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.models import EvalResponse
@@ -42,36 +44,38 @@ def test_config_variants_drops_baseline_keeps_typed_deviation() -> None:
     r = _resp({
         ExperimentName.SYSTEM_PROMPT.value: {"defaultValue": "cli"},  # baseline
         ExperimentName.SMART_APPROVE.value: {"defaultValue": True},  # deviation (bool)
-        ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": {}},  # baseline ({})
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
+            "defaultValue": {}
+        },  # baseline ({})
     })
     assert resolve.config_variants(r) == {ExperimentName.SMART_APPROVE.value: True}
 
 
 def test_config_variants_returns_typed_object() -> None:
-    payload = {"active_model": "glm-5-2"}
-    r = _resp({ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": payload}})
+    payload = {"default": "glm-5-2"}
+    r = _resp({ExperimentName.MODEL_CATALOG_FILTER.value: {"defaultValue": payload}})
     assert resolve.config_variants(r) == {
-        ExperimentName.CLI_MODEL_ROUTING.value: payload
+        ExperimentName.MODEL_CATALOG_FILTER.value: payload
     }
 
 
 def test_assignments_projects_in_experiment_track() -> None:
     r = _resp({
-        ExperimentName.CLI_EXTRA_MODELS.value: {
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
             "defaultValue": {},
             "rules": [
                 {
-                    "force": {"models": []},
+                    "force": {"hide": []},
                     "tracks": [
                         {
                             "experiment": {"key": "exp-key"},
                             "result": {
                                 "variationId": 1,
-                                "value": {"models": []},
+                                "value": {"hide": []},
                                 "inExperiment": True,
                                 "hashAttribute": "userId",
                                 "hashValue": "u1",
-                                "featureId": ExperimentName.CLI_EXTRA_MODELS.value,
+                                "featureId": ExperimentName.MODEL_CATALOG_FILTER.value,
                             },
                         }
                     ],
@@ -81,7 +85,7 @@ def test_assignments_projects_in_experiment_track() -> None:
     })
     a = resolve.assignments(r)
     assert len(a) == 1
-    assert a[0].experiment_id == ExperimentName.CLI_EXTRA_MODELS.value
+    assert a[0].experiment_id == ExperimentName.MODEL_CATALOG_FILTER.value
     assert a[0].experiment_name == "exp-key"
     assert a[0].in_experiment is True
 
@@ -110,4 +114,77 @@ def test_filter_to_known_drops_unknown_features() -> None:
     })
     assert set(resolve.filter_to_known(r).features) == {
         ExperimentName.SYSTEM_PROMPT.value
+    }
+
+
+def test_system_prompt_behavior_assignment_is_labelled_by_digest() -> None:
+    prompt = "You are a test prompt.\n" * 200
+    r = _resp({
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: {
+            "defaultValue": "",
+            "rules": [
+                {
+                    "force": prompt,
+                    "tracks": [
+                        {
+                            "experiment": {"key": "exp-key"},
+                            "result": {
+                                "variationId": 1,
+                                "value": prompt,
+                                "inExperiment": True,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    })
+
+    [assignment] = resolve.assignments(r)
+
+    assert assignment.variation_name == resolve.digest(prompt)
+    assert assignment.variation_name.startswith("sha256:")
+    assert len(assignment.variation_name) < 30
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_label"),
+    [({"key": "0", "variationId": 0}, "0"), ({"variationId": 0}, "0")],
+)
+def test_blank_system_prompt_behavior_arm_still_counts_as_an_exposure(
+    result: dict[str, Any], expected_label: str
+) -> None:
+    r = _resp({
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: {
+            "defaultValue": "",
+            "rules": [
+                {
+                    "force": "",
+                    "tracks": [
+                        {
+                            "experiment": {"key": "exp-key"},
+                            "result": {**result, "value": "", "inExperiment": True},
+                        }
+                    ],
+                }
+            ],
+        }
+    })
+
+    [assignment] = resolve.assignments(r)
+
+    assert assignment.experiment_id == ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value
+    assert assignment.variation_name == expected_label
+
+
+def test_loggable_variants_digest_only_the_system_prompt_behavior() -> None:
+    prompt = "You are a test prompt."
+    variants = {
+        ExperimentName.SYSTEM_PROMPT.value: "cli_ml4_2026-10_v2",
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: prompt,
+    }
+
+    assert resolve.loggable_variants(variants) == {
+        ExperimentName.SYSTEM_PROMPT.value: "cli_ml4_2026-10_v2",
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: resolve.digest(prompt),
     }

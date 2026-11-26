@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Literal, cast
-
-if TYPE_CHECKING:
-    from vibe.core.experiments.models import EvalResponse
+from typing import cast
 
 _HARNESS_DISTRIBUTION_MODULE = "mistralai_vibe_local_harness"
 _VIBE_HARNESS_MODULE = "mistralai_vibe_local_harness.vibe"
 
-_ROLLOUT_EXPERIMENT_KEY = "vibe_cli_unified_harness_rollout"
-
 
 class ExperimentalHarnessUnavailableError(RuntimeError):
-    pass
+    """The Unified Harness Runtime cannot load.
+
+    Raised at startup instead of falling back to the legacy harness: with the
+    Unified Harness as the required default runtime, a missing, incompatible,
+    or failed Runtime is a packaging or platform error, and silently running
+    a second engine would reintroduce the fallback this hard default removes.
+    """
 
 
 def experimental_harness_available() -> bool:
@@ -26,110 +25,57 @@ def experimental_harness_available() -> bool:
         return False
 
 
-def add_experimental_harness_argument(
-    parser: argparse.ArgumentParser,
-    *,
-    group: argparse._MutuallyExclusiveGroup | None = None,
-) -> None:
-    target: argparse.ArgumentParser | argparse._MutuallyExclusiveGroup = group or parser
-    target.add_argument(
-        "--experimental-harness",
-        action="store_true",
-        default=False,
-        help=(
-            "Use the experimental Unified Harness backend. Requires an "
-            "internal Unified Harness installation."
-            if experimental_harness_available()
-            else argparse.SUPPRESS
-        ),
+def runtime_startup_error(reason: str) -> ExperimentalHarnessUnavailableError:
+    """The actionable startup error for a Runtime that cannot load or start."""
+    return ExperimentalHarnessUnavailableError(
+        f"The Unified Harness runtime is required to start Vibe but could not "
+        f"be loaded: {reason}.\n"
+        "The runtime ships with the Vibe distribution. Reinstall or upgrade "
+        "Vibe (for example 'uv tool upgrade mistral-vibe')."
     )
 
 
-def add_smart_approve_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--smart-approve",
-        action="store_true",
-        default=False,
-        help=(
-            "Classify each tool call and auto-run the safe ones, prompting only for "
-            "risky ones. Requires --experimental-harness."
-            if experimental_harness_available()
-            else argparse.SUPPRESS
-        ),
-    )
+def require_experimental_harness() -> None:
+    """Fail startup when the Unified Harness Runtime cannot load or start.
 
-
-HarnessSelectionSource = Literal["flag", "rollout", "default", "flag-legacy"]
-
-
-@dataclass(frozen=True)
-class HarnessSelection:
-    """The resolved harness decision, combining CLI flags, the GrowthBook
-    rollout cache, and native-module availability.
+    Entry points that cannot propagate a mid-session failure into a clean
+    process abort — ACP, whose library converts a handler exception into a
+    per-session JSON-RPC error and keeps serving — call this before serving
+    so every failure mode aborts with the actionable message: a missing
+    distribution, a native extension that cannot import, an incompatible
+    pinned harness (missing factory or builtin-hook registry), or a failed
+    initialization. The probe constructs a candidate Host through the same
+    path the session runtime uses; ``create_harness_host`` is a pure Python
+    construction with no native side effects, so the probe host is simply
+    dropped.
     """
-
-    use_unified: bool
-    source: HarnessSelectionSource
-
-
-def _rollout_variant_from_cache(cached_eval: object | None) -> str | None:
-    """Extract the rollout variant from a cached EvalResponse, or ``None``.
-
-    A pure data lookup — no HTTP client, no ExperimentManager. The cache is
-    surface-agnostic (keyed by hashed API key), so this works regardless of
-    which surface the previous session ran on.
-    """
-    if cached_eval is None:
-        return None
-    features = getattr(cached_eval, "features", None)
-    if not isinstance(features, dict):
-        return None
-    feature = features.get(_ROLLOUT_EXPERIMENT_KEY)
-    if feature is None:
-        return None
-    value = feature.resolved_value()
-    if isinstance(value, str):
-        return value
-    return None
-
-
-def resolve_harness_selection(
-    *,
-    experimental_harness: bool,
-    legacy_harness: bool,
-    cached_eval: EvalResponse | None = None,
-) -> HarnessSelection:
-    """Resolve which harness to use, combining CLI flags, the GrowthBook
-    rollout cache, and native-module availability.
-
-    Precedence (highest wins):
-      1. ``--legacy-harness``  -> legacy (escape hatch)
-      2. ``--experimental-harness`` -> unified (if available; else fallback)
-      3. GrowthBook rollout cache -> unified (if available; else legacy)
-      4. Default -> legacy
-    """
-    if legacy_harness:
-        return HarnessSelection(use_unified=False, source="flag-legacy")
-
-    if experimental_harness:
-        return HarnessSelection(use_unified=True, source="flag")
-
-    variant = _rollout_variant_from_cache(cached_eval)
-    if variant == "unified" and experimental_harness_available():
-        return HarnessSelection(use_unified=True, source="rollout")
-
-    return HarnessSelection(use_unified=False, source="default")
+    if not experimental_harness_available():
+        raise runtime_startup_error(
+            f"the {_HARNESS_DISTRIBUTION_MODULE!r} package is not installed"
+        )
+    candidate = create_experimental_harness_host()
+    if not hasattr(candidate, "configure_hook_handlers"):
+        raise runtime_startup_error(
+            f"the runtime host is incompatible: {type(candidate).__name__} "
+            "has no configure_hook_handlers"
+        )
 
 
 def create_experimental_harness_host() -> object:
     try:
         module = import_module(_VIBE_HARNESS_MODULE)
         factory = cast(Callable[[], object], module.create_harness_host)
-    except (AttributeError, ModuleNotFoundError) as exc:
-        raise ExperimentalHarnessUnavailableError(
-            "The Unified Harness backend is not available"
+    except (AttributeError, ImportError, ModuleNotFoundError) as exc:
+        raise runtime_startup_error(f"{type(exc).__name__}: {exc}") from exc
+    # Smart approve needs no Host-global registration: the Runtime tool gate
+    # runs the classifier whenever a tool's mode is "classify", which the
+    # session's adapter config carries (and can flip live when the mode
+    # changes).
+    try:
+        return factory()
+    except ExperimentalHarnessUnavailableError:
+        raise
+    except Exception as exc:
+        raise runtime_startup_error(
+            f"initialization failed with {type(exc).__name__}: {exc}"
         ) from exc
-    # Smart approve needs no Host-global registration: the Runtime tool gate runs
-    # the classifier whenever a tool's mode is "classify", which the session's
-    # adapter config carries (and can flip live when the mode changes).
-    return factory()

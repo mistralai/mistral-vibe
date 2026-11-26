@@ -15,7 +15,8 @@ def build_test_app_config(
     *,
     voice_mode_enabled: bool = False,
     narrator_enabled: bool = False,
-    show_thinking_nodes: bool = False,
+    show_thinking_nodes: bool = True,
+    show_subagent_status_list: bool = True,
 ) -> ConfigView:
     return ConfigView(
         active_model=ModelConfigView(
@@ -31,17 +32,17 @@ def build_test_app_config(
         log_level=None,
         disable_welcome_banner_animation=False,
         autocopy_to_clipboard=True,
+        enable_file_autocomplete=True,
         file_watcher_for_autocomplete=False,
         ask_confirmation_on_exit=True,
-        show_greeting=True,
         voice_mode_enabled=voice_mode_enabled,
         narrator_enabled=narrator_enabled,
         show_thinking_nodes=show_thinking_nodes,
+        show_subagent_status_list=show_subagent_status_list,
         worktree_limit=15,
         enable_update_checks=True,
         enable_notifications=True,
         experimental_enable_tab_status=False,
-        vibe_code_enabled=True,
         models=[
             ModelConfigView(
                 name="test-model",
