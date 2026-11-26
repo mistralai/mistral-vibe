@@ -2266,6 +2266,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 and identity.parent_session_id == root_session_id
             ):
                 callbacks.extend(session.open_callbacks())
+                continue
+            # Also include local sessions started by the root session (e.g., code_local workers)
+            # These may not have a SubagentSessionIdentity but have started_by_session_id set
+            if session.started_by_session_id == root_session_id:
+                callbacks.extend(session.open_callbacks())
         return tuple(callbacks)
 
     async def respond_to_callback(self, root_session_id: str, params: object) -> object:
@@ -2283,7 +2288,9 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 isinstance(identity, SubagentSessionIdentity)
                 and identity.parent_session_id == root_session_id
             ):
-                raise HarnessSessionNotFoundError(session_id)
+                # Also allow responding to callbacks from local sessions started by root
+                if session.started_by_session_id != root_session_id:
+                    raise HarnessSessionNotFoundError(session_id)
         return await session.respond_to_callback(params)
 
     async def session_cwd(self, session_id: str) -> str | None:
