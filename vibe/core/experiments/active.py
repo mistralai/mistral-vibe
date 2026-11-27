@@ -23,6 +23,7 @@ class ExperimentName(StrEnum):
     REGISTRY_SKILLS = "vibe_cli_registry_skills"
     MISTRAL_MCP_CONNECTOR = "vibe_cli_mistral_mcp_connector"
     MODEL_CATALOG_FILTER = "vibe_cli_model_catalog_filter"
+    HIDE_MISTRAL_MEDIUM_LATEST = "vibe_cli_hide_mistral_medium_latest"
     STORAGE_USAGE = "vibe_storage_usage"
 
 
@@ -35,6 +36,7 @@ DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
     ExperimentName.REGISTRY_SKILLS: False,
     ExperimentName.MISTRAL_MCP_CONNECTOR: False,
     ExperimentName.MODEL_CATALOG_FILTER: {},
+    ExperimentName.HIDE_MISTRAL_MEDIUM_LATEST: False,
     ExperimentName.STORAGE_USAGE: False,
 }
 
@@ -59,6 +61,7 @@ EXPERIMENT_SURFACES: Final[dict[ExperimentName, frozenset[ExperimentSurface]]] =
     ExperimentName.DEFAULT_AGENT: frozenset({ExperimentSurface.UNIFIED}),
     ExperimentName.MISTRAL_MCP_CONNECTOR: frozenset(ExperimentSurface),
     ExperimentName.MODEL_CATALOG_FILTER: frozenset(ExperimentSurface),
+    ExperimentName.HIDE_MISTRAL_MEDIUM_LATEST: frozenset(ExperimentSurface),
     ExperimentName.STORAGE_USAGE: frozenset(ExperimentSurface),
 }
 

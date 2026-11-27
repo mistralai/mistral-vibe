@@ -22,6 +22,7 @@ def test_every_experiment_declares_the_surfaces_it_applies_on() -> None:
         ExperimentName.SYSTEM_PROMPT,
         ExperimentName.REGISTRY_SKILLS,
         ExperimentName.MODEL_CATALOG_FILTER,
+        ExperimentName.HIDE_MISTRAL_MEDIUM_LATEST,
     ],
 )
 @pytest.mark.parametrize("surface", list(ExperimentSurface))
