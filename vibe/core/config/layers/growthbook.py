@@ -119,6 +119,14 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
             if catalog_filter is None
             else parse_catalog_filter(_as_json_value(catalog_filter))
         )
+        if self._variants.get(ExperimentName.HIDE_MISTRAL_MEDIUM_LATEST.value) is True:
+            spec = self._catalog_filter or {}
+            self._catalog_filter = {
+                **spec,
+                "hide": list(
+                    dict.fromkeys([*spec.get("hide", []), "mistral-medium-latest"])
+                ),
+            }
 
     @property
     def variants(self) -> Mapping[str, object]:

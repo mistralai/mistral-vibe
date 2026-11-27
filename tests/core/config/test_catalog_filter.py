@@ -25,6 +25,7 @@ from vibe.core.experiments.active import ExperimentName
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
 
 _LARGE = "mistral-large-4-0"
+_MEDIUM = "mistral-medium-latest"
 _GLM = "zai-glm-5-3"
 _FLASH = "zai-glm-5-3-flash"
 _DEVSTRAL = "devstral-2"
@@ -106,6 +107,67 @@ async def test_a_hidden_model_is_left_out_of_the_model_list() -> None:
 
     assert _FLASH not in config.models
     assert _catalog_order(config) == [_LARGE, _GLM, _DEVSTRAL]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("experiment_filter", "hide_medium", "expected_thinking", "expected_models"),
+    [
+        (None, True, "high", [_LARGE, _FLASH]),
+        ({"hide": [_FLASH]}, False, "high", [_LARGE, _MEDIUM]),
+        ({"hide": [_FLASH]}, True, "high", [_LARGE]),
+        (
+            {"hide": [_FLASH], "settings": {_LARGE: {"thinking": "medium"}}},
+            False,
+            "medium",
+            [_LARGE, _MEDIUM],
+        ),
+        (
+            {"hide": [_FLASH], "settings": {_LARGE: {"thinking": "medium"}}},
+            True,
+            "medium",
+            [_LARGE],
+        ),
+    ],
+    ids=[
+        "outside-reasoning-test",
+        "team-high",
+        "non-team-high",
+        "team-medium",
+        "non-team-medium",
+    ],
+)
+async def test_medium_exclusion_composes_with_the_reasoning_experiment(
+    experiment_filter: dict[str, Any] | None,
+    hide_medium: bool,
+    expected_thinking: str,
+    expected_models: list[str],
+) -> None:
+    orchestrator = await build_default_orchestrator()
+    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
+    assert isinstance(growthbook, GrowthbookLayer)
+    variants: dict[str, object] = {
+        ExperimentName.HIDE_MISTRAL_MEDIUM_LATEST.value: hide_medium
+    }
+    if experiment_filter is not None:
+        variants[ExperimentName.MODEL_CATALOG_FILTER.value] = experiment_filter
+    growthbook.set_variants(variants)
+    catalog = parse_model_catalog_response({
+        "models": [
+            _entry(
+                _LARGE,
+                recommended=True,
+                parameters={"reasoning": ["low", "medium", "high"]},
+            ),
+            _entry(_MEDIUM),
+            _entry(_FLASH),
+        ]
+    })
+    assert catalog is not None
+    await apply_model_catalog(orchestrator, catalog)
+
+    assert _catalog_order(orchestrator.config) == expected_models
+    assert orchestrator.config.models[_LARGE].thinking == expected_thinking
 
 
 @pytest.mark.asyncio
